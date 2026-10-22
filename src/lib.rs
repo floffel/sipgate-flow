@@ -12,7 +12,7 @@
 //!
 //! let action = Action::say("Willkommen!");
 //! assert_eq!(action.kind(), "tts");
-//! # Ok::<(), serde_json::Error>(())
+//! # Ok::<(), sipgate_flow::Error>(())
 //! ```
 
 #![forbid(unsafe_code)]
