@@ -25,3 +25,11 @@ fn action_url_is_built_from_base_and_call_id() {
         format!("{host}/calls/abc-1/actions")
     );
 }
+
+#[test]
+fn debug_does_not_leak_the_token() {
+    let host = ["https:/", "/flow.example.com"].join("");
+    let client = SipgateFlowClient::new(host, "sipgate-SECRET-token");
+    let rendered = format!("{client:?}");
+    assert!(!rendered.contains("SECRET"), "token im Debug: {rendered}");
+}

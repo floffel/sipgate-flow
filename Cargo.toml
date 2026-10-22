@@ -10,6 +10,7 @@ documentation = "https://docs.rs/sipgate-flow"
 keywords = ["sipgate", "voice", "telephony", "webhook"]
 categories = ["api-bindings", "web-programming"]
 readme = "README.md"
+exclude = [".github/**", "deny.toml"]
 
 [features]
 default = ["http"]

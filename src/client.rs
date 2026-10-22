@@ -4,7 +4,7 @@ use crate::action::Action;
 use crate::error::Result;
 
 /// Sends actions to the sipgate flow endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SipgateFlowClient {
     base_url: String,
     token: String,
@@ -67,5 +67,14 @@ impl SipgateFlowClient {
             return Ok(serde_json::json!({}));
         }
         serde_json::from_str(&body).map_err(|e| crate::Error::Payload(e.to_string()))
+    }
+}
+
+impl std::fmt::Debug for SipgateFlowClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the API token.
+        f.debug_struct("SipgateFlowClient")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
     }
 }
