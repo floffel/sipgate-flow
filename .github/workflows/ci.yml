@@ -43,10 +43,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      # cargo-fuzz defaults to the musl target on Linux for a static binary.
-      - run: rustup target add x86_64-unknown-linux-musl
+      # The default musl target cannot be combined with ASAN (`statically
+      # linked libc`), so build for the host triple instead.
       # Named targets: parse_event and parse_token (see fuzz/fuzz_targets).
-      - run: cargo fuzz build
+      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
 
   deny:
     runs-on: ubuntu-latest
