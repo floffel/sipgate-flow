@@ -1,0 +1,29 @@
+[package]
+name = "sipgate-flow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.sipgate-flow]
+path = ".."
+
+[[bin]]
+name = "parse_event"
+path = "fuzz_targets/parse_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_token"
+path = "fuzz_targets/parse_token.rs"
+test = false
+doc = false
+bench = false
