@@ -1,4 +1,12 @@
-//! `OAuth2` client credentials, with an expiry-aware token cache.
+//! Credentials and the expiry-aware token cache.
+//!
+//! Two shapes, two headers — the distinction sipgate's documentation makes
+//! (<https://en.sipgate.io/rest-api/authentication>):
+//!
+//! * [`PersonalAccessToken`] — `Authorization: Basic base64(<token id>:<token>)`.
+//!   This is the documented path for a server integration.
+//! * [`OAuth2Client`] — `Authorization: Bearer <access_token>`, fetched with the
+//!   `client_credentials` grant and cached until shortly before it expires.
 //!
 //! sipgate's token endpoint is Keycloak
 //! (`https://login.sipgate.com/auth/realms/third-party/protocol/openid-connect/token`).
@@ -231,9 +239,13 @@ impl ClientCredentials {
     }
 }
 
-/// An access token as the token endpoint returned it.
+/// A credential plus the scheme it goes out with.
 ///
-/// [`fmt::Debug`] redacts the token itself.
+/// The token endpoint returns `token_type` (always `bearer` for sipgate), and a
+/// [`PersonalAccessToken`] carries `basic`; [`Token::security`] turns that into
+/// the header the transport writes.
+///
+/// [`fmt::Debug`] redacts the secret.
 ///
 /// ```
 /// use sipgate_flow::Token;
@@ -251,6 +263,9 @@ impl ClientCredentials {
 pub struct Token {
     access_token: String,
     token_type: String,
+    /// Present only for [`Security::Basic`] credentials: the user half the
+    /// transport encodes alongside the secret.
+    username: Option<String>,
     expires_in: Option<Duration>,
     refresh_token: Option<String>,
     scope: Option<String>,
@@ -301,6 +316,7 @@ impl Token {
                 .filter(|kind| !kind.is_empty())
                 .unwrap_or("bearer")
                 .to_string(),
+            username: None,
             expires_in: value
                 .get("expires_in")
                 .and_then(Value::as_u64)
@@ -380,10 +396,51 @@ impl Token {
     pub fn scope(&self) -> Option<&str> {
         self.scope.as_deref()
     }
+
+    /// The `Authorization` header this credential goes out with.
+    ///
+    /// `bearer` (and every unrecognised scheme, which the transport then sends
+    /// as a bearer rather than dropping) maps to [`Security::Bearer`]; a
+    /// credential built by [`PersonalAccessToken`] maps to [`Security::Basic`],
+    /// which is how sipgate documents a PAT
+    /// (<https://en.sipgate.io/rest-api/authentication>).
+    ///
+    /// ```
+    /// use sipgate_flow::{Security, Token};
+    ///
+    /// let bearer = Token::from_json(&serde_json::json!({"access_token": "abc"}))?;
+    /// assert!(matches!(bearer.security(), Security::Bearer("abc")));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// ```
+    /// use sipgate_flow::{PersonalAccessToken, Security, TokenSource};
+    ///
+    /// # async fn demo() -> sipgate_flow::Result<()> {
+    /// let pat = PersonalAccessToken::new("token-FQ1V12", "e68ead46")?;
+    /// let credential = pat.access_token(false).await?;
+    /// assert!(matches!(
+    ///     credential.security(),
+    ///     Security::Basic { username: "token-FQ1V12", password: "e68ead46" }
+    /// ));
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn security(&self) -> Security<'_> {
+        match &self.username {
+            Some(username) if self.token_type.eq_ignore_ascii_case("basic") => Security::Basic {
+                username,
+                password: &self.access_token,
+            },
+            _ => Security::Bearer(&self.access_token),
+        }
+    }
 }
 
-/// Anything that can hand out a bearer token: a fixed string for a personal
-/// access token, or [`OAuth2Client`] for client credentials.
+/// Anything that can hand out a credential: a fixed string for a test double
+/// or an `OAuth2` access token ([`StaticToken`]), a sipgate Personal Access
+/// Token ([`PersonalAccessToken`]), or [`OAuth2Client`] for client credentials.
 ///
 /// `force_refresh` asks for a new token even if the cached one is still valid;
 /// it is how a 401 is answered. `invalidate` drops whatever is cached.
@@ -412,8 +469,10 @@ pub trait TokenSource: Send + Sync {
     fn invalidate(&self);
 }
 
-/// A token that never expires — a sipgate Personal Access Token used as a
-/// bearer, or a test double.
+/// A credential that never expires: an `OAuth2` access token, or a test double.
+///
+/// A sipgate *Personal Access Token* is not a bearer token — use
+/// [`PersonalAccessToken`], which sends the documented `Basic` header.
 ///
 /// ```
 /// use sipgate_flow::StaticToken;
@@ -458,6 +517,113 @@ impl TokenSource for StaticToken {
         std::future::ready(Ok(Token {
             access_token: self.0.clone(),
             token_type: "bearer".into(),
+            username: None,
+            expires_in: None,
+            refresh_token: None,
+            scope: None,
+        }))
+    }
+
+    fn invalidate(&self) {}
+}
+
+/// A sipgate **Personal Access Token**, sent the way sipgate documents it.
+///
+/// A PAT is *not* a bearer token: the REST API expects
+/// `Authorization: Basic base64(<token id>:<token>)`
+/// (<https://en.sipgate.io/rest-api/authentication>, and the same construction
+/// in sipgate's own `sipgateio` client). [`StaticToken`] stays for `OAuth2`
+/// access tokens, which are sent as `Bearer`.
+///
+/// ```no_run
+/// # #[cfg(feature = "http")]
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// use sipgate_flow::{PersonalAccessToken, ReqwestTransport, RestClient};
+///
+/// let auth = PersonalAccessToken::new(
+///     std::env::var("SIPGATE_TOKEN_ID")?,
+///     std::env::var("SIPGATE_TOKEN")?,
+/// )?;
+/// let client = RestClient::new(ReqwestTransport::new(), auth);
+/// for call in client.calls().await? {
+///     println!("{}", call.call_id);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct PersonalAccessToken {
+    token_id: String,
+    token: String,
+}
+
+impl fmt::Debug for PersonalAccessToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The token id is an identifier, not a secret; the token is both.
+        f.debug_struct("PersonalAccessToken")
+            .field("token_id", &self.token_id)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PersonalAccessToken {
+    /// Wraps a token id and token, refusing either half being empty.
+    ///
+    /// ```
+    /// use sipgate_flow::PersonalAccessToken;
+    ///
+    /// assert!(PersonalAccessToken::new("token-FQ1V12", "e68ead46").is_ok());
+    /// assert!(PersonalAccessToken::new("", "e68ead46").is_err());
+    /// assert!(PersonalAccessToken::new("token-FQ1V12", "").is_err());
+    /// assert!(PersonalAccessToken::new("token:FQ1V12", "e68ead46").is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::EmptyCredentials`] when either half is empty, and
+    /// [`Error::Validation`] when the token id contains a colon — the wire form
+    /// is `id:token`, so a colon in the id would silently move the boundary and
+    /// send a different credential than the caller configured.
+    pub fn new(token_id: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        let token_id = token_id.into();
+        let token = token.into();
+        if token_id.is_empty() || token.is_empty() {
+            return Err(Error::EmptyCredentials);
+        }
+        if token_id.contains(':') {
+            return Err(Error::Validation {
+                field: "token_id",
+                message: "must not contain ':' (the wire credential is `id:token`)".into(),
+            });
+        }
+        Ok(Self { token_id, token })
+    }
+
+    /// The token id (`token-FQ1V12` and friends), which is not a secret.
+    ///
+    /// ```
+    /// use sipgate_flow::PersonalAccessToken;
+    /// assert_eq!(PersonalAccessToken::new("token-FQ1V12", "x")?.token_id(), "token-FQ1V12");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn token_id(&self) -> &str {
+        &self.token_id
+    }
+}
+
+impl TokenSource for PersonalAccessToken {
+    fn access_token(
+        &self,
+        _force_refresh: bool,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
+        // `basic` is the scheme; the transport encodes `id:token` from the two
+        // halves, so the secret is never concatenated into one string here.
+        std::future::ready(Ok(Token {
+            access_token: self.token.clone(),
+            token_type: "basic".into(),
+            username: Some(self.token_id.clone()),
             expires_in: None,
             refresh_token: None,
             scope: None,

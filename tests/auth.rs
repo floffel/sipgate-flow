@@ -10,7 +10,8 @@ use std::time::Duration;
 use common::{json_response, response, FakeClock, MockTransport, RecordingSleeper};
 use sipgate_flow::auth::DEFAULT_TOKEN_URL;
 use sipgate_flow::{
-    ClientCredentials, Error, OAuth2Client, Result, StaticToken, Token, TokenSource,
+    ClientCredentials, Error, OAuth2Client, PersonalAccessToken, RestClient, Result, StaticToken,
+    Token, TokenSource,
 };
 
 fn credentials() -> ClientCredentials {
@@ -118,7 +119,11 @@ async fn the_token_request_targets_the_documented_endpoint_as_a_form_post() {
     let call = transport.only_call();
     assert_eq!(call.method.as_str(), "POST");
     assert_eq!(call.url, DEFAULT_TOKEN_URL);
-    assert_eq!(call.token, None, "the token call must not send a bearer");
+    assert_eq!(
+        call.auth,
+        common::Auth::None,
+        "the token call must not send a credential"
+    );
     assert_eq!(call.timeout, Some(Duration::from_secs(3)));
     let common::Body::Form(fields) = &call.body else {
         panic!("expected a form body, got {:?}", call.body);
@@ -315,4 +320,78 @@ async fn a_static_token_source_ignores_refresh_requests() {
 
 fn static_auth_token() -> StaticToken {
     StaticToken::new("pat-token").expect("non-empty")
+}
+
+#[tokio::test]
+async fn a_personal_access_token_goes_out_as_the_documented_basic_header() {
+    let transport = MockTransport::json(&serde_json::json!({"data": []}));
+    let auth = PersonalAccessToken::new("token-FQ1V12", "e68ead46").expect("non-empty");
+    let client = RestClient::new(transport.clone(), auth);
+    client.calls().await.expect("call");
+
+    let recorded = transport.only_call();
+    assert_eq!(
+        recorded.auth,
+        common::Auth::Basic {
+            username: "token-FQ1V12".to_string(),
+            password: "e68ead46".to_string(),
+        },
+        "a PAT is Basic id:token, not a bearer"
+    );
+}
+
+#[tokio::test]
+async fn a_pat_credential_carries_the_scheme_the_transport_needs() {
+    let pat = PersonalAccessToken::new("token-FQ1V12", "e68ead46").expect("non-empty");
+    let credential = pat.access_token(false).await.expect("credential");
+    assert_eq!(credential.token_type(), "basic");
+    assert_eq!(credential.security().basic_username(), Some("token-FQ1V12"));
+
+    let bearer = Token::from_json(&serde_json::json!({"access_token": "abc"})).expect("token");
+    assert_eq!(bearer.security().basic_username(), None);
+    // An unknown scheme degrades to a bearer instead of dropping the credential.
+    let odd = Token::from_json(&serde_json::json!({"access_token": "abc", "token_type": "MAC"}))
+        .expect("token");
+    assert_eq!(odd.security().basic_username(), None);
+}
+
+#[tokio::test]
+async fn an_empty_or_colon_bearing_token_id_fails_closed() {
+    assert!(matches!(
+        PersonalAccessToken::new("", "token"),
+        Err(Error::EmptyCredentials)
+    ));
+    assert!(matches!(
+        PersonalAccessToken::new("id", ""),
+        Err(Error::EmptyCredentials)
+    ));
+    assert!(matches!(
+        PersonalAccessToken::new("token:FQ1V12", "token"),
+        Err(Error::Validation {
+            field: "token_id",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_pat_never_prints_its_token() {
+    let pat = PersonalAccessToken::new("token-FQ1V12", "e68ead46").expect("non-empty");
+    let rendered = format!("{pat:?}");
+    assert!(!rendered.contains("e68ead46"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    assert_eq!(pat.token_id(), "token-FQ1V12");
+}
+
+#[tokio::test]
+async fn a_pat_is_never_refreshed_but_a_second_401_is_terminal() {
+    let transport = MockTransport::new();
+    transport.push_response(response(401, &[], b"{}"));
+    transport.push_response(response(401, &[], b"{}"));
+    let auth = PersonalAccessToken::new("token-FQ1V12", "e68ead46").expect("non-empty");
+    let client = RestClient::new(transport.clone(), auth);
+
+    assert!(matches!(client.calls().await, Err(Error::Unauthorized)));
+    assert_eq!(transport.call_count(), 2, "one retry, then stop");
+    assert_eq!(transport.calls()[1].auth, transport.calls()[0].auth);
 }

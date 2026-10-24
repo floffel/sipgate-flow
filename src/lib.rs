@@ -45,12 +45,14 @@
 //! ```no_run
 //! # #[cfg(feature = "http")]
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! use sipgate_flow::{rest::Sms, ReqwestTransport, RestClient, StaticToken};
+//! use sipgate_flow::{rest::Sms, PersonalAccessToken, ReqwestTransport, RestClient};
 //!
-//! let client = RestClient::new(
-//!     ReqwestTransport::new(),
-//!     StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?,
-//! );
+//! // A PAT goes out as `Authorization: Basic base64(id:token)`, as documented.
+//! let auth = PersonalAccessToken::new(
+//!     std::env::var("SIPGATE_TOKEN_ID")?,
+//!     std::env::var("SIPGATE_TOKEN")?,
+//! )?;
+//! let client = RestClient::new(ReqwestTransport::new(), auth);
 //! client.send_sms(&Sms::new("s0", "4915112345678", "Hallo!")?).await?;
 //! # Ok(())
 //! # }
@@ -79,7 +81,8 @@ mod exchange;
 mod validate;
 
 pub use auth::{
-    ClientCredentials, Clock, OAuth2Client, StaticToken, SystemClock, Token, TokenSource,
+    ClientCredentials, Clock, OAuth2Client, PersonalAccessToken, StaticToken, SystemClock, Token,
+    TokenSource,
 };
 pub use error::{Error, Result};
 pub use flow::action::{

@@ -54,8 +54,9 @@ impl Method {
 
 /// How the request authenticates.
 ///
-/// [`Security::Basic`] exists for the token endpoint, which takes
-/// `client_secret_basic`; everything else uses [`Security::Bearer`].
+/// [`Security::Basic`] covers both the token endpoint (`client_secret_basic`)
+/// and a sipgate Personal Access Token (`Basic base64(<token id>:<token>)`);
+/// everything else uses [`Security::Bearer`].
 ///
 /// ```
 /// use sipgate_flow::transport::Security;
@@ -72,13 +73,34 @@ pub enum Security<'a> {
     None,
     /// `Authorization: Bearer <token>`.
     Bearer(&'a str),
-    /// `Authorization: Basic base64(username:password)`.
+    /// `Authorization: Basic base64(<token id>:<token>)`.
     Basic {
         /// Client id (or PAT id).
         username: &'a str,
         /// Client secret (or PAT).
         password: &'a str,
     },
+}
+
+impl<'a> Security<'a> {
+    /// The user half of a `Basic` credential, or `None` for every other scheme.
+    ///
+    /// ```
+    /// use sipgate_flow::transport::Security;
+    ///
+    /// assert_eq!(Security::Bearer("t").basic_username(), None);
+    /// assert_eq!(
+    ///     Security::Basic { username: "token-FQ1V12", password: "s" }.basic_username(),
+    ///     Some("token-FQ1V12")
+    /// );
+    /// ```
+    #[must_use]
+    pub fn basic_username(&self) -> Option<&'a str> {
+        match self {
+            Self::Basic { username, .. } => Some(*username),
+            Self::None | Self::Bearer(_) => None,
+        }
+    }
 }
 
 /// What goes into the request body.

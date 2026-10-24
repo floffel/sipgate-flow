@@ -44,7 +44,7 @@ async fn send_sms_posts_the_documented_body() {
     let call = transport.only_call();
     assert_eq!(call.method.as_str(), "POST");
     assert_eq!(call.url, "https://api.sipgate.com/v2/sessions/sms");
-    assert_eq!(call.token.as_deref(), Some("pat-token"));
+    assert_eq!(call.auth.bearer(), Some("access-token"));
     assert_eq!(
         json_body(&call.body),
         serde_json::from_str::<serde_json::Value>(include_str!("fixtures/rest/sms_request.json"))
@@ -513,8 +513,8 @@ async fn a_401_refreshes_once_and_then_succeeds() {
     client.hangup("c1").await.expect("refresh worked");
     let calls = transport.calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].token.as_deref(), Some("t1"));
-    assert_eq!(calls[1].token.as_deref(), Some("t2"), "second token used");
+    assert_eq!(calls[0].auth.bearer(), Some("t1"));
+    assert_eq!(calls[1].auth.bearer(), Some("t2"), "second token used");
     assert!(sleeper.delays().is_empty(), "a refresh is not a backoff");
 }
 

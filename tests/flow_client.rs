@@ -29,7 +29,7 @@ async fn a_call_posts_billing_device_and_number_to_the_documented_path() {
         recorded.url,
         format!("https://api.sipgate.com/v3/ai-flows/{FLOW_ID}/call")
     );
-    assert_eq!(recorded.token.as_deref(), Some("pat-token"));
+    assert_eq!(recorded.auth.bearer(), Some("access-token"));
     assert_eq!(
         recorded.body,
         Body::Json(serde_json::json!({
@@ -96,8 +96,8 @@ async fn the_token_is_refreshed_once_on_401() {
 
     let calls = transport.calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].token.as_deref(), Some("t1"));
-    assert_eq!(calls[1].token.as_deref(), Some("t2"));
+    assert_eq!(calls[0].auth.bearer(), Some("t1"));
+    assert_eq!(calls[1].auth.bearer(), Some("t2"));
 }
 
 #[tokio::test]

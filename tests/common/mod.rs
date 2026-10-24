@@ -22,6 +22,33 @@ pub enum Body {
     Form(Vec<(String, String)>),
 }
 
+/// The credential a recorded request carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Auth {
+    /// No `Authorization` header.
+    None,
+    /// `Authorization: Bearer ...`.
+    Bearer(String),
+    /// `Authorization: Basic ...`, before encoding.
+    Basic {
+        /// The user half.
+        username: String,
+        /// The secret half.
+        password: String,
+    },
+}
+
+impl Auth {
+    /// The bearer token, when the request used one.
+    #[must_use]
+    pub fn bearer(&self) -> Option<&str> {
+        match self {
+            Self::Bearer(token) => Some(token),
+            _ => None,
+        }
+    }
+}
+
 /// One recorded call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
@@ -29,8 +56,8 @@ pub struct Call {
     pub method: Method,
     /// Full URL.
     pub url: String,
-    /// Bearer token, or `None` when the request was unauthenticated.
-    pub token: Option<String>,
+    /// Credential the request carried.
+    pub auth: Auth,
     /// Per-request timeout.
     pub timeout: Option<Duration>,
     /// Request body.
@@ -149,9 +176,13 @@ impl Transport for MockTransport {
             RequestBody::Form(fields) => Body::Form(fields.to_vec()),
             _ => Body::Empty,
         };
-        let token = match request.security {
-            sipgate_flow::Security::Bearer(token) => Some(token.to_string()),
-            _ => None,
+        let auth = match request.security {
+            sipgate_flow::Security::Bearer(token) => Auth::Bearer(token.to_string()),
+            sipgate_flow::Security::Basic { username, password } => Auth::Basic {
+                username: username.to_string(),
+                password: password.to_string(),
+            },
+            _ => Auth::None,
         };
 
         let reply = {
@@ -159,7 +190,7 @@ impl Transport for MockTransport {
             state.calls.push(Call {
                 method: request.method,
                 url: request.url.to_string(),
-                token,
+                auth,
                 timeout: request.timeout,
                 body,
             });
@@ -219,7 +250,7 @@ pub fn token_response(token: &str) -> Response {
 /// A static token source for REST tests.
 #[must_use]
 pub fn static_auth() -> StaticToken {
-    StaticToken::new("pat-token").expect("non-empty")
+    StaticToken::new("access-token").expect("non-empty")
 }
 
 /// Records every delay it was asked to wait, without waiting.
