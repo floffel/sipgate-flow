@@ -276,6 +276,7 @@ impl fmt::Debug for Token {
         f.debug_struct("Token")
             .field("access_token", &"<redacted>")
             .field("token_type", &self.token_type)
+            .field("username", &self.username)
             .field("expires_in", &self.expires_in)
             .field(
                 "refresh_token",

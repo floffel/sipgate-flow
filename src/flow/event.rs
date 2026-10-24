@@ -1,8 +1,9 @@
 //! Inbound events, parsed tolerantly.
 //!
-//! Every event documented by <https://flow.sipgate.io/api/events> has a typed
-//! payload; anything else lands in [`EventPayload::Unknown`] with the raw JSON
-//! intact. Unknown *fields* on known events are preserved in [`Event::extra`],
+//! Every event documented at <https://flow.sipgate.io/api/events> has a typed
+//! payload, plus `user_barge_in`, which only the official TypeScript SDK's
+//! schema publishes; anything else lands in [`EventPayload::Unknown`] with the
+//! raw JSON intact. Unknown *fields* on known events are preserved in [`Event::extra`],
 //! so a field sipgate adds tomorrow still reaches a caller that inspects the
 //! remainder.
 //!
@@ -443,6 +444,19 @@ pub enum EventPayload {
         /// Detected language, when the provider reports one.
         language: Option<String>,
     },
+    /// The caller barged in on the assistant's speech.
+    ///
+    /// Taken from the official SDK's event enum and schema
+    /// (`AiFlowEventUserBargeInSchema`, `@sipgate/ai-flow-sdk` 2.1.0); the
+    /// public docs' event table does not list it. [`Event::accepts_actions`]
+    /// answers `false` for it because the documentation's "Response
+    /// Requirements" table does not cover it either — the conservative answer
+    /// is `204`, and a handler that knows better can return
+    /// [`FlowResponse`](crate::FlowResponse) anyway.
+    UserBargeIn {
+        /// Recognised text of the interruption; empty when none was sent.
+        text: String,
+    },
     /// A keypad press.
     DtmfReceived {
         /// The key pressed: `0`-`9`, `*` or `#`.
@@ -505,6 +519,7 @@ impl EventPayload {
             Self::SessionStart { .. } => "session_start",
             Self::UserSpeechStarted => "user_speech_started",
             Self::UserSpeak { .. } => "user_speak",
+            Self::UserBargeIn { .. } => "user_barge_in",
             Self::DtmfReceived { .. } => "dtmf_received",
             Self::AssistantSpeak { .. } => "assistant_speak",
             Self::AssistantSpeechEnded => "assistant_speech_ended",
@@ -605,6 +620,9 @@ impl Event {
                 text: raw.text.unwrap_or_default(),
                 barged_in: raw.barged_in.unwrap_or(false),
                 language: raw.language,
+            },
+            Some("user_barge_in") => EventPayload::UserBargeIn {
+                text: raw.text.unwrap_or_default(),
             },
             Some("dtmf_received") => EventPayload::DtmfReceived {
                 // `digits` is the Push API spelling; accept it as a fallback.
@@ -803,6 +821,9 @@ impl Event {
                 if let Some(language) = language {
                     object.insert("language".into(), json!(language));
                 }
+            }
+            EventPayload::UserBargeIn { text } => {
+                object.insert("text".into(), json!(text));
             }
             EventPayload::DtmfReceived { digit } => {
                 object.insert("digit".into(), json!(digit));

@@ -23,6 +23,7 @@ const USER_INPUT_TIMEOUT: &str = include_str!("fixtures/flow/user_input_timeout.
 const SESSION_END: &str = include_str!("fixtures/flow/session_end.json");
 const SMS_FAILED: &str = include_str!("fixtures/flow/sms_failed.json");
 const ERROR_EVENT: &str = include_str!("fixtures/flow/error.json");
+const USER_BARGE_IN: &str = include_str!("fixtures/flow/user_barge_in.json");
 const UNKNOWN_EVENT: &str = include_str!("fixtures/flow/unknown_event.json");
 
 fn parse(body: &str) -> Event {
@@ -37,6 +38,7 @@ fn every_documented_event_parses_to_its_typed_payload() {
         (USER_SPEECH_STARTED, "user_speech_started"),
         (USER_SPEAK, "user_speak"),
         (USER_SPEAK_BARGED_IN, "user_speak"),
+        (USER_BARGE_IN, "user_barge_in"),
         (DTMF_RECEIVED, "dtmf_received"),
         (ASSISTANT_SPEAK, "assistant_speak"),
         (ASSISTANT_SPEECH_ENDED, "assistant_speech_ended"),
@@ -418,4 +420,33 @@ fn only_events_that_accept_actions_report_so() {
     for (body, accepts) in expected {
         assert_eq!(parse(body).accepts_actions(), accepts, "for {body}");
     }
+}
+
+#[test]
+fn user_barge_in_carries_the_interrupting_text() {
+    let event = parse(USER_BARGE_IN);
+    assert_eq!(event.kind(), "user_barge_in");
+    assert_eq!(
+        event.session_id(),
+        Some("550e8400-e29b-41d4-a716-446655440000")
+    );
+    match event.payload() {
+        EventPayload::UserBargeIn { text } => assert_eq!(text, "Moment, bitte"),
+        other => panic!("expected a user_barge_in payload, got {other:?}"),
+    }
+    // The documentation's response table does not cover this event, so the
+    // conservative answer stays 204 - and the handler may still override it.
+    assert!(!event.accepts_actions());
+    assert_eq!(
+        event.to_json(),
+        serde_json::from_str::<serde_json::Value>(USER_BARGE_IN).expect("fixture")
+    );
+}
+
+#[test]
+fn user_barge_in_without_text_still_parses() {
+    let event = parse(r#"{"type":"user_barge_in","session":{"id":"s1"}}"#);
+    assert_eq!(event.kind(), "user_barge_in");
+    assert_eq!(event.session_id(), Some("s1"));
+    assert!(matches!(event.payload(), EventPayload::UserBargeIn { text } if text.is_empty()));
 }

@@ -166,7 +166,7 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
     /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
     /// let call = OutboundCall::new("flow-id", "e2", "4915112345678")?;
     /// let created = client.call(&call).await?;
-    /// assert_eq!(created, serde_json::json!({})); // 201 has no documented body
+    /// println!("call sid: {:?}", created.call_sid());
     /// # Ok(())
     /// # }
     /// ```
@@ -175,7 +175,7 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
     ///
     /// [`crate::Error::Api`] for a non-2xx answer, plus transport and auth errors.
     /// There is no retry: starting a call twice would dial the number twice.
-    pub async fn call(&self, request: &OutboundCall) -> Result<Value> {
+    pub async fn call(&self, request: &OutboundCall) -> Result<OutboundCallReceipt> {
         let path = format!("/v3/ai-flows/{}/call", request.ai_flow_id());
         let body = request.to_json();
         let response = exchange::authorized(
@@ -189,7 +189,7 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
         )
         .await?;
         if response.is_success() {
-            return response.json();
+            return Ok(OutboundCallReceipt::from_json(response.json()?));
         }
         Err(crate::retry::api_error(
             response.status(),
@@ -312,5 +312,100 @@ impl OutboundCall {
             "billingDevice": self.billing_device,
             "toPhoneNumber": self.to_phone_number,
         })
+    }
+}
+
+/// The `201 Created` body of `POST /v3/ai-flows/{aiFlowId}/call`.
+///
+/// The v3 `OpenAPI` document defines it as `InitiateOutboundCallResponseDto`
+/// with a required `callSid` (`pbx-c-…`), sipgate's `PBXCore` call identifier.
+/// Decoding stays permissive: an empty or absent `callSid` is represented as
+/// `None` rather than failing, because the call *did* start — the identifier is
+/// for logging, not for control flow.
+///
+/// ```
+/// use sipgate_flow::OutboundCallReceipt;
+///
+/// let receipt = OutboundCallReceipt::parse(br#"{"callSid":"pbx-c-ffff"}"#)?;
+/// assert_eq!(receipt.call_sid(), Some("pbx-c-ffff"));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct OutboundCallReceipt {
+    call_sid: Option<String>,
+    raw: Value,
+}
+
+impl OutboundCallReceipt {
+    /// Decodes the body bytes.
+    ///
+    /// ```
+    /// use sipgate_flow::OutboundCallReceipt;
+    ///
+    /// assert!(OutboundCallReceipt::parse(br#"{"callSid":"c1"}"#).is_ok());
+    /// assert!(OutboundCallReceipt::parse(b"").is_err());
+    /// // Anything that parses is accepted; only the call id is then missing.
+    /// assert_eq!(OutboundCallReceipt::parse(b"[]").ok().and_then(|r| r.call_sid().map(str::to_string)), None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Json`] when the body is not JSON at all. A body that
+    /// parses but is not the documented object is tolerated, because the call
+    /// did start either way.
+    pub fn parse(body: &[u8]) -> Result<Self> {
+        Ok(Self::from_json(serde_json::from_slice(body)?))
+    }
+
+    /// Reads an already-decoded body.
+    ///
+    /// Both `callSid` (documented) and `call_sid` (tolerated) are accepted; an
+    /// empty string counts as absent.
+    ///
+    /// ```
+    /// use sipgate_flow::OutboundCallReceipt;
+    ///
+    /// let receipt = OutboundCallReceipt::from_json(serde_json::json!({"call_sid": "c2"}));
+    /// assert_eq!(receipt.call_sid(), Some("c2"));
+    /// assert_eq!(receipt.raw()["call_sid"], "c2");
+    /// ```
+    #[must_use]
+    pub fn from_json(value: Value) -> Self {
+        let call_sid = value
+            .get("callSid")
+            .or_else(|| value.get("call_sid"))
+            .and_then(Value::as_str)
+            .filter(|sid| !sid.is_empty())
+            .map(str::to_string);
+        Self {
+            call_sid,
+            raw: value,
+        }
+    }
+
+    /// The `PBXCore` call identifier, when the body carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::OutboundCallReceipt;
+    ///
+    /// assert_eq!(OutboundCallReceipt::from_json(serde_json::json!({})).call_sid(), None);
+    /// ```
+    #[must_use]
+    pub fn call_sid(&self) -> Option<&str> {
+        self.call_sid.as_deref()
+    }
+
+    /// The body exactly as received, for fields this crate does not model.
+    ///
+    /// ```
+    /// use sipgate_flow::OutboundCallReceipt;
+    ///
+    /// let receipt = OutboundCallReceipt::from_json(serde_json::json!({"callSid": "c1", "x": 1}));
+    /// assert_eq!(receipt.raw()["x"], 1);
+    /// ```
+    #[must_use]
+    pub fn raw(&self) -> &Value {
+        &self.raw
     }
 }

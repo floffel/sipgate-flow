@@ -16,12 +16,17 @@ fn client(transport: MockTransport) -> FlowClient<MockTransport, StaticToken> {
 #[tokio::test]
 async fn a_call_posts_billing_device_and_number_to_the_documented_path() {
     let transport = MockTransport::new();
-    transport.push_response(response(201, &[], b""));
+    transport.push_response(response(
+        201,
+        &[("Content-Type", "application/json")],
+        br#"{"callSid":"pbx-c-ffffffff-abba"}"#,
+    ));
     let client = client(transport.clone());
 
     let call = OutboundCall::new(FLOW_ID, "e2", "+4915112345678").expect("valid");
-    let body = client.call(&call).await.expect("started");
-    assert_eq!(body, serde_json::json!({}));
+    let receipt = client.call(&call).await.expect("started");
+    assert_eq!(receipt.call_sid(), Some("pbx-c-ffffffff-abba"));
+    assert_eq!(receipt.raw()["callSid"], "pbx-c-ffffffff-abba");
 
     let recorded = transport.only_call();
     assert_eq!(recorded.method.as_str(), "POST");

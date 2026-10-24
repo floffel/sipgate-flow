@@ -597,13 +597,20 @@ impl Speak {
 
 /// TTS provider configuration for [`Speak`].
 ///
+/// The providers documented on <https://flow.sipgate.io/api/tts-providers> are
+/// `kugelaudio`, `azure` and `eleven_labs`; `openai` appears in the official
+/// SDK's action schema (`TtsConfigOpenAiSchema`, `@sipgate/ai-flow-sdk` 2.1.0)
+/// and is modelled here because the service accepts it there.
+///
 /// ```
 /// use sipgate_flow::Tts;
 ///
 /// assert_eq!(Tts::azure().with_language("de-DE").to_json()["language"], "de-DE");
 /// assert_eq!(Tts::eleven_labs().to_json()["provider"], "eleven_labs");
+/// assert_eq!(Tts::kugelaudio().with_voice("963").to_json()["voice"], "963");
+/// assert_eq!(Tts::openai().with_voice("alloy").to_json()["provider"], "openai");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Tts {
     /// Azure Speech.
@@ -616,6 +623,23 @@ pub enum Tts {
     /// `ElevenLabs`.
     ElevenLabs {
         /// `ElevenLabs` voice id; the provider default when omitted.
+        voice: Option<String>,
+    },
+    /// `Kugelaudio`, sipgate's own voice set (`963` is the house voice).
+    Kugelaudio {
+        /// Language code, for example `de`.
+        language: Option<String>,
+        /// Voice id, for example `963` or `972`.
+        voice: Option<String>,
+        /// Speaking rate; the provider default applies when unset. Only this
+        /// provider's schema carries the field.
+        speed: Option<f32>,
+    },
+    /// `OpenAI` voices (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`,
+    /// `coral`, `sage`); they are listed in the SDK's schema, not on the TTS
+    /// documentation page.
+    OpenAi {
+        /// Voice name; the provider default when omitted.
         voice: Option<String>,
     },
 }
@@ -646,18 +670,52 @@ impl Tts {
         Self::ElevenLabs { voice: None }
     }
 
-    /// Sets the language (Azure only; ignored otherwise).
+    /// The `Kugelaudio` provider, with the sipgate house voice.
+    ///
+    /// ```
+    /// use sipgate_flow::Tts;
+    /// assert_eq!(Tts::kugelaudio().to_json()["provider"], "kugelaudio");
+    /// ```
+    #[must_use]
+    pub fn kugelaudio() -> Self {
+        Self::Kugelaudio {
+            language: None,
+            voice: None,
+            speed: None,
+        }
+    }
+
+    /// The `OpenAI` provider, with its default voice.
+    ///
+    /// ```
+    /// use sipgate_flow::Tts;
+    /// assert_eq!(Tts::openai().to_json()["provider"], "openai");
+    /// ```
+    #[must_use]
+    pub fn openai() -> Self {
+        Self::OpenAi { voice: None }
+    }
+
+    /// Sets the language where the provider takes one (Azure, `Kugelaudio`);
+    /// ignored by the others, which pick it from the voice.
     ///
     /// ```
     /// use sipgate_flow::Tts;
     /// assert_eq!(Tts::azure().with_language("en-US").to_json()["language"], "en-US");
+    /// assert_eq!(Tts::eleven_labs().with_language("en-US").to_json().get("language"), None);
     /// ```
     #[must_use]
     pub fn with_language(self, language: impl Into<String>) -> Self {
+        let language = language.into();
         match self {
             Self::Azure { voice, .. } => Self::Azure {
-                language: Some(language.into()),
+                language: Some(language),
                 voice,
+            },
+            Self::Kugelaudio { voice, speed, .. } => Self::Kugelaudio {
+                language: Some(language),
+                voice,
+                speed,
             },
             other => other,
         }
@@ -678,6 +736,41 @@ impl Tts {
                 voice: Some(voice),
             },
             Self::ElevenLabs { .. } => Self::ElevenLabs { voice: Some(voice) },
+            Self::Kugelaudio {
+                language, speed, ..
+            } => Self::Kugelaudio {
+                language,
+                voice: Some(voice),
+                speed,
+            },
+            Self::OpenAi { .. } => Self::OpenAi { voice: Some(voice) },
+        }
+    }
+
+    /// Sets the speaking rate (`Kugelaudio` only; ignored by the others, which
+    /// do not document the field).
+    ///
+    /// A non-finite value is dropped rather than sent: the wire has no encoding
+    /// for `NaN` and a provider would reject it anyway.
+    ///
+    /// ```
+    /// use sipgate_flow::Tts;
+    ///
+    /// assert_eq!(Tts::kugelaudio().with_speed(1.25).to_json()["speed"], 1.25);
+    /// assert!(Tts::kugelaudio().with_speed(f32::NAN).to_json().get("speed").is_none());
+    /// assert!(Tts::azure().with_speed(1.25).to_json().get("speed").is_none());
+    /// ```
+    #[must_use]
+    pub fn with_speed(self, speed: f32) -> Self {
+        match self {
+            Self::Kugelaudio {
+                language, voice, ..
+            } => Self::Kugelaudio {
+                language,
+                voice,
+                speed: if speed.is_finite() { Some(speed) } else { None },
+            },
+            other => other,
         }
     }
 
@@ -692,27 +785,41 @@ impl Tts {
     /// ```
     #[must_use]
     pub fn to_json(&self) -> Value {
+        let mut object = Map::new();
+        let mut push = |key: &str, value: Option<Value>| {
+            if let Some(value) = value {
+                object.insert(key.to_string(), value);
+            }
+        };
         match self {
             Self::Azure { language, voice } => {
-                let mut object = Map::new();
-                object.insert("provider".into(), json!("azure"));
-                if let Some(language) = language {
-                    object.insert("language".into(), json!(language));
-                }
-                if let Some(voice) = voice {
-                    object.insert("voice".into(), json!(voice));
-                }
-                Value::Object(object)
+                push("provider", Some(json!("azure")));
+                push("language", language.as_ref().map(|v| json!(v)));
+                push("voice", voice.as_ref().map(|v| json!(v)));
             }
             Self::ElevenLabs { voice } => {
-                let mut object = Map::new();
-                object.insert("provider".into(), json!("eleven_labs"));
-                if let Some(voice) = voice {
-                    object.insert("voice".into(), json!(voice));
-                }
-                Value::Object(object)
+                push("provider", Some(json!("eleven_labs")));
+                push("voice", voice.as_ref().map(|v| json!(v)));
+            }
+            Self::Kugelaudio {
+                language,
+                voice,
+                speed,
+            } => {
+                push("provider", Some(json!("kugelaudio")));
+                push("language", language.as_ref().map(|v| json!(v)));
+                push("voice", voice.as_ref().map(|v| json!(v)));
+                push(
+                    "speed",
+                    speed.filter(|value| value.is_finite()).map(|v| json!(v)),
+                );
+            }
+            Self::OpenAi { voice } => {
+                push("provider", Some(json!("openai")));
+                push("voice", voice.as_ref().map(|v| json!(v)));
             }
         }
+        Value::Object(object)
     }
 }
 

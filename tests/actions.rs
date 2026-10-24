@@ -411,3 +411,82 @@ fn an_action_converts_into_a_response() {
     let response: FlowResponse = Action::hangup(SESSION).unwrap().into();
     assert_eq!(response.status(), 200);
 }
+
+#[test]
+fn every_documented_tts_provider_renders_its_provider_key() {
+    let providers = [
+        (Tts::azure(), "azure"),
+        (Tts::eleven_labs(), "eleven_labs"),
+        (Tts::kugelaudio(), "kugelaudio"),
+        (Tts::openai(), "openai"),
+    ];
+    for (tts, expected) in providers {
+        assert_eq!(tts.to_json()["provider"], expected);
+        assert_eq!(tts.to_json().as_object().map(serde_json::Map::len), Some(1));
+    }
+}
+
+#[test]
+fn kugelaudio_carries_voice_language_and_speed() {
+    let tts = Tts::kugelaudio()
+        .with_voice("963")
+        .with_language("de")
+        .with_speed(1.25);
+    assert_eq!(
+        tts.to_json(),
+        serde_json::json!({"provider": "kugelaudio", "voice": "963", "language": "de", "speed": 1.25})
+    );
+}
+
+#[test]
+fn a_non_finite_speed_is_never_sent() {
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(Tts::kugelaudio()
+            .with_speed(value)
+            .to_json()
+            .get("speed")
+            .is_none());
+    }
+    // Providers without the field ignore the setter entirely.
+    assert!(Tts::azure()
+        .with_speed(1.25)
+        .to_json()
+        .get("speed")
+        .is_none());
+    assert!(Tts::eleven_labs()
+        .with_speed(1.25)
+        .to_json()
+        .get("speed")
+        .is_none());
+    assert!(Tts::openai()
+        .with_speed(1.25)
+        .to_json()
+        .get("speed")
+        .is_none());
+}
+
+#[test]
+fn openai_voices_are_passed_through_verbatim() {
+    for voice in [
+        "alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "sage",
+    ] {
+        let body = Tts::openai().with_voice(voice).to_json();
+        assert_eq!(body["voice"], voice);
+        assert!(
+            body.get("language").is_none(),
+            "OpenAI voices imply the language"
+        );
+    }
+}
+
+#[test]
+fn language_and_voice_are_ignored_where_the_provider_has_no_field() {
+    let eleven = Tts::eleven_labs().with_language("de-DE");
+    assert!(eleven.to_json().get("language").is_none());
+    let openai = Tts::openai().with_language("de-DE");
+    assert!(openai.to_json().get("language").is_none());
+    assert_eq!(
+        Tts::kugelaudio().with_language("de").to_json()["language"],
+        "de"
+    );
+}

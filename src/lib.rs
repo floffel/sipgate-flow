@@ -89,7 +89,7 @@ pub use flow::action::{
     Action, ActionKind, Audio, BargeInConfig, BargeInStrategy, ConfigureTranscription, MixAudio,
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
 };
-pub use flow::client::{FlowClient, OutboundCall};
+pub use flow::client::{FlowClient, OutboundCall, OutboundCallReceipt};
 pub use flow::event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
     TransferFailedReason,
