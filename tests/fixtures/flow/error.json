@@ -1,0 +1,15 @@
+{
+  "type": "error",
+  "session": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "account_id": "account-123",
+    "phone_number": "1234567890",
+    "direction": "inbound",
+    "from_phone_number": "9876543210",
+    "to_phone_number": "1234567890"
+  },
+  "code": "synthesis_unavailable",
+  "severity": "error",
+  "message": "Speech synthesis failed, so the requested audio output was not played.",
+  "action_type": "speak"
+}

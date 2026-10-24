@@ -1,29 +1,103 @@
-//! Typed client for sipgate's voice-flow API.
+//! Typed, tolerant client for **sipgate flow** and the **sipgate REST API v2**.
 //!
-//! The API is only partially documented, so this crate is deliberately
-//! **tolerant**: unknown events and unknown fields never fail parsing, they
-//! surface as [`Event::Unknown`] so a bot can log and ignore them.
+//! sipgate ships two JSON APIs that are easy to confuse, and this crate keeps
+//! them apart:
+//!
+//! * [`flow`] — the real-time voice product. Your webhook **receives** events
+//!   (`session_start`, `user_speak`, `dtmf_received`, …) and **returns** actions
+//!   (`speak`, `audio`, `transfer`, …) in the HTTP response. There is no
+//!   separate "post an action" endpoint. See <https://flow.sipgate.io/api/>.
+//! * [`rest`] — the imperative REST API v2 at `https://api.sipgate.com/v2`:
+//!   send SMS and fax, start calls, and control a live call (hangup, DTMF,
+//!   announcement, recording, hold, mute, transfer). See
+//!   <https://api.sipgate.com/v2/doc>.
+//!
+//! Every shape in this crate was taken from public documentation; `docs/
+//! contracts.md` cites the source per shape and names the few that could not be
+//! verified. Parsing is tolerant in both directions the wire can drift
+//! (unknown fields, unknown event types, unknown enum values, camelCase **and**
+//! `snake_case`), while everything sent is validated first.
+//!
+//! # Receiving an event and answering it
 //!
 //! ```
-//! use sipgate_flow::{Event, Action};
+//! use sipgate_flow::{Action, Event, EventPayload, FlowResponse, WebhookVerifier};
 //!
-//! let event = Event::parse(br#"{"event":"answered","callId":"abc"}"#)?;
-//! assert!(matches!(event, Event::Answered { .. }));
+//! let verifier = WebhookVerifier::new("shared-secret")?;
+//! let event = verifier.verify_and_parse(
+//!     Some("shared-secret"),
+//!     Some("application/json"),
+//!     br#"{"type":"user_speak","text":"Ich brauche Hilfe","session":{"id":"s1"}}"#,
+//! )?;
 //!
-//! let action = Action::say("Willkommen!");
-//! assert_eq!(action.kind(), "tts");
+//! let response = match event.payload() {
+//!     EventPayload::UserSpeak { text, .. } if text.contains("Hilfe") => {
+//!         FlowResponse::one(Action::speak(event.session_id().unwrap_or_default(), "Ich verbinde.")?)
+//!     }
+//!     _ => FlowResponse::none(),
+//! };
+//! assert_eq!(response.status(), 200);
 //! # Ok::<(), sipgate_flow::Error>(())
 //! ```
+//!
+//! # Calling the REST API
+//!
+//! ```no_run
+//! # #[cfg(feature = "http")]
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! use sipgate_flow::{rest::Sms, ReqwestTransport, RestClient, StaticToken};
+//!
+//! let client = RestClient::new(
+//!     ReqwestTransport::new(),
+//!     StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?,
+//! );
+//! client.send_sms(&Sms::new("s0", "4915112345678", "Hallo!")?).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Retries never sleep inside the library
+//!
+//! [`RestClient`] computes a bounded backoff (honouring `Retry-After`) and then
+//! awaits a caller-supplied [`Sleeper`]. Pass `FnSleeper::new(tokio::time::sleep)`
+//! in production — the wait is then cancellation safe because it is *your*
+//! future, not a task the library spawned.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod action;
-pub mod client;
+pub mod auth;
+pub mod base64;
 pub mod error;
-pub mod event;
+pub mod flow;
+pub mod rest;
+pub mod retry;
+pub mod transport;
+pub mod wav;
 
-pub use action::Action;
-pub use client::SipgateFlowClient;
+mod exchange;
+mod validate;
+
+pub use auth::{
+    ClientCredentials, Clock, OAuth2Client, StaticToken, SystemClock, Token, TokenSource,
+};
 pub use error::{Error, Result};
-pub use event::Event;
+pub use flow::action::{
+    Action, ActionKind, Audio, BargeInConfig, BargeInStrategy, ConfigureTranscription, MixAudio,
+    SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
+};
+pub use flow::client::{FlowClient, OutboundCall};
+pub use flow::event::{
+    Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
+    TransferFailedReason,
+};
+pub use flow::response::FlowResponse;
+pub use flow::webhook::{self, WebhookVerifier};
+pub use rest::RestClient;
+pub use retry::{
+    classify_status, parse_retry_after, retry_after_from, FnSleeper, NoSleep, RetryPolicy, Sleeper,
+};
+pub use transport::{Method, Request, RequestBody, Response, Security, Transport};
+
+#[cfg(feature = "http")]
+pub use transport::ReqwestTransport;

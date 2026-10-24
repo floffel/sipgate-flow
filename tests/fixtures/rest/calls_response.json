@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "callId": "ABCDEF0123456789",
+      "hold": false,
+      "muted": false,
+      "recording": true,
+      "participants": [
+        {
+          "participantId": "p1",
+          "phoneNumber": "+4915112345678",
+          "hold": false,
+          "muted": false,
+          "owner": true
+        }
+      ]
+    }
+  ]
+}

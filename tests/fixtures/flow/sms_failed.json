@@ -1,0 +1,11 @@
+{
+  "type": "sms_failed",
+  "session": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "account_id": "account-123",
+    "phone_number": "1234567890"
+  },
+  "recipient": "4915112345678",
+  "reason": "sender_not_allowed",
+  "message": "SMSC returned faultCode 403"
+}

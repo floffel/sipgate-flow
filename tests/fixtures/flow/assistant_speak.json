@@ -1,0 +1,12 @@
+{
+  "type": "assistant_speak",
+  "text": "Hello! How can I help you?",
+  "ssml": "<speak version=\"1.0\" xml:lang=\"en-US\"><voice name=\"en-US-JennyNeural\">Hello!</voice></speak>",
+  "duration_ms": 2000,
+  "speech_started_at": 1234567890,
+  "session": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "account_id": "account-123",
+    "phone_number": "1234567890"
+  }
+}
