@@ -451,14 +451,17 @@ impl StaticToken {
 }
 
 impl TokenSource for StaticToken {
-    async fn access_token(&self, _force_refresh: bool) -> Result<Token> {
-        Ok(Token {
+    fn access_token(
+        &self,
+        _force_refresh: bool,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
+        std::future::ready(Ok(Token {
             access_token: self.0.clone(),
             token_type: "bearer".into(),
             expires_in: None,
             refresh_token: None,
             scope: None,
-        })
+        }))
     }
 
     fn invalidate(&self) {}

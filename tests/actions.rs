@@ -373,7 +373,7 @@ fn response_none_is_204_and_carries_no_body() {
     assert_eq!(response.body(), None);
     assert!(response.is_no_content());
     assert!(response.is_empty());
-    assert!(response.actions().is_empty());
+    assert_eq!(response.actions().len(), 0);
 }
 
 #[test]

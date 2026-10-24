@@ -428,7 +428,7 @@ async fn a_4xx_that_is_not_401_is_terminal() {
     ));
     assert!(!error.is_retryable());
     assert_eq!(transport.call_count(), 1);
-    assert!(sleeper.delays().is_empty());
+    assert_eq!(sleeper.delays().len(), 0);
 }
 
 #[tokio::test]
@@ -483,13 +483,18 @@ impl RotatingToken {
 }
 
 impl TokenSource for RotatingToken {
-    async fn access_token(&self, force_refresh: bool) -> Result<Token> {
+    fn access_token(
+        &self,
+        force_refresh: bool,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
         self.forced
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(force_refresh);
         let issued = self.issued.fetch_add(1, Ordering::Relaxed) + 1;
-        Token::from_json(&serde_json::json!({"access_token": format!("t{issued}")}))
+        std::future::ready(Token::from_json(
+            &serde_json::json!({"access_token": format!("t{issued}")}),
+        ))
     }
 
     fn invalidate(&self) {}
@@ -542,8 +547,11 @@ async fn the_refresh_is_requested_forcefully() {
 struct AuthHandle(Arc<RotatingToken>);
 
 impl TokenSource for AuthHandle {
-    async fn access_token(&self, force_refresh: bool) -> Result<Token> {
-        self.0.access_token(force_refresh).await
+    fn access_token(
+        &self,
+        force_refresh: bool,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
+        self.0.access_token(force_refresh)
     }
 
     fn invalidate(&self) {}
@@ -770,5 +778,5 @@ async fn a_call_without_participants_still_parses() {
     let calls = client.calls().await.expect("listed");
     assert_eq!(calls[0].call_id, "c1");
     assert!(calls[0].hold);
-    assert!(calls[0].participants.is_empty());
+    assert_eq!(calls[0].participants.len(), 0);
 }

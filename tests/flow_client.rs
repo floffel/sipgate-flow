@@ -162,9 +162,14 @@ fn the_client_is_send_and_sync() {
 struct Rotating;
 
 impl TokenSource for Rotating {
-    async fn access_token(&self, force_refresh: bool) -> Result<Token> {
+    fn access_token(
+        &self,
+        force_refresh: bool,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
         let name = if force_refresh { "t2" } else { "t1" };
-        Token::from_json(&serde_json::json!({ "access_token": name }))
+        std::future::ready(Token::from_json(
+            &serde_json::json!({ "access_token": name }),
+        ))
     }
 
     fn invalidate(&self) {}

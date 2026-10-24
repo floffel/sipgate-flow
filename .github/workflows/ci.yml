@@ -24,7 +24,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       # Almost all uncovered lines are the reqwest adapter, which needs a
       # socket. This threshold is a ratchet: raise it when the number rises.
       - run: cargo llvm-cov --all-features --lcov --output-path lcov.info --fail-under-lines 85
@@ -38,7 +40,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       # Named targets: parse_event and parse_token (see fuzz/fuzz_targets).
       - run: cargo fuzz build
 
