@@ -56,7 +56,7 @@ async fn send_sms_posts_the_documented_body() {
 async fn send_fax_posts_content_and_returns_the_session_id() {
     let (transport, _, client) = harness();
     transport.push_response(json_response(
-        &serde_json::json!({"sessionId": "f-session-1"}),
+        &serde_json::from_str(include_str!("fixtures/rest/fax_response.json")).expect("fixture"),
     ));
     let fax = Fax::new("f0", "4921112345678", "fax.pdf", "JVBERi0xLjQK").expect("valid");
     let value = client.send_fax(&fax).await.expect("sent");
@@ -200,14 +200,15 @@ async fn dtmf_posts_the_sequence() {
     let (transport, _, client) = harness();
     transport.push_response(no_content());
     client
-        .send_dtmf("c1", &Dtmf::new("1234").expect("valid"))
+        .send_dtmf("c1", &Dtmf::new("123456").expect("valid"))
         .await
         .expect("sent");
     let call = transport.only_call();
     assert_eq!(call.url, "https://api.sipgate.com/v2/calls/c1/dtmf");
     assert_eq!(
         json_body(&call.body),
-        serde_json::json!({"sequence": "1234"})
+        serde_json::from_str::<serde_json::Value>(include_str!("fixtures/rest/dtmf_request.json"))
+            .expect("fixture")
     );
 }
 
