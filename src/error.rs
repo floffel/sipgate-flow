@@ -1,8 +1,9 @@
 //! One error type for parsing, verification, authentication and transport.
 //!
 //! Every variant states what the caller can do about it, and
-//! [`Error::is_retryable`] / [`Error::retry_after`] answer the two questions a
-//! retry loop asks. The enum is `#[non_exhaustive]`: new failure modes can be
+//! [`Error::is_retryable`] / [`Error::is_ambiguous`] / [`Error::retry_after`]
+//! answer the three questions a retry loop asks: may I repeat this, did it
+//! already happen, and how long must I wait. The enum is `#[non_exhaustive]`: new failure modes can be
 //! added without a breaking release, so match with a `_` arm.
 //!
 //! ```
@@ -119,8 +120,27 @@ pub enum Error {
         body: String,
         /// Parsed `Retry-After` header, when the server sent one.
         retry_after: Option<Duration>,
-        /// `true` for 429 and 5xx.
+        /// `true` for 429, and for 5xx on an idempotent method only.
         retryable: bool,
+    },
+
+    /// The request reached the point where the server could act on it, but no
+    /// usable response came back - a 5xx on a `POST`, or a timeout/reset while
+    /// waiting. The operation **may** have happened.
+    ///
+    /// This is not an error the library can retry: repeating it duplicates an
+    /// SMS, a fax, a recording or an outbound call, and sipgate documents no
+    /// idempotency key. [`Error::is_retryable`] is therefore `false`; the
+    /// caller decides, usually by checking its own ledger against
+    /// [`Error::status`] and the correlation id it stored before the call.
+    #[error("ambiguous outcome: {message}")]
+    Ambiguous {
+        /// The status that arrived, if one did: a 5xx. `None` when the
+        /// connection died after the write (timeout, reset) and no status
+        /// exists.
+        status: Option<u16>,
+        /// What happened, without the request body or any credential.
+        message: String,
     },
 }
 
@@ -171,17 +191,41 @@ impl Error {
         }
     }
 
+    /// Builds the "it may already have happened" outcome: a 5xx on a
+    /// non-idempotent request, or a connection that died after the write.
+    ///
+    /// `status` is the HTTP status when one arrived, `None` when the request
+    /// was cut off without an answer.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::ambiguous(Some(502), "bad gateway after POST /v2/sessions/sms");
+    /// assert!(err.is_ambiguous());
+    /// assert!(!err.is_retryable(), "a retry would send the SMS a second time");
+    /// assert_eq!(err.status(), Some(502));
+    /// ```
+    #[must_use]
+    pub fn ambiguous(status: Option<u16>, message: impl Into<String>) -> Self {
+        Self::Ambiguous {
+            status,
+            message: message.into(),
+        }
+    }
+
     /// Whether another attempt could succeed.
     ///
-    /// Only transient transport failures and 429/5xx API answers are
-    /// retryable; validation, parsing and authorization errors are terminal by
-    /// construction.
+    /// Only transport failures that provably happened before the request was
+    /// written and 429/5xx answers on idempotent methods are retryable;
+    /// validation, parsing, authorization errors and every
+    /// [`Error::Ambiguous`] outcome are not.
     ///
     /// ```
     /// use sipgate_flow::Error;
     ///
     /// assert!(Error::transport("dns").is_retryable());
     /// assert!(!Error::Unauthorized.is_retryable());
+    /// assert!(!Error::ambiguous(None, "timeout after write").is_retryable());
     /// ```
     #[must_use]
     pub fn is_retryable(&self) -> bool {
@@ -189,6 +233,19 @@ impl Error {
             Self::Transport { retryable, .. } | Self::Api { retryable, .. } => *retryable,
             _ => false,
         }
+    }
+
+    /// Whether the request may already have been executed.
+    ///
+    /// ```rust
+    /// use sipgate_flow::Error;
+    ///
+    /// assert!(Error::ambiguous(Some(500), "5xx after a POST").is_ambiguous());
+    /// assert!(!Error::validation("text", "empty").is_ambiguous());
+    /// ```
+    #[must_use]
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. })
     }
 
     /// The wait the server asked for in a `Retry-After` header.
@@ -220,11 +277,13 @@ impl Error {
     ///
     /// assert_eq!(Error::Unauthorized.status(), None);
     /// assert_eq!(Error::validation("x", "y").status(), None);
+    /// assert_eq!(Error::ambiguous(Some(503), "after POST").status(), Some(503));
     /// ```
     #[must_use]
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::Api { status, .. } | Self::AuthRejected { status, .. } => Some(*status),
+            Self::Ambiguous { status, .. } => *status,
             _ => None,
         }
     }

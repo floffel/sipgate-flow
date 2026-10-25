@@ -64,6 +64,22 @@
 //! awaits a caller-supplied [`Sleeper`]. Pass `FnSleeper::new(tokio::time::sleep)`
 //! in production — the wait is then cancellation safe because it is *your*
 //! future, not a task the library spawned.
+//!
+//! # A request is repeated only when a repeat is harmless
+//!
+//! sipgate documents no idempotency key, so the client retries `429`, `5xx` on
+//! an idempotent method and failures that happened before the write — nothing
+//! else. A `5xx` (or a timeout, or a reset) after a `POST` may have sent the
+//! SMS, started the call or spent the money already, so it surfaces as
+//! [`Error::Ambiguous`] with [`Error::is_retryable`] `false` and the decision
+//! stays with the caller. [`classify`] is the pure function behind that rule:
+//!
+//! ```
+//! use sipgate_flow::{classify, Method, RetryOutcome};
+//!
+//! assert_eq!(classify(Method::Post, 503), RetryOutcome::Ambiguous);
+//! assert_eq!(classify(Method::Delete, 503), RetryOutcome::Retry);
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -98,7 +114,8 @@ pub use flow::response::FlowResponse;
 pub use flow::webhook::{self, WebhookVerifier};
 pub use rest::RestClient;
 pub use retry::{
-    classify_status, parse_retry_after, retry_after_from, FnSleeper, NoSleep, RetryPolicy, Sleeper,
+    classify, parse_retry_after, retry_after_from, FnSleeper, NoSleep, RetryOutcome, RetryPolicy,
+    Sleeper,
 };
 pub use transport::{Method, Request, RequestBody, Response, Security, Transport};
 

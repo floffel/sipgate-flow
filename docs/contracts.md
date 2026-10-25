@@ -409,6 +409,14 @@ applicable limit permits another request") for rate-limited endpoints, and the
 client's 429/5xx retry budgets and backoff numbers remain this crate's defaults:
 3 attempts, 250 ms doubling, 8 s ceiling.
 
+**No idempotency key exists.** Neither the v2 Swagger, the v3 `OpenAPI`
+document nor the SDKs declare an idempotency key, request id or
+`Idempotency-Key` header for any write endpoint, and no page promises that a
+repeated `POST` collapses into one. That is why a `5xx` or a timeout after a
+`POST` is surfaced as `Error::Ambiguous` instead of being retried: the
+classification is derived from the protocol itself (see the delivery contract
+in the README), not from a provider guarantee that does not exist.
+
 ### 7.8 Flow fax / voicemail / recording / DTMF actions
 
 The issue that drove this work listed them as Flow actions. They do not exist in

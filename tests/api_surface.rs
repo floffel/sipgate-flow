@@ -437,3 +437,59 @@ async fn a_function_sleeper_calls_through_and_no_sleep_returns_at_once() {
 
     NoSleep.sleep(Duration::from_secs(3600)).await;
 }
+
+#[test]
+fn every_accessor_a_caller_can_reach_returns_what_it_was_built_with() {
+    // `RestClient::auth`, `Request::body_is_empty` and `Response::body` are
+    // public but never needed by a wire test; a getter that starts returning
+    // the wrong field would otherwise go unnoticed.
+    use sipgate_flow::transport::{Method, Request, RequestBody, Response, Security};
+
+    let client = RestClient::new(
+        MockTransport::new(),
+        StaticToken::new("access-token").expect("valid"),
+    );
+    // The token itself is never readable through the client - only the source.
+    let _: &StaticToken = client.auth();
+
+    let empty = Request::empty(Method::Get, "https://x.test/a", Security::None);
+    assert!(empty.body_is_empty());
+    let payload = serde_json::json!({"value": true});
+    let json = Request::json(Method::Put, "https://x.test/a", Security::None, &payload);
+    assert!(!json.body_is_empty());
+    assert!(matches!(json.body, RequestBody::Json(_)));
+
+    let response = Response::new(200, std::iter::empty(), b"ok".to_vec());
+    assert_eq!(response.body(), b"ok");
+}
+
+#[test]
+fn a_status_lookup_answers_none_for_every_error_without_one() {
+    // The `Error::status` fallthrough arm: a validation, secret or ambiguous
+    // error must not invent a status.
+    for error in [
+        Error::validation("text", "must not be empty"),
+        Error::EmptySecret,
+        Error::MissingSecret,
+        Error::SecretMismatch,
+        Error::EmptyBody,
+        Error::Unauthorized,
+        Error::ambiguous(None, "the connection died after the write"),
+    ] {
+        assert_eq!(error.status(), None, "{error:?}");
+        assert!(!error.is_retryable(), "{error:?}");
+    }
+}
+
+#[test]
+fn the_standalone_rest_parsers_report_a_body_they_cannot_use() {
+    use sipgate_flow::rest::{parse_calls, CallInfo};
+
+    let calls: Vec<CallInfo> = parse_calls(br#"{"data":[]}"#).expect("the documented envelope");
+    assert_eq!(calls.len(), 0);
+    assert!(
+        parse_calls(br#"{"data":{}}"#).is_err(),
+        "data must be an array"
+    );
+    assert!(parse_calls(b"").is_err(), "an empty body is not JSON");
+}

@@ -50,6 +50,29 @@ impl Method {
             Self::Delete => "DELETE",
         }
     }
+
+    /// Whether repeating the request is harmless when the outcome is unknown.
+    ///
+    /// `POST` is not idempotent: every sipgate `POST` either sends a message,
+    /// starts a call, plays a recording or spends money, and the API documents
+    /// no idempotency key. A 5xx or a timeout after the write therefore may or
+    /// may not have taken effect, and a blind retry duplicates the effect.
+    ///
+    /// ```rust
+    /// use sipgate_flow::Method;
+    ///
+    /// assert!(Method::Get.is_idempotent());
+    /// assert!(Method::Put.is_idempotent());
+    /// assert!(Method::Delete.is_idempotent());
+    /// assert!(!Method::Post.is_idempotent(), "sending an SMS twice is a real second SMS");
+    /// ```
+    #[must_use]
+    pub fn is_idempotent(self) -> bool {
+        match self {
+            Self::Get | Self::Put | Self::Delete => true,
+            Self::Post => false,
+        }
+    }
 }
 
 /// How the request authenticates.
@@ -392,7 +415,11 @@ impl Response {
 /// * send the configured [`Security`] and never log the credential,
 /// * return the raw status, headers and body even for non-2xx (the client
 ///   decides what is retryable),
-/// * classify connection failures as [`Error::transport`] (retryable).
+/// * classify a failure that provably happened **before** the request was
+///   written (DNS, TCP connect, TLS) as [`Error::transport`] (retryable), and a
+///   failure after the write (timeout, reset while waiting) as
+///   [`Error::ambiguous`] for a non-idempotent method,
+///   see [`Method::is_idempotent`].
 ///
 /// ```
 /// use sipgate_flow::transport::{Request, Response, Transport};
@@ -476,10 +503,11 @@ impl Transport for ReqwestTransport {
             RequestBody::Form(fields) => builder.form(fields),
         };
 
+        let method = request.method;
         let response = builder
             .send()
             .await
-            .map_err(|error| describe_reqwest_error(&error))?;
+            .map_err(|error| describe_reqwest_error(&error, method))?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -494,17 +522,24 @@ impl Transport for ReqwestTransport {
         let body = response
             .bytes()
             .await
-            .map_err(|error| describe_reqwest_error(&error))?
+            .map_err(|error| describe_reqwest_error(&error, method))?
             .to_vec();
 
         Ok(Response::new(status, headers, body))
     }
 }
 
-/// Maps a `reqwest` failure to a retryable transport error without echoing
-/// headers (which carry the credential).
+/// Maps a `reqwest` failure to the closest of the two transport outcomes
+/// without echoing headers (which carry the credential).
+///
+/// * `connect` needs a TCP/TLS handshake that never completed: nothing was
+///   written, so the attempt is retryable for every method.
+/// * `timeout`, `body`, `decode` and `request` mean bytes were on the wire and
+///   the peer did not answer. For an idempotent method that is worth another
+///   attempt; for `POST` it is [`Error::ambiguous`] - the SMS, fax or call may
+///   exist and only the response was lost.
 #[cfg(feature = "http")]
-fn describe_reqwest_error(error: &reqwest::Error) -> Error {
+fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
     let kind = if error.is_timeout() {
         "timeout"
     } else if error.is_connect() {
@@ -515,5 +550,10 @@ fn describe_reqwest_error(error: &reqwest::Error) -> Error {
         "request"
     };
     // `reqwest::Error` renders the URL but never the Authorization header.
-    Error::transport(format!("{kind}: {error}"))
+    let message = format!("{kind}: {error}");
+    if error.is_connect() || method.is_idempotent() {
+        Error::transport(message)
+    } else {
+        Error::ambiguous(None, message)
+    }
 }

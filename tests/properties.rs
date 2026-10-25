@@ -4,8 +4,8 @@
 use proptest::prelude::*;
 use serde_json::{json, Value};
 use sipgate_flow::{
-    base64, parse_retry_after, wav, Action, Event, EventPayload, RetryPolicy, SmsFailureReason,
-    TransferFailedReason,
+    base64, classify, parse_retry_after, wav, Action, Event, EventPayload, Method, RetryOutcome,
+    RetryPolicy, SmsFailureReason, TransferFailedReason,
 };
 
 /// A recursive JSON value, bounded in depth and width.
@@ -197,6 +197,26 @@ proptest! {
     fn arbitrary_bytes_never_panic_the_wav_parser(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
         let _ = wav::format(&bytes);
         let _ = wav::validate_pcm16(&bytes, 16_000, 1);
+    }
+
+    #[test]
+    fn no_non_idempotent_request_is_retried_after_a_server_error(status in 100_u16..1000) {
+        let outcome = classify(Method::Post, status);
+        let repeatable = outcome == RetryOutcome::Retry;
+        // The only repeatable non-idempotent answer is the one the server emits
+        // before it processes anything, and never a 5xx.
+        prop_assert_eq!(repeatable, status == 429);
+        prop_assert_eq!(outcome == RetryOutcome::Ambiguous, (500..600).contains(&status));
+    }
+
+    #[test]
+    fn a_status_is_classified_the_same_way_for_every_idempotent_method(status in 100_u16..1000) {
+        let get = classify(Method::Get, status);
+        prop_assert_eq!(get, classify(Method::Put, status));
+        prop_assert_eq!(get, classify(Method::Delete, status));
+        // Retry and Ambiguous are mutually exclusive, and only 429/5xx reach them.
+        prop_assert!(!(get == RetryOutcome::Retry && get == RetryOutcome::Ambiguous));
+        prop_assert_eq!(get == RetryOutcome::Terminal, !(status == 429 || (500..600).contains(&status)));
     }
 
     #[test]

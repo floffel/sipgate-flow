@@ -112,9 +112,11 @@ Flow, 8 kHz for REST announcements) rather than uploaded and silently dropped.
 
 ## Resilience
 
-* `429` and `5xx` are retried with exponential backoff (default 3 attempts,
-  250 ms doubling to an 8 s ceiling). `Retry-After` is honoured and clamped to
-  the ceiling.
+* `429` and `5xx` on an **idempotent** request are retried with exponential
+  backoff (default 3 attempts, 250 ms doubling to an 8 s ceiling).
+  `Retry-After` is honoured and clamped to the ceiling.
+* A `5xx`, timeout or reset after a `POST` is **not** retried: it is
+  `Error::Ambiguous`. See the delivery contract below.
 * The library **never sleeps**. It awaits a caller-supplied `Sleeper`, so pacing
   and therefore cancellation stay with you:
 
@@ -128,7 +130,30 @@ Flow, 8 kHz for REST announcements) rather than uploaded and silently dropped.
 * `401` refreshes the token **once** and is terminal the second time. Other 4xx
   are terminal immediately.
 * Per-request timeouts are configurable on every client.
-* Outbound calls are never retried — dialling twice would ring twice.
+* Outbound calls are never retried — dialling twice would ring twice, and a 5xx
+  on the call `POST` is reported as `Error::Ambiguous`.
+
+### Delivery contract
+
+sipgate documents no idempotency key on any endpoint, so a repeat is never
+free. Every request ends up in exactly one of three classes
+(`classify` is the pure function that decides it):
+
+| Class | When | What the client does |
+| --- | --- | --- |
+| **at-least-once** | `GET`, `PUT`, `DELETE` failing with `5xx`; any method failing with `429`; a failure *before* the write (DNS, TCP, TLS) | retries, bounded by `RetryPolicy` |
+| **ambiguous** | `POST` answered with `5xx`, or a `POST` whose connection died after the request was written (timeout, reset) | returns `Error::Ambiguous` immediately, with `Error::status()` when a status arrived |
+| **terminal** | any other `4xx` | returns `Error::Api` |
+
+`Error::is_retryable()` is `false` for an ambiguous outcome on purpose: the SMS,
+fax, recording or call may already exist, and only you know how to check.
+`Error::is_ambiguous()` is the flag to branch on, and the message names the
+method that was not repeated. Reconcile with your own ledger — an id you stored
+before the call, or the provider's report — never by retrying blindly.
+
+The 401 path is the exception that proves the rule: `401` is emitted before the
+request is executed, so the token is refreshed once and the request is repeated
+even for `POST`.
 
 ## Permissive in, strict out
 

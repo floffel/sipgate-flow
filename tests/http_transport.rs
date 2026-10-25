@@ -239,6 +239,53 @@ async fn a_slow_peer_becomes_a_timeout_error() {
 }
 
 #[tokio::test]
+async fn a_post_timeout_is_ambiguous_because_the_request_was_already_written() {
+    let server = TestServer::start(OK_JSON, Duration::from_millis(750));
+    let url = server.url("/v2/sessions/sms");
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(Method::Post, &url, Security::Bearer("t"), &body)
+        .with_timeout(Some(Duration::from_millis(75)));
+
+    let error = ReqwestTransport::new()
+        .execute(request)
+        .await
+        .expect_err("the peer answers too late");
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(
+        !error.is_retryable(),
+        "the SMS may have been sent: {error:?}"
+    );
+    assert_eq!(error.status(), None, "no status arrived");
+    let rendered = error.to_string();
+    assert!(rendered.contains("timeout: "), "{rendered}");
+    assert!(
+        !rendered.to_ascii_lowercase().contains("authorization"),
+        "a transport error never echoes the credential: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn a_post_that_cannot_connect_stays_retryable() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    drop(listener);
+
+    let url = format!("http://{addr}/v2/sessions/sms");
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(Method::Post, &url, Security::Bearer("t"), &body);
+    let error = ReqwestTransport::new()
+        .execute(request)
+        .await
+        .expect_err("nothing listens there");
+    assert!(error.is_retryable(), "nothing was written: {error:?}");
+    assert!(!error.is_ambiguous(), "{error:?}");
+    match error {
+        Error::Transport { message, .. } => assert!(message.starts_with("connect: "), "{message}"),
+        other => panic!("expected a transport error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_non_success_status_is_returned_rather_than_raised() {
     let mut server = TestServer::start(
         "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nContent-Length: 5\r\n\r\nbusy!",

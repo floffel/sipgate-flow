@@ -21,6 +21,7 @@
 use std::time::Duration;
 
 use crate::error::Error;
+use crate::transport::Method;
 
 /// How often, and how long, the client retries transient failures.
 ///
@@ -285,20 +286,53 @@ pub fn retry_after_from<'a>(header: impl Fn(&str) -> Option<&'a str>) -> Option<
     header("retry-after").and_then(parse_retry_after)
 }
 
-/// Classifies a status code: 429 and 5xx are worth retrying, everything else —
-/// including 401, which has its own refresh path — is terminal.
+/// What a failed attempt means for a retry loop.
+///
+/// Three outcomes, not two, because a status alone cannot tell whether the
+/// server acted on the request. `POST /v2/sessions/sms` answering `502` may
+/// have sent the SMS with only the response lost, and sipgate documents no
+/// idempotency key to make a repeat harmless. Interval between attempts: see
+/// [`RetryPolicy::delay`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RetryOutcome {
+    /// Nothing happened yet (429), or the method is idempotent so repeating it
+    /// cannot change the outcome: retry after the backoff.
+    Retry,
+    /// The request may have been executed and the method is not idempotent.
+    /// Never retried automatically — the caller reconciles it.
+    Ambiguous,
+    /// Final answer: report it.
+    Terminal,
+}
+
+/// Classifies `status` for a request with `method`.
+///
+/// `429` is emitted before the server processes anything, so it is safe to
+/// repeat for every method. A `5xx` means the server read the request: on
+/// `GET`/`PUT`/`DELETE` repeating it is harmless, on `POST` it is a possible
+/// duplicate.
 ///
 /// ```
-/// use sipgate_flow::classify_status;
+/// use sipgate_flow::{classify, Method, RetryOutcome};
 ///
-/// assert!(classify_status(429));
-/// assert!(classify_status(503));
-/// assert!(!classify_status(404));
-/// assert!(!classify_status(401));
+/// assert_eq!(classify(Method::Post, 429), RetryOutcome::Retry);
+/// assert_eq!(classify(Method::Post, 503), RetryOutcome::Ambiguous);
+/// assert_eq!(classify(Method::Get, 503), RetryOutcome::Retry);
+/// assert_eq!(classify(Method::Delete, 500), RetryOutcome::Retry);
+/// assert_eq!(classify(Method::Post, 400), RetryOutcome::Terminal);
+/// assert_eq!(classify(Method::Get, 401), RetryOutcome::Terminal);
 /// ```
 #[must_use]
-pub fn classify_status(status: u16) -> bool {
-    status == 429 || (500..600).contains(&status)
+pub fn classify(method: Method, status: u16) -> RetryOutcome {
+    let server_error = (500..600).contains(&status);
+    if status == 429 || (server_error && method.is_idempotent()) {
+        RetryOutcome::Retry
+    } else if server_error {
+        RetryOutcome::Ambiguous
+    } else {
+        RetryOutcome::Terminal
+    }
 }
 
 /// Truncates a response body for an error message, so a multi-megabyte error
@@ -315,18 +349,41 @@ pub(crate) fn truncate_body(body: &str) -> String {
     format!("{}…", &body[..end])
 }
 
-/// Maps a status plus headers into a terminal or retryable [`Error::Api`].
-pub(crate) fn api_error(status: u16, headers: &[(&str, &str)], body: &str) -> Error {
+/// Maps a status, its headers and the request method into the matching error:
+/// terminal, retryable, or [`Error::Ambiguous`] when a non-idempotent request
+/// may already have been executed.
+pub(crate) fn api_error(
+    method: Method,
+    status: u16,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Error {
     let retry_after = retry_after_from(|name| {
         headers
             .iter()
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|(_, value)| *value)
     });
-    Error::Api {
-        status,
-        body: truncate_body(body),
-        retry_after,
-        retryable: classify_status(status),
+    let truncated = truncate_body(body);
+    match classify(method, status) {
+        RetryOutcome::Retry => Error::Api {
+            status,
+            body: truncated,
+            retry_after,
+            retryable: true,
+        },
+        RetryOutcome::Ambiguous => Error::ambiguous(
+            Some(status),
+            format!(
+                "api error {status} after a {} request may already have been applied: {truncated}",
+                method.as_str()
+            ),
+        ),
+        RetryOutcome::Terminal => Error::Api {
+            status,
+            body: truncated,
+            retry_after,
+            retryable: false,
+        },
     }
 }

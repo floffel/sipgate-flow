@@ -300,6 +300,7 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
             return response.json();
         }
         Err(api_error(
+            method,
             response.status(),
             &response.headers(),
             &response.text(),

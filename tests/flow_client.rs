@@ -5,7 +5,9 @@ mod common;
 use std::time::Duration;
 
 use common::{json_response, no_content, response, static_auth, Body, MockTransport};
-use sipgate_flow::{Error, FlowClient, OutboundCall, Result, StaticToken, Token, TokenSource};
+use sipgate_flow::{
+    Error, FlowClient, OutboundCall, OutboundCallReceipt, Result, StaticToken, Token, TokenSource,
+};
 
 const FLOW_ID: &str = "e3670012-96a3-4ae5-ac42-87abe22015c3";
 
@@ -76,14 +78,33 @@ async fn a_400_means_the_flow_has_no_phone_number() {
 
 #[tokio::test]
 async fn starting_a_call_is_never_retried() {
-    // Dialling twice would ring the recipient twice, so a 500 surfaces at once.
+    // Dialling twice would ring the recipient twice, so a 500 surfaces at once
+    // - and it surfaces as ambiguous: the Flow may already have dialled.
     let transport = MockTransport::new();
     transport.push_response(response(500, &[], b"boom"));
     let error = client(transport.clone())
         .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
         .await
         .expect_err("500");
-    assert!(matches!(error, Error::Api { status: 500, .. }));
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert_eq!(error.status(), Some(500));
+    assert!(!error.is_retryable());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_rate_limited_call_keeps_its_wait_hint_for_the_caller() {
+    // The Flow client never loops, but a 429 did not dial: it stays retryable
+    // and carries `Retry-After`, so the caller's own ledger can repeat it.
+    let transport = MockTransport::new();
+    transport.push_response(response(429, &[("Retry-After", "2")], b"slow down"));
+    let error = client(transport.clone())
+        .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
+        .await
+        .expect_err("429");
+    assert!(error.is_retryable());
+    assert!(!error.is_ambiguous());
+    assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(2)));
     assert_eq!(transport.call_count(), 1);
 }
 
@@ -178,4 +199,11 @@ impl TokenSource for Rotating {
     }
 
     fn invalidate(&self) {}
+}
+
+#[test]
+fn a_documented_receipt_body_parses_on_its_own() {
+    let receipt = OutboundCallReceipt::parse(br#"{"callSid":"c-42"}"#).expect("documented body");
+    assert_eq!(receipt.call_sid(), Some("c-42"));
+    assert!(OutboundCallReceipt::parse(b"not json").is_err());
 }

@@ -192,6 +192,7 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
             return Ok(OutboundCallReceipt::from_json(response.json()?));
         }
         Err(crate::retry::api_error(
+            Method::Post,
             response.status(),
             &response.headers(),
             &response.text(),
