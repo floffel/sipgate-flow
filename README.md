@@ -67,21 +67,37 @@ let client = RestClient::new(ReqwestTransport::new(), auth)
 client.send_sms(&Sms::new("s0", "4915112345678", "Ihr Code: 4242")?).await?;
 ```
 
-A Personal Access Token works the same way through `StaticToken`. Empty
-credentials are refused at construction, and no credential appears in any
-`Debug` output.
+A **Personal Access Token** is *not* a bearer token: sipgate documents it as
+`Authorization: Basic base64(<token id>:<token>)`, so it has its own type:
+
+```rust
+use sipgate_flow::{PersonalAccessToken, ReqwestTransport, RestClient};
+
+let client = RestClient::new(
+    ReqwestTransport::new(),
+    PersonalAccessToken::new(std::env::var("SIPGATE_TOKEN_ID")?, std::env::var("SIPGATE_TOKEN")?)?,
+);
+```
+
+`StaticToken` holds an OAuth2 access token and sends `Bearer`. Empty or
+colon-bearing credentials are refused at construction, and no credential appears
+in any `Debug` output.
 
 ## What is modelled
 
-* **All ten documented Flow events**, typed (`EventPayload`), with unknown event
-  types carried as `EventPayload::Unknown(serde_json::Value)` and unknown fields
+* **Every documented Flow event**, typed (`EventPayload`), plus `user_barge_in`
+  (published by the official TypeScript SDK only). Unknown event types are
+  carried as `EventPayload::Unknown(serde_json::Value)` and unknown fields are
   preserved in `Event::extra`.
 * **All eight documented Flow actions** (`speak`, `audio`, `mix_audio`,
   `hangup`, `transfer`, `barge_in`, `configure_transcription`, `send_sms`), each
-  with typed inputs and validated before the request exists.
+  with typed inputs and validated before the request exists — including all four
+  barge-in strategies and every documented TTS provider (`kugelaudio`, `azure`,
+  `eleven_labs`, plus `openai` from the SDK schema).
 * **The documented Flow webhook handshake**: shared secret in constant time,
   JSON-only content type, 1 MiB body ceiling, `200`/`204` response shapes.
-* **Outbound Flow calls** (`POST /v3/ai-flows/{id}/call`).
+* **Outbound Flow calls** (`POST /v3/ai-flows/{id}/call`) with a typed
+  `OutboundCallReceipt` for the documented `callSid` response.
 * **Sixteen REST v2 operations** covering SMS, fax (send + resend), outbound
   calls (classic and Neo PBX), voicemail playback, IVR/voicemail recording,
   call listing, hangup, DTMF, announcements, recording, hold, mute and transfer.
@@ -134,8 +150,10 @@ Each exclusion is a decision, not an oversight — the reasons are in
   trees are transport agnostic and work there unchanged.
 * **REST v2 account administration** (devices, contacts, history, phonelines,
   numbers, …) — not call handling.
-* **Action delivery through an undocumented "external API POST".** The docs
-  mention the channel but publish no path, so no client method guesses one.
+* **Action delivery through an undocumented "external API POST".** Three
+  sentences in the flow documentation mention the channel; neither the docs, the
+  v3 `OpenAPI` document (402 paths) nor the official SDK names a path, method or
+  body envelope for it, so no client method guesses one.
 * **Fax, voicemail, recording and DTMF as *Flow* actions.** They do not exist in
   the Flow action catalogue; their real equivalents live in REST v2 and are
   implemented there.
@@ -143,11 +161,11 @@ Each exclusion is a decision, not an oversight — the reasons are in
 ## Tests
 
 ```bash
-cargo test                       # 147 integration + 322 doctests, no network
+cargo test                        # 193 integration + 337 doctests
 cargo test --no-default-features  # same, without reqwest
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-cargo +nightly fuzz run parse_event   # fuzz/ — two named targets
+cargo +nightly fuzz run parse_event   # fuzz/ — three named targets
 cargo llvm-cov --all-features --summary-only
 ```
 
@@ -163,12 +181,17 @@ cargo llvm-cov --all-features --summary-only
   formats, `Retry-After` clamping and budget exhaustion.
 * **Concurrency**: one client hammered from 32 tasks (`Send + Sync` enforced by
   the compiler at the call site).
-* **Everything runs against `MockTransport`** (`tests/common/`), so no test
-  opens a socket.
-* **Coverage**: **88.3 % of lines, 87.1 % of regions, 87.4 % of functions**
-  (`cargo llvm-cov --all-features`). The uncovered remainder is almost entirely
-  `ReqwestTransport` — the `reqwest` adapter, which needs a socket — plus a few
-  `Debug`/`Display` renderings. CI fails below 85 %.
+* **Fuzz targets** (`fuzz/`): `parse_event` (webhook bodies), `parse_token`
+  (token responses) and `parse_rest` (the `GET /calls` envelope and the outbound
+  `callSid` body), each asserting that whatever parses re-parses to the same
+  value.
+* **Every test but one file runs against `MockTransport`** (`tests/common/`).
+  `tests/http_transport.rs` is the exception: it binds a `TcpListener` on
+  `127.0.0.1` to exercise the `reqwest` adapter itself (verbs, both auth
+  schemes, JSON and form bodies, timeouts, truncated bodies). Nothing reaches
+  the network.
+* **Coverage**: **98.4 % of lines, 97.4 % of regions, 98.1 % of functions**
+  (`cargo llvm-cov --all-features`). CI fails below 95 %.
 
 ## License
 
