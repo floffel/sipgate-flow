@@ -525,8 +525,7 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
     /// envelope, plus transport and auth errors.
     pub async fn calls(&self) -> Result<Vec<CallInfo>> {
         let value = self.send(Method::Get, "/v2/calls", None).await?;
-        let list = serde_json::from_value::<CallList>(value)?;
-        Ok(list.data)
+        Ok(serde_json::from_value::<CallList>(value)?.into_entries())
     }
 
     /// `DELETE /v2/calls/{callId}` — hang up.
@@ -1076,16 +1075,16 @@ impl Call {
     /// ```
     #[must_use]
     pub fn to_json(&self) -> Value {
-        let mut body = json!({ "caller": self.caller, "callee": self.callee });
-        if let Some(object) = body.as_object_mut() {
-            if let Some(caller_id) = &self.caller_id {
-                object.insert("callerId".into(), json!(caller_id));
-            }
-            if let Some(device_id) = &self.device_id {
-                object.insert("deviceId".into(), json!(device_id));
-            }
+        let mut body = Map::new();
+        body.insert("caller".into(), json!(self.caller));
+        body.insert("callee".into(), json!(self.callee));
+        if let Some(caller_id) = &self.caller_id {
+            body.insert("callerId".into(), json!(caller_id));
         }
-        body
+        if let Some(device_id) = &self.device_id {
+            body.insert("deviceId".into(), json!(device_id));
+        }
+        Value::Object(body)
     }
 }
 
@@ -1166,19 +1165,16 @@ impl ChannelCall {
     /// ```
     #[must_use]
     pub fn to_json(&self) -> Value {
-        let mut body = json!({
-            "deviceId": self.device_id,
-            "targetNumber": self.target_number,
-        });
-        if let Some(object) = body.as_object_mut() {
-            if let Some(caller_id) = &self.caller_id {
-                object.insert("callerId".into(), json!(caller_id));
-            }
-            if let Some(channel_id) = &self.channel_id {
-                object.insert("channelId".into(), json!(channel_id));
-            }
+        let mut body = Map::new();
+        body.insert("deviceId".into(), json!(self.device_id));
+        body.insert("targetNumber".into(), json!(self.target_number));
+        if let Some(caller_id) = &self.caller_id {
+            body.insert("callerId".into(), json!(caller_id));
         }
-        body
+        if let Some(channel_id) = &self.channel_id {
+            body.insert("channelId".into(), json!(channel_id));
+        }
+        Value::Object(body)
     }
 }
 
@@ -1638,8 +1634,44 @@ impl RecordingSession {
 
 #[derive(Deserialize)]
 struct CallList {
+    // `null` and an absent key both mean "no calls"; only a wrong *type*
+    // (`"data": 3`) is an error, and then the caller hears about it once.
     #[serde(default)]
-    data: Vec<CallInfo>,
+    data: Option<Vec<CallInfo>>,
+}
+
+impl CallList {
+    fn into_entries(self) -> Vec<CallInfo> {
+        self.data.unwrap_or_default()
+    }
+}
+
+/// Decodes a `GET /v2/calls` response body — the `{"data": [...]}` envelope —
+/// without a client, so a proxy, a fixture test or a fuzz target can use the
+/// same decoder the client does.
+///
+/// Permissive in the documented direction: unknown fields on the envelope and
+/// on each entry are ignored, an absent or `null` `data` yields an empty list,
+/// and every `Call` field defaults when missing.
+///
+/// ```
+/// use sipgate_flow::rest::parse_calls;
+///
+/// let calls = parse_calls(br#"{"data":[{"callId":"c1","participants":[]}],"paging":{}}"#)?;
+/// assert_eq!(calls.len(), 1);
+/// assert_eq!(calls[0].call_id, "c1");
+///
+/// assert!(parse_calls(br#"{}"#)?.is_empty());
+/// assert!(parse_calls(br#"{"data":null}"#)?.is_empty());
+/// assert!(parse_calls(b"not json").is_err());
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::Json`] when the body is not JSON or `data` is not an array.
+pub fn parse_calls(body: &[u8]) -> Result<Vec<CallInfo>> {
+    Ok(serde_json::from_slice::<CallList>(body)?.into_entries())
 }
 
 /// One entry of `GET /v2/calls` (`Call` in the schema).

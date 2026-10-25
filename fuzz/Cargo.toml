@@ -27,3 +27,9 @@ path = "fuzz_targets/parse_token.rs"
 test = false
 doc = false
 bench = false
+[[bin]]
+name = "parse_rest"
+path = "fuzz_targets/parse_rest.rs"
+test = false
+doc = false
+bench = false
