@@ -426,24 +426,45 @@ page and the SDK union). The equivalents live in REST v2 (`/sessions/fax`,
 `/sessions/voicemail/*`, `/calls/{id}/dtmf`, `/calls/{id}/recording`) and are
 implemented there.
 
-## 8. Deliberately not modelled
+## 8. Surfaces not covered yet
+
+Every surface sipgate documents and this crate does not model is an **open issue**,
+not a decision record. A bullet in this section that carries no issue link is a bug
+in this document — `tests/docs.rs` fails on it. Order of work is the order below:
 
 * **Push API (classic)** — <https://en.sipgate.io/push-api/api-references>:
   `event=newCall` as `application/x-www-form-urlencoded`, answered with **XML**
   (`<Dial>`, `<Play>`, `<Gather>`, `<Reject>`), follow-up events `onAnswer`,
-  `onHangup`, `onData`. A different protocol (form + XML, no JSON), so it would
-  be a different crate. `WebhookVerifier` rejects it explicitly with
-  `Error::UnsupportedContentType` rather than half-parsing it.
-* **WebSocket transport** — documented at
-  <https://flow.sipgate.io/api/websocket>: Flow *connects to you*, so a client
-  would need a server framework. The event and action types are transport
+  `onHangup`, `onData`. Tracked in
+  [#10](https://github.com/floffel/sipgate-flow/issues/10). A different protocol
+  (form in, XML out, no JSON), so it lands as its own module; `WebhookVerifier`
+  keeps rejecting it with `Error::UnsupportedContentType` rather than half-parsing
+  it.
+* **WebSocket transport** — <https://flow.sipgate.io/api/websocket>. Tracked in
+  [#11](https://github.com/floffel/sipgate-flow/issues/11). Flow *connects to you*,
+  so the client side needs a server side; the event and action types are transport
   agnostic and work there as-is.
-* **The rest of the v3 surface** (ai-agents, ai-flow-playground, ai-webhooks,
-  accounts, devices, …) — 402 paths of account administration and adjacent
-  products. What this crate needs from v3 is the outbound call endpoint, which is
-  modelled; `PUT /ai-webhooks` (the webhook URL, no secret field) is not.
-* **TTS voice catalogues** (`/api/tts-providers`, `voices.json`) — data, not
-  protocol; pass any documented voice id or name through `Tts`.
+* **REST v2 account administration** (devices, contacts, history, phonelines,
+  numbers, …) — <https://api.sipgate.com/v2/swagger.json>. Tracked in
+  [#12](https://github.com/floffel/sipgate-flow/issues/12).
+* **The rest of the v3 surface** — <https://api.sipgate.com/v3/openapi.json>, 402
+  paths. Models only `POST /ai-flows/{id}/call` today; `PUT /ai-webhooks`, the TTS
+  provider catalogue, accounts, devices and phonelines are tracked in
+  [#15](https://github.com/floffel/sipgate-flow/issues/15).
+
+### Absent upstream
+
+Two surfaces are missing from sipgate, not from this crate, so there is nothing to
+implement and no issue to track:
+
+* **Action delivery through the Flow "external API POST"** — three sentences in the
+  flow documentation mention the channel; neither the docs, the 402 v3 paths, the
+  v2/v3 swagger nor `@sipgate/ai-flow-sdk` 2.1.0 names a path, method or body
+  envelope. See §7.1.
+* **Fax, voicemail, recording and DTMF as *Flow* actions** — absent from the Flow
+  action catalogue (§7.8). Their real equivalents are REST v2 operations and are
+  implemented: `send_fax`, `resend_fax`, `play_voicemail`, `record_voicemail`,
+  `record_ivr`, `set_recording`, `send_dtmf`.
 
 ## 9. Source index
 

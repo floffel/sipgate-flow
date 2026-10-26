@@ -164,29 +164,38 @@ typed error instead of a guess. A missing `session.id` parses (so the event can
 be logged) but can never be addressed: `Action` builders refuse an empty id, a
 `/` or a control character.
 
-## Deliberately out of scope
+## Where the rest lives
 
-Each exclusion is a decision, not an oversight — the reasons are in
-[`docs/contracts.md` §8](docs/contracts.md#8-deliberately-not-modelled):
+Every surface sipgate documents and this crate does not model yet is an open
+issue, so a caller can see whether their case is covered instead of reading a list
+of decisions — and `tests/docs.rs` fails the build if a gap is written down without
+an issue behind it:
 
-* **The classic Push API** (`event=newCall`, XML `<Dial>`/`<Gather>` responses).
-  Form-encoded in, XML out: a different protocol, so a different crate.
-* **The WebSocket transport.** Flow connects *to you*; the event and action type
-  trees are transport agnostic and work there unchanged.
+* **The classic Push API** (`event=newCall`, XML `<Dial>`/`<Gather>` responses) —
+  [#10](https://github.com/floffel/sipgate-flow/issues/10). Form-encoded in, XML
+  out: its own module, with the same validation and webhook-verification
+  discipline as Flow.
+* **The WebSocket transport** — [#11](https://github.com/floffel/sipgate-flow/issues/11).
+  Flow connects *to you*, so the client half needs a server half; the event and
+  action type trees are transport agnostic and work there unchanged.
 * **REST v2 account administration** (devices, contacts, history, phonelines,
-  numbers, …) — not call handling.
-* **Action delivery through an undocumented "external API POST".** Three
-  sentences in the flow documentation mention the channel; neither the docs, the
-  v3 `OpenAPI` document (402 paths) nor the official SDK names a path, method or
-  body envelope for it, so no client method guesses one.
-* **Fax, voicemail, recording and DTMF as *Flow* actions.** They do not exist in
-  the Flow action catalogue; their real equivalents live in REST v2 and are
-  implemented there.
+  numbers, …) — [#12](https://github.com/floffel/sipgate-flow/issues/12).
+  Documented endpoints, not modelled yet.
+* **The rest of the v3 surface** (`PUT /ai-webhooks`, the TTS provider catalogue,
+  accounts, devices; ai-agents and the playground are other products) —
+  [#15](https://github.com/floffel/sipgate-flow/issues/15).
+
+Two surfaces really are absent upstream, which is the only kind of exclusion the
+standing order allows: delivery through the Flow "external API POST" (no path,
+method or body envelope is documented anywhere — see `docs/contracts.md` §7.1) and
+fax, voicemail, recording or DTMF *as Flow actions* (they are not in the Flow
+action catalogue; the REST v2 operations that do exist are implemented here —
+§7.8).
 
 ## Tests
 
 ```bash
-cargo test                        # 193 integration + 337 doctests
+cargo test                        # 217 integration + 341 doctests
 cargo test --no-default-features  # same, without reqwest
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
@@ -200,6 +209,9 @@ cargo llvm-cov --all-features --summary-only
   never panic the event parser; documented events round-trip and render
   idempotently; base64 and WAV round-trip; backoff stays bounded and monotonic;
   `Retry-After` never panics.
+* **Documentation guards** (`tests/docs.rs`): the gap list in the README and
+  `docs/contracts.md` must link a tracked issue, may never be described as an
+  exclusion, and both documents have to list the same number of gaps.
 * **Edge cases**: empty and whitespace bodies, non-object JSON, truncated JSON,
   duplicate known keys, wrong field types, unicode/NUL, 1 MiB payloads,
   over-long phone numbers, path-escape attempts, `NaN` volumes, wrong WAV
@@ -215,7 +227,7 @@ cargo llvm-cov --all-features --summary-only
   `127.0.0.1` to exercise the `reqwest` adapter itself (verbs, both auth
   schemes, JSON and form bodies, timeouts, truncated bodies). Nothing reaches
   the network.
-* **Coverage**: **98.4 % of lines, 97.4 % of regions, 98.1 % of functions**
+* **Coverage**: **98.1 % of lines, 99.5 % of regions, 99.1 % of functions**
   (`cargo llvm-cov --all-features`). CI fails below 95 %.
 
 ## License
