@@ -7,6 +7,7 @@
 //! production uses [`ReqwestTransport`] behind the default `http` feature.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -81,6 +82,10 @@ impl Method {
 /// and a sipgate Personal Access Token (`Basic base64(<token id>:<token>)`);
 /// everything else uses [`Security::Bearer`].
 ///
+/// [`fmt::Debug`] prints the user half of a `Basic` credential (it identifies
+/// the account, not the secret) and replaces the password or bearer token with
+/// `<redacted>`, so a `{:?}` in a log line cannot leak a credential.
+///
 /// ```
 /// use sipgate_flow::transport::Security;
 ///
@@ -88,8 +93,11 @@ impl Method {
 /// assert!(matches!(bearer, Security::Bearer(_)));
 /// let basic = Security::Basic { username: "id", password: "secret" };
 /// assert!(matches!(basic, Security::Basic { .. }));
+///
+/// let rendered = format!("{basic:?}");
+/// assert!(rendered.contains("id"), "{rendered}");
+/// assert!(!rendered.contains("secret"), "{rendered}");
 /// ```
-#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Security<'a> {
     /// No `Authorization` header.
@@ -128,6 +136,10 @@ impl<'a> Security<'a> {
 
 /// What goes into the request body.
 ///
+/// [`fmt::Debug`] renders a `Form` or `Json` body with every field whose name
+/// looks like a credential (`password`, `secret`, `token`, `assertion`, `key`,
+/// case-insensitive) replaced by `<redacted>`.
+///
 /// ```
 /// use sipgate_flow::transport::{Method, Request, RequestBody, Security};
 ///
@@ -135,7 +147,6 @@ impl<'a> Security<'a> {
 /// let json = Request::json(Method::Put, "https://x.test/a", Security::Bearer("t"), &payload);
 /// assert!(matches!(json.body, RequestBody::Json(_)));
 /// ```
-#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum RequestBody<'a> {
     /// No body (GET, DELETE).
@@ -151,6 +162,10 @@ pub enum RequestBody<'a> {
 /// The credential travels in a header, never in the URL, so it cannot leak
 /// through proxy logs or error messages.
 ///
+/// [`fmt::Debug`] is safe to log: verb, URL (which never carries the
+/// credential) and timeout are printed, while [`Security`] and the credential
+/// fields of the body render as `<redacted>`.
+///
 /// ```
 /// use std::time::Duration;
 /// use sipgate_flow::transport::{Method, Request, Security};
@@ -159,8 +174,11 @@ pub enum RequestBody<'a> {
 ///     .with_timeout(Some(Duration::from_secs(5)));
 /// assert_eq!(request.timeout.unwrap().as_secs(), 5);
 /// assert_eq!(request.method, Method::Delete);
+///
+/// let rendered = format!("{request:?}");
+/// assert!(rendered.contains("api.sipgate.com"), "{rendered}");
+/// assert!(rendered.contains("<redacted>"), "{rendered}");
 /// ```
-#[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     /// Verb to use.
     pub method: Method,
@@ -555,5 +573,115 @@ fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
         Error::transport(message)
     } else {
         Error::ambiguous(None, message)
+    }
+}
+
+impl fmt::Debug for Security<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Bearer(token) => f
+                .debug_tuple("Bearer")
+                .field(&rendered_secret(token))
+                .finish(),
+            Self::Basic { username, password } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &rendered_secret(password))
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for RequestBody<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("Empty"),
+            Self::Json(value) => f.debug_tuple("Json").field(&redact_json(value)).finish(),
+            Self::Form(fields) => f
+                .debug_tuple("Form")
+                .field(&RedactedFields(fields))
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for Request<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("security", &self.security)
+            .field("timeout", &self.timeout)
+            .field("body", &self.body)
+            .finish()
+    }
+}
+
+/// The placeholder every redacted field renders as.
+const REDACTED: &str = "<redacted>";
+
+/// A secret as it may appear in `Debug`: `<redacted>`, or the empty string when
+/// it is empty — an empty credential is nothing to leak, and seeing `""` tells
+/// the caller the token was never configured.
+const fn rendered_secret(secret: &str) -> &str {
+    if secret.is_empty() {
+        ""
+    } else {
+        REDACTED
+    }
+}
+
+/// Whether a form or JSON field name carries a credential, matched
+/// case-insensitively as a substring because providers spell them
+/// `client_secret`, `X-API-TOKEN`, `refresh_token`, `client_assertion` and
+/// `api_key`.
+///
+/// Over-redaction is deliberate: a field called `hotkey` loses its value in
+/// `Debug`, a field called `client_secret` must never keep it.
+fn is_credential_field(name: &str) -> bool {
+    const NEEDLES: [&str; 5] = ["password", "secret", "token", "assertion", "key"];
+    let lowered = name.to_ascii_lowercase();
+    NEEDLES.iter().any(|needle| lowered.contains(needle))
+}
+
+/// `value` with every credential-bearing field replaced.
+///
+/// sipgate flow actions carry no credentials, but the transport is public:
+/// whoever hands a `client_secret` to [`RequestBody::Json`] or
+/// [`RequestBody::Form`] must not see it in a log line because of it.
+fn redact_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(name, field)| {
+                    let field = if is_credential_field(name) {
+                        Value::String(REDACTED.to_string())
+                    } else {
+                        redact_json(field)
+                    };
+                    (name.clone(), field)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_json).collect()),
+        other => other.clone(),
+    }
+}
+
+/// `Debug` view of a form body with its credential fields redacted.
+struct RedactedFields<'a>(&'a [(String, String)]);
+
+impl fmt::Debug for RedactedFields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = f.debug_map();
+        for (name, value) in self.0 {
+            if is_credential_field(name) {
+                map.entry(name, &REDACTED);
+            } else {
+                map.entry(name, value);
+            }
+        }
+        map.finish()
     }
 }
