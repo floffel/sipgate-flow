@@ -9,7 +9,7 @@
 //! ```
 //! use sipgate_flow::wav;
 //!
-//! let clip = wav::pcm16_wav(&[0, 0, 1, 0], 16_000, 1);
+//! let clip = wav::pcm16_wav(&[0, 0, 1, 0], 16_000, 1).expect("a short clip");
 //! assert!(wav::validate_pcm16(&clip, 16_000, 1).is_ok());
 //! assert!(wav::validate_pcm16(&clip, 8_000, 1).is_err());
 //! ```
@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 /// ```
 /// use sipgate_flow::wav;
 ///
-/// let clip = wav::pcm16_wav(&[0, 0], 16_000, 1);
+/// let clip = wav::pcm16_wav(&[0, 0], 16_000, 1).expect("a short clip");
 /// let format = wav::format(&clip).unwrap();
 /// assert_eq!(format.sample_rate, 16_000);
 /// assert_eq!(format.bits_per_sample, 16);
@@ -38,23 +38,44 @@ pub struct WavFormat {
     pub format_tag: u16,
 }
 
+/// The largest `data` chunk a RIFF/WAVE file can describe.
+///
+/// Both the `data` size field and the enclosing `RIFF` size field are 32-bit, and
+/// the `RIFF` size counts everything after its own four bytes plus the four bytes
+/// of the `WAVE` form id: the 24-byte `fmt ` chunk, the 8-byte `data` header and
+/// the payload, so `36 + data_len` has to fit a `u32`. [`pcm16_wav`] refuses a
+/// larger payload instead of writing a header that disagrees with the body.
+///
+/// ```
+/// use sipgate_flow::wav;
+///
+/// assert_eq!(wav::MAX_RIFF_DATA_BYTES, (u32::MAX - 36) as usize);
+/// ```
+pub const MAX_RIFF_DATA_BYTES: usize = (u32::MAX - 36) as usize;
+
 /// Builds a 16-bit PCM WAV file from raw little-endian samples, for tests and
 /// for callers that synthesise audio.
 ///
 /// ```
 /// use sipgate_flow::wav;
 ///
-/// let clip = wav::pcm16_wav(&[], 16_000, 1);
+/// let clip = wav::pcm16_wav(&[], 16_000, 1).expect("an empty payload fits");
 /// assert_eq!(clip.len(), 44); // header only
 /// assert_eq!(&clip[..4], b"RIFF");
 /// ```
-#[must_use]
-pub fn pcm16_wav(samples: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let data_len = u32::try_from(samples.len()).unwrap_or(u32::MAX);
+///
+/// # Errors
+///
+/// [`Error::Validation`] when the payload is larger than
+/// [`MAX_RIFF_DATA_BYTES`]; the check runs before the output buffer is allocated,
+/// so a caller cannot be talked into a multi-gigabyte allocation by a length field.
+pub fn pcm16_wav(samples: &[u8], sample_rate: u32, channels: u16) -> Result<Vec<u8>> {
+    let data_len = data_len(samples.len())?;
     let channels = channels.max(1);
     let block_align = channels.saturating_mul(2);
     let byte_rate = sample_rate.saturating_mul(u32::from(block_align));
-    let riff_len = 36_u32.saturating_add(data_len);
+    // `data_len` is capped so that this cannot overflow: 36 + (u32::MAX - 36).
+    let riff_len = 36_u32 + data_len;
 
     let mut out = Vec::with_capacity(44 + samples.len());
     out.extend_from_slice(b"RIFF");
@@ -71,7 +92,21 @@ pub fn pcm16_wav(samples: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
     out.extend_from_slice(samples);
-    out
+    Ok(out)
+}
+
+/// Rejects a payload the RIFF container cannot describe, before anything is
+/// allocated. Split out so the boundary is testable without a 4 GiB slice.
+fn data_len(sample_bytes: usize) -> Result<u32> {
+    match u32::try_from(sample_bytes) {
+        Ok(len) if len <= u32::MAX - 36 => Ok(len),
+        _ => Err(Error::validation(
+            "audio",
+            format!(
+                "PCM payload of {sample_bytes} bytes exceeds the RIFF limit of {MAX_RIFF_DATA_BYTES} bytes"
+            ),
+        )),
+    }
 }
 
 /// Reads the `fmt ` chunk, if the bytes are a RIFF/WAVE file.
@@ -116,7 +151,7 @@ pub fn format(bytes: &[u8]) -> Option<WavFormat> {
 /// ```
 /// use sipgate_flow::wav;
 ///
-/// let stereo = wav::pcm16_wav(&[0, 0, 0, 0], 16_000, 2);
+/// let stereo = wav::pcm16_wav(&[0, 0, 0, 0], 16_000, 2).expect("a short clip");
 /// assert!(wav::validate_pcm16(&stereo, 16_000, 1).is_err());
 /// ```
 ///
@@ -162,4 +197,60 @@ pub fn validate_pcm16(bytes: &[u8], expected_rate: u32, expected_channels: u16) 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{data_len, MAX_RIFF_DATA_BYTES};
+    use proptest::prelude::*;
+
+    /// The RIFF `data` field is 32-bit and the enclosing `RIFF` field spends 36
+    /// of the same budget on the header, so the last representable payload is
+    /// `u32::MAX - 36` - and it must be accepted, not off by one.
+    #[test]
+    fn the_last_representable_payload_is_accepted() {
+        let limit = MAX_RIFF_DATA_BYTES;
+        assert_eq!(
+            data_len(limit).expect("the limit is representable"),
+            u32::MAX - 36
+        );
+        assert_eq!(data_len(0).expect("an empty payload"), 0);
+        assert_eq!(data_len(44).expect("22 samples of 16-bit PCM"), 44);
+    }
+
+    /// One byte past it is refused - and this is the case the old code saturated
+    /// into `u32::MAX`, writing a header that disagreed with the body.
+    #[test]
+    fn one_byte_past_the_limit_is_refused() {
+        let error = data_len(MAX_RIFF_DATA_BYTES + 1).expect_err("one byte too many");
+        let message = error.to_string();
+        assert!(message.contains("exceeds the RIFF limit"), "{message}");
+        assert!(
+            message.contains(&MAX_RIFF_DATA_BYTES.to_string()),
+            "{message}"
+        );
+    }
+
+    /// The refusal happens before allocation, so a `usize::MAX` length handed in
+    /// by a caller must come back as an error rather than a request for 18 EB.
+    #[test]
+    fn an_absurd_length_is_refused_without_allocating() {
+        assert!(data_len(usize::MAX).is_err());
+        assert!(data_len(u32::MAX as usize).is_err());
+    }
+
+    proptest! {
+        /// Accepted exactly up to the limit, refused above it - no gaps, no
+        /// saturation, and the value is carried through unchanged.
+        #[test]
+        fn a_payload_is_accepted_iff_it_fits(sample_bytes in 0_usize..=u32::MAX as usize) {
+            match data_len(sample_bytes) {
+                Ok(len) => {
+                    prop_assert!(sample_bytes <= MAX_RIFF_DATA_BYTES);
+                    prop_assert_eq!(u64::from(len), sample_bytes as u64);
+                }
+                Err(_) => prop_assert!(sample_bytes > MAX_RIFF_DATA_BYTES),
+            }
+        }
+    }
 }

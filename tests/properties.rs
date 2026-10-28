@@ -188,7 +188,7 @@ proptest! {
         samples in prop::collection::vec(any::<u8>(), 0..2048),
         rate in prop_oneof![Just(8_000_u32), Just(16_000_u32)],
     ) {
-        let clip = wav::pcm16_wav(&samples, rate, 1);
+        let clip = wav::pcm16_wav(&samples, rate, 1).expect("a small payload fits");
         prop_assert!(wav::validate_pcm16(&clip, rate, 1).is_ok());
         prop_assert!(wav::format(&clip).is_some());
     }

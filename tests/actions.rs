@@ -98,14 +98,14 @@ fn audio_requires_valid_base64() {
 
 #[test]
 fn audio_wav_refuses_a_clip_the_service_would_not_play() {
-    let good = sipgate_flow::wav::pcm16_wav(&[0, 0, 1, 0], 16_000, 1);
+    let good = sipgate_flow::wav::pcm16_wav(&[0, 0, 1, 0], 16_000, 1).expect("a short clip");
     assert!(Action::audio_wav(SESSION, &good).is_ok());
 
-    let wrong_rate = sipgate_flow::wav::pcm16_wav(&[0, 0], 44_100, 1);
+    let wrong_rate = sipgate_flow::wav::pcm16_wav(&[0, 0], 44_100, 1).expect("a short clip");
     let error = Action::audio_wav(SESSION, &wrong_rate).expect_err("44.1 kHz");
     assert!(error.to_string().contains("16000 Hz"), "{error}");
 
-    let stereo = sipgate_flow::wav::pcm16_wav(&[0, 0, 0, 0], 16_000, 2);
+    let stereo = sipgate_flow::wav::pcm16_wav(&[0, 0, 0, 0], 16_000, 2).expect("a short clip");
     assert!(Action::audio_wav(SESSION, &stereo).is_err());
 
     assert!(Action::audio_wav(SESSION, b"ID3\x04 not a wav").is_err());

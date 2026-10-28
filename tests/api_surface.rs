@@ -229,7 +229,7 @@ fn a_retry_after_hint_is_ignored_when_the_policy_says_so() {
 
 #[test]
 fn a_wav_can_be_validated_or_rejected_before_it_is_sent() {
-    let good = wav::pcm16_wav(&[0, 1, 2, 3], 16_000, 1);
+    let good = wav::pcm16_wav(&[0, 1, 2, 3], 16_000, 1).expect("a short clip");
     wav::validate_pcm16(&good, 16_000, 1).expect("a 16 kHz mono clip");
 
     // A chunk that claims more bytes than the file has.
@@ -250,6 +250,24 @@ fn a_wav_can_be_validated_or_rejected_before_it_is_sent() {
     // A RIFF header with no fmt chunk at all.
     let header_only = b"RIFF\x04\x00\x00\x00WAVE";
     assert!(wav::format(header_only).is_none());
+}
+
+#[test]
+fn a_generated_wav_declares_the_sizes_the_payload_actually_has() {
+    // The two 32-bit size fields have to agree with the body: a `data` length
+    // that saturates while the payload keeps growing is a file every player
+    // truncates, and it is what the limit exists to prevent.
+    let payload = vec![7_u8; 1_000];
+    let clip = wav::pcm16_wav(&payload, 8_000, 1).expect("1 kB fits");
+    let riff_len = u32::from_le_bytes(clip[4..8].try_into().expect("four bytes")) as usize;
+    let data_len = u32::from_le_bytes(clip[40..44].try_into().expect("four bytes")) as usize;
+    assert_eq!(riff_len, clip.len() - 8);
+    assert_eq!(data_len, payload.len());
+    assert_eq!(&clip[44..], payload.as_slice());
+
+    // The documented ceiling is the one the container can express: `u32::MAX`
+    // minus the 36 bytes that the `RIFF` field spends before the payload.
+    assert_eq!(wav::MAX_RIFF_DATA_BYTES, (u32::MAX - 36) as usize);
 }
 
 #[test]
@@ -292,13 +310,13 @@ fn a_malformed_local_audio_is_rejected_with_the_reason() {
         "{error:?}"
     );
 
-    let mut eight_bit = wav::pcm16_wav(&[0, 1, 2, 3], 16_000, 1);
+    let mut eight_bit = wav::pcm16_wav(&[0, 1, 2, 3], 16_000, 1).expect("a short clip");
     // Patch the bit depth (offset 34 in the canonical layout) to 8.
     eight_bit[34] = 8;
     let error = wav::validate_pcm16(&eight_bit, 16_000, 1).expect_err("8-bit");
     assert!(error.to_string().contains("16-bit"), "{error}");
 
-    let mut compressed = wav::pcm16_wav(&[0, 1, 2, 3], 16_000, 1);
+    let mut compressed = wav::pcm16_wav(&[0, 1, 2, 3], 16_000, 1).expect("a short clip");
     // Patch the format tag (offset 20) to 3 (IEEE float).
     compressed[20] = 3;
     let error = wav::validate_pcm16(&compressed, 16_000, 1).expect_err("compressed");

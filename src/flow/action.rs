@@ -170,7 +170,7 @@ impl Action {
     /// use sipgate_flow::Action;
     ///
     /// // 44-byte header + one sample, 16 kHz mono 16-bit.
-    /// let wav = sipgate_flow::wav::pcm16_wav(&[0, 0], 16_000, 1);
+    /// let wav = sipgate_flow::wav::pcm16_wav(&[0, 0], 16_000, 1).expect("a short clip");
     /// let action = Action::audio_wav("s1", &wav)?;
     /// assert!(action.to_json()["audio"].as_str().unwrap().starts_with("UklGR"));
     /// # Ok::<(), sipgate_flow::Error>(())
@@ -1137,7 +1137,7 @@ impl Audio {
     /// ```
     /// use sipgate_flow::Audio;
     ///
-    /// let wav = sipgate_flow::wav::pcm16_wav(&[1, 2, 3, 4], 16_000, 1);
+    /// let wav = sipgate_flow::wav::pcm16_wav(&[1, 2, 3, 4], 16_000, 1).expect("a short clip");
     /// let clip = Audio::wav(&wav)?;
     /// assert!(clip.base64_data().starts_with("UklGR"));
     /// # Ok::<(), sipgate_flow::Error>(())
