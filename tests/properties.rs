@@ -110,15 +110,28 @@ proptest! {
         prop_assert_eq!(base64::decode(&encoded).expect("decodes"), bytes);
     }
 
+    /// Accepted input is *canonical*: it ends on a four-character group, and
+    /// decoding then re-encoding reproduces the exact string. `is_valid` is the
+    /// same rule as `decode`, never a cheaper approximation.
     #[test]
-    fn anything_base64_accepts_decodes(input in "[A-Za-z0-9+/=]{0,64}") {
+    fn accepted_base64_is_canonical(input in "[A-Za-z0-9+/]{0,60}={0,2}") {
+        prop_assert_eq!(base64::is_valid(&input), base64::decode(&input).is_ok());
         if base64::is_valid(&input) {
-            prop_assert!(base64::decode(&input).is_ok());
-            // Re-encoding is stable even where the input was non-canonical.
+            prop_assert!(input.len().is_multiple_of(4));
             let decoded = base64::decode(&input).expect("valid");
-            prop_assert!(base64::is_valid(&base64::encode(&decoded)));
-        } else {
-            prop_assert!(base64::decode(&input).is_err());
+            prop_assert_eq!(base64::encode(&decoded), input);
+        }
+    }
+
+    /// Padding is required, not optional: the engine's own encoding is valid,
+    /// the same string with its `=` stripped is not.
+    #[test]
+    fn padding_is_required(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
+        let encoded = base64::encode(&bytes);
+        prop_assert!(base64::is_valid(&encoded));
+        let stripped = encoded.trim_end_matches('=');
+        if stripped.len() != encoded.len() {
+            prop_assert!(!base64::is_valid(stripped));
         }
     }
 
