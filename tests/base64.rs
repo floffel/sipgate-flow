@@ -119,7 +119,7 @@ fn every_rejection_names_the_field_without_echoing_the_input() {
         match &err {
             Error::Validation { field, message } => {
                 assert_eq!(*field, "base64");
-                assert!(!message.is_empty());
+                assert_ne!(message, "", "a reason must never be empty");
                 assert!(
                     !message.contains(input) && !message.contains('!'),
                     "message must not echo the input: {message:?}"

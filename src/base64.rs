@@ -146,11 +146,12 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), reasons.len(), "reasons must be distinct");
-        assert!(
-            reasons
-                .iter()
-                .all(|reason| !reason.is_empty() && !reason.contains('!')),
-            "a reason never echoes the offending input"
-        );
+        for reason in reasons {
+            assert_ne!(reason, "", "a reason must never be empty");
+            assert!(
+                !reason.contains('!'),
+                "no reason echoes the offending input"
+            );
+        }
     }
 }
