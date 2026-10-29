@@ -16,6 +16,12 @@ jobs:
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+      # `examples/` is documentation that cannot rot: both examples run here, so
+      # an API change that breaks the quickstart fails the build instead of the
+      # reader. They are deliberately offline (no network, no credentials).
+      - run: cargo run --example flow_webhook
+      - run: cargo run --example rest_dry_run
+      - run: cargo build --examples --no-default-features
 
   coverage:
     runs-on: ubuntu-latest
