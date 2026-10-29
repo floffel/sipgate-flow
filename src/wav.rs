@@ -18,6 +18,9 @@ use crate::error::{Error, Result};
 
 /// What a WAV file's `fmt ` chunk says about its samples.
 ///
+/// `#[non_exhaustive]`: only [`format()`] produces it, and a field the `fmt `
+/// chunk gains later (byte rate, block alignment) must not break a caller.
+///
 /// ```
 /// use sipgate_flow::wav;
 ///
@@ -27,6 +30,7 @@ use crate::error::{Error, Result};
 /// assert_eq!(format.bits_per_sample, 16);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WavFormat {
     /// Samples per second.
     pub sample_rate: u32,

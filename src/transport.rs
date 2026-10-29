@@ -159,6 +159,10 @@ pub enum RequestBody<'a> {
 
 /// A single HTTP call, transport agnostic.
 ///
+/// `#[non_exhaustive]`: a header map or a per-request credential can be
+/// added without a breaking release. Build a request with [`Request::empty`],
+/// [`Request::json`] or [`Request::form`], then read the fields directly.
+///
 /// The credential travels in a header, never in the URL, so it cannot leak
 /// through proxy logs or error messages.
 ///
@@ -179,6 +183,7 @@ pub enum RequestBody<'a> {
 /// assert!(rendered.contains("api.sipgate.com"), "{rendered}");
 /// assert!(rendered.contains("<redacted>"), "{rendered}");
 /// ```
+#[non_exhaustive]
 pub struct Request<'a> {
     /// Verb to use.
     pub method: Method,

@@ -260,10 +260,11 @@ does. From `1.0.0` on, ordinary SemVer applies. What counts as breaking here:
 * **tightening a validation rule** — a value the crate accepted last week is a
   rejected call today. Loosening a rule is a minor change.
 
-Provider payloads, actions and `Error` are `#[non_exhaustive]` on purpose: a new
-sipgate event type or error is an addition, not a break, and a downstream
-`match` already carries a `_` arm. Deprecated items stay for at least one minor
-release before they are removed.
+Every public enum — provider payloads, actions, `Error` — and every struct a
+caller could otherwise build with a struct literal (`Request`, `Session`,
+`WavFormat`) is `#[non_exhaustive]`: a new sipgate event type, error or field
+is an addition, not a break, and a downstream `match` already carries a `_` arm.
+`tests/public_surface.rs` re-derives that decision from `src/` on every run.
 
 **MSRV: Rust 1.89.** It is declared as `rust-version` in `Cargo.toml`, so an
 older toolchain refuses the build with a clear message instead of failing halfway
