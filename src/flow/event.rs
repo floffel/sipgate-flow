@@ -387,6 +387,10 @@ impl ErrorCode {
 
 /// The `session` object every event carries.
 ///
+/// `#[non_exhaustive]`: sipgate adds session fields regularly, and a new one
+/// must stay a non-breaking release. Build it with [`Session::default`] or
+/// [`Session::new`], then set the fields a caller needs.
+///
 /// Fields the documentation marks required are `String`; the rest are
 /// `Option`, because `user_speak`, `assistant_speak` and friends show a shorter
 /// session object in the official examples than `session_start` does.
@@ -394,11 +398,12 @@ impl ErrorCode {
 /// ```
 /// use sipgate_flow::Session;
 ///
-/// let session = Session { id: "s1".into(), ..Session::default() };
+/// let session = Session::new("s1");
 /// assert_eq!(session.id, "s1");
 /// assert!(session.direction.is_none());
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Session {
     /// Session identifier, the `session_id` every action must echo back.
     pub id: String,
@@ -885,16 +890,30 @@ impl Event {
 }
 
 impl Session {
+    /// A session with the given identifier and every optional field empty.
+    ///
+    /// ```
+    /// use sipgate_flow::Session;
+    ///
+    /// let session = Session::new("s1");
+    /// assert_eq!(session.id, "s1");
+    /// assert!(session.to_json().get("direction").is_none());
+    /// ```
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ..Self::default()
+        }
+    }
+
     /// Renders the session object; unknown fields are preserved.
     ///
     /// ```
     /// use sipgate_flow::Session;
     ///
-    /// let session = Session {
-    ///     id: "s1".into(),
-    ///     direction: Some(sipgate_flow::Direction::Inbound),
-    ///     ..Session::default()
-    /// };
+    /// let mut session = Session::new("s1");
+    /// session.direction = Some(sipgate_flow::Direction::Inbound);
     /// assert_eq!(
     ///     session.to_json(),
     ///     serde_json::json!({"id": "s1", "direction": "inbound"})

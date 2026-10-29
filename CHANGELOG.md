@@ -45,6 +45,11 @@ Nothing yet.
 
 ### Changed
 
+* The whole public surface is `#[non_exhaustive]` where a caller could
+  otherwise build it with a struct literal: `Request`, `Session` (which gains
+  `Session::new`) and `WavFormat` join the payload enums, so a new field is
+  never a breaking release. `tests/public_surface.rs` derives that decision
+  from `src/` and fails when a new public type forgets it.
 * Parsing is permissive in the direction the wire drifts: `camelCase` and
   `snake_case`, reordered and unknown fields, unknown enum values. Duplicate
   known keys are a typed error rather than a guess.
