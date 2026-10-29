@@ -192,10 +192,23 @@ fax, voicemail, recording or DTMF *as Flow actions* (they are not in the Flow
 action catalogue; the REST v2 operations that do exist are implemented here —
 §7.8).
 
+## Examples
+
+Two runnable examples, both offline (`cargo run --example <name>`):
+
+* `flow_webhook` — verifies `X-API-TOKEN`, parses a `user_speak`, answers with
+  two actions, and shows the 204 `session_end` must get.
+* `rest_dry_run` — drives `RestClient` against a recording `Transport` and
+  prints the request the crate would send; a real call is one
+  `ReqwestTransport::new()` away.
+
+CI runs both (with and without default features), so the quickstart cannot
+drift away from the API.
+
 ## Tests
 
 ```bash
-cargo test                        # 217 integration + 341 doctests
+cargo test                        # 246 tests + 342 doctests
 cargo test --no-default-features  # same, without reqwest
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
