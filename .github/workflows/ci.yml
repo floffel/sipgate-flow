@@ -60,3 +60,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The MSRV is a promise in Cargo.toml and the README, so it is tested instead
+  # of assumed: 1.89 is the version the crate claims, and a dependency that
+  # silently raises it fails here rather than in a downstream build.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - run: cargo test --all-features
+      - run: cargo test --no-default-features
