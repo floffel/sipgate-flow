@@ -208,7 +208,7 @@ drift away from the API.
 ## Tests
 
 ```bash
-cargo test                        # 246 tests + 342 doctests
+cargo test                        # 254 tests + 342 doctests
 cargo test --no-default-features  # same, without reqwest
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
@@ -242,6 +242,33 @@ cargo llvm-cov --all-features --summary-only
   the network.
 * **Coverage**: **98.1 % of lines, 99.5 % of regions, 99.1 % of functions**
   (`cargo llvm-cov --all-features`). CI fails below 95 %.
+
+## Versioning
+
+Semantic Versioning 2.0.0, one version for both halves of the crate (`flow` and
+`rest` are released together), and an entry in [`CHANGELOG.md`](CHANGELOG.md) for
+every change a caller can observe. The version bump and the changelog entry land
+on the commit that gets tagged — a tag can never publish something the changelog
+does not describe.
+
+While the major version is `0`, a **minor** bump may break and a **patch** never
+does. From `1.0.0` on, ordinary SemVer applies. What counts as breaking here:
+
+* removing or renaming a public item;
+* adding a required field, or a variant to an enum that is *not*
+  `#[non_exhaustive]`;
+* **tightening a validation rule** — a value the crate accepted last week is a
+  rejected call today. Loosening a rule is a minor change.
+
+Provider payloads, actions and `Error` are `#[non_exhaustive]` on purpose: a new
+sipgate event type or error is an addition, not a break, and a downstream
+`match` already carries a `_` arm. Deprecated items stay for at least one minor
+release before they are removed.
+
+**MSRV: Rust 1.89.** It is declared as `rust-version` in `Cargo.toml`, so an
+older toolchain refuses the build with a clear message instead of failing halfway
+through, and the `msrv` CI job runs the whole suite on exactly that version.
+Raising the MSRV is a minor release, never a patch.
 
 ## License
 
