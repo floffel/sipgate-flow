@@ -1,11 +1,14 @@
 //! Property tests: arbitrary input never panics, and what the crate renders
 //! parses back to the same value.
 
+use std::time::Duration;
+
 use proptest::prelude::*;
 use serde_json::{json, Value};
+use sipgate_flow::auth::MAX_TOKEN_LIFETIME;
 use sipgate_flow::{
-    base64, classify, parse_retry_after, wav, Action, Event, EventPayload, Method, RetryOutcome,
-    RetryPolicy, SmsFailureReason, TransferFailedReason,
+    base64, classify, parse_retry_after, wav, Action, Error, Event, EventPayload, Method,
+    RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
 };
 
 /// A recursive JSON value, bounded in depth and width.
@@ -249,5 +252,21 @@ proptest! {
         prop_assert_eq!(body["text"].as_str(), Some(text.as_str()));
         prop_assert!(matches!(action.body(), sipgate_flow::ActionKind::Speak(_)));
         let _ = EventPayload::SessionEnd;
+    }
+
+    #[test]
+    fn an_arbitrary_expires_in_is_either_a_usable_lifetime_or_a_typed_error(seconds in any::<u64>()) {
+        let parsed = Token::from_json(&json!({"access_token": "a", "expires_in": seconds}));
+        match parsed {
+            Ok(token) => {
+                prop_assert_eq!(token.expires_in(), Some(Duration::from_secs(seconds)));
+                prop_assert!(Duration::from_secs(seconds) <= MAX_TOKEN_LIFETIME);
+            }
+            Err(Error::TokenResponse(reason)) => {
+                prop_assert!(Duration::from_secs(seconds) > MAX_TOKEN_LIFETIME);
+                prop_assert!(reason.contains("expires_in"), "{}", reason);
+            }
+            Err(other) => prop_assert!(false, "unexpected error for {}: {}", seconds, other),
+        }
     }
 }

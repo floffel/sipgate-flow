@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{json_response, response, FakeClock, MockTransport, RecordingSleeper};
-use sipgate_flow::auth::DEFAULT_TOKEN_URL;
+use sipgate_flow::auth::{DEFAULT_TOKEN_URL, MAX_TOKEN_LIFETIME};
 use sipgate_flow::{
     ClientCredentials, Error, OAuth2Client, PersonalAccessToken, RestClient, Result, StaticToken,
     Token, TokenSource,
@@ -394,4 +394,78 @@ async fn a_pat_is_never_refreshed_but_a_second_401_is_terminal() {
     assert!(matches!(client.calls().await, Err(Error::Unauthorized)));
     assert_eq!(transport.call_count(), 2, "one retry, then stop");
     assert_eq!(transport.calls()[1].auth, transport.calls()[0].auth);
+}
+
+#[test]
+fn an_expires_in_above_the_ceiling_is_a_typed_error() {
+    let at_ceiling = Token::from_json(&serde_json::json!({
+        "access_token": "a",
+        "expires_in": MAX_TOKEN_LIFETIME.as_secs(),
+    }))
+    .expect("the ceiling itself is usable");
+    assert_eq!(at_ceiling.expires_in(), Some(MAX_TOKEN_LIFETIME));
+
+    for seconds in [
+        MAX_TOKEN_LIFETIME.as_secs() + 1,
+        u64::MAX / 2,
+        u64::MAX - 1,
+        u64::MAX,
+    ] {
+        let refused = Token::from_json(&serde_json::json!({
+            "access_token": "a",
+            "expires_in": seconds,
+        }))
+        .expect_err("a lifetime the clock cannot add is refused");
+        let Error::TokenResponse(reason) = &refused else {
+            panic!("expected TokenResponse for {seconds}, got {refused:?}");
+        };
+        assert!(
+            reason.contains("expires_in") && reason.contains(&seconds.to_string()),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn a_non_integer_expires_in_is_treated_as_absent() {
+    for odd in [
+        serde_json::json!(-1),
+        serde_json::json!(300.5),
+        serde_json::json!("300"),
+    ] {
+        let token = Token::from_json(&serde_json::json!({
+            "access_token": "a",
+            "expires_in": odd,
+        }))
+        .expect("tolerated");
+        assert_eq!(token.expires_in(), None, "{odd}");
+    }
+}
+
+#[tokio::test]
+async fn a_clock_add_that_would_overflow_is_a_typed_error_and_never_caches() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "access_token": "t",
+        "expires_in": 300,
+    })));
+    let start = Duration::MAX
+        .checked_sub(Duration::from_secs(1))
+        .expect("representable");
+    let clock = FakeClock::new(start);
+    let auth = client(transport.clone()).with_clock(clock);
+
+    let failed = auth
+        .access_token(false)
+        .await
+        .expect_err("overflow is an error");
+    let Error::TokenResponse(reason) = &failed else {
+        panic!("expected TokenResponse, got {failed:?}");
+    };
+    assert!(reason.contains("overflow"), "{reason}");
+    assert_eq!(transport.call_count(), 1);
+    assert!(
+        !auth.has_valid_token(),
+        "a token whose expiry cannot be computed is not cached"
+    );
 }

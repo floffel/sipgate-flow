@@ -303,6 +303,13 @@ than picking one.
 Refresh margin: tokens live 300 s; the client treats a token as stale 60 s
 before expiry (configurable), and re-fetches on 401 once.
 
+Lifetime ceiling: `expires_in` is an untrusted `u64`, and `Duration` addition
+panics on overflow, so `auth::MAX_TOKEN_LIFETIME` (86400 s = 24 h) is the
+largest lifetime the crate accepts; anything above it is `Error::TokenResponse`.
+That is a defensive maximum, not a documented sipgate value - the only lifetime
+the docs state is the 300 s in the discovery example above - and 86400 s is
+almost three hundred times that, so a correct endpoint is never affected.
+
 ---
 
 ## 7. Unverified
