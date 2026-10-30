@@ -8,7 +8,13 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+* A token response whose `expires_in` does not fit the cache clock no longer
+  panics the process: `Token::from_json` refuses a lifetime above the new
+  `auth::MAX_TOKEN_LIFETIME` (24 hours) with `Error::TokenResponse`, and the
+  cache computes the expiry with `checked_add`, so an unusable value becomes a
+  typed error instead of an overflow panic in `Duration` addition.
 
 ## [0.1.0] — not yet published
 

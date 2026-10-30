@@ -62,6 +62,53 @@ pub const DEFAULT_REFRESH_MARGIN: Duration = Duration::from_secs(60);
 /// unusual response from being cached forever.
 pub const DEFAULT_LIFETIME: Duration = Duration::from_secs(300);
 
+/// The longest token lifetime the crate accepts.
+///
+/// `Duration::from_secs` builds a duration from any `u64`, but adding one to a
+/// clock reading panics on overflow, in release builds as well. A token
+/// response of `{"expires_in": 18446744073709551615}` - a broken proxy, a
+/// misconfigured realm, or a hostile endpoint - therefore used to take the
+/// process down on the cache path. Anything above this ceiling is refused as
+/// [`Error::TokenResponse`] instead. No real issuer hands out a token for
+/// longer than a day; Keycloak, which serves the sipgate token endpoint, sends
+/// 300 seconds.
+///
+/// ```
+/// use sipgate_flow::auth::{MAX_TOKEN_LIFETIME, Token};
+/// use sipgate_flow::Error;
+///
+/// let at_ceiling = Token::from_json(&serde_json::json!({
+///     "access_token": "a",
+///     "expires_in": MAX_TOKEN_LIFETIME.as_secs(),
+/// }))?;
+/// assert_eq!(at_ceiling.expires_in(), Some(MAX_TOKEN_LIFETIME));
+///
+/// let beyond = Token::from_json(&serde_json::json!({
+///     "access_token": "a",
+///     "expires_in": u64::MAX,
+/// }));
+/// assert!(matches!(beyond, Err(Error::TokenResponse(_))));
+/// # Ok::<(), Error>(())
+/// ```
+pub const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Turns the wire expiry into a duration, refusing a lifetime the clock
+/// arithmetic cannot carry.
+///
+/// A value that is not a non-negative integer is treated as absent, the same
+/// tolerance every other field gets; a value above [`MAX_TOKEN_LIFETIME`] is
+/// an error, because it cannot be honestly cached.
+fn token_lifetime(seconds: u64) -> Result<Duration> {
+    let lifetime = Duration::from_secs(seconds);
+    if lifetime > MAX_TOKEN_LIFETIME {
+        return Err(Error::TokenResponse(format!(
+            "expires_in of {seconds} seconds exceeds the accepted maximum of {} seconds",
+            MAX_TOKEN_LIFETIME.as_secs()
+        )));
+    }
+    Ok(lifetime)
+}
+
 /// A source of "now", so token expiry is testable without waiting.
 ///
 /// ```
@@ -299,10 +346,15 @@ impl Token {
     /// assert!(Token::from_json(&serde_json::json!({"access_token": "a", "expires_in": 300})).is_ok());
     /// ```
     ///
+    /// An `expires_in` that is not a non-negative integer is treated as absent,
+    /// so the assumed [`DEFAULT_LIFETIME`] applies; one above
+    /// [`MAX_TOKEN_LIFETIME`] is refused rather than turned into a duration the
+    /// cache clock arithmetic cannot add.
+    ///
     /// # Errors
     ///
-    /// [`Error::TokenResponse`] for a missing or empty `access_token`, or a
-    /// non-object body.
+    /// [`Error::TokenResponse`] for a missing or empty `access_token`, a
+    /// non-object body, or an `expires_in` above [`MAX_TOKEN_LIFETIME`].
     pub fn from_json(value: &Value) -> Result<Self> {
         let access_token = value
             .get("access_token")
@@ -321,7 +373,8 @@ impl Token {
             expires_in: value
                 .get("expires_in")
                 .and_then(Value::as_u64)
-                .map(Duration::from_secs),
+                .map(token_lifetime)
+                .transpose()?,
             refresh_token: value
                 .get("refresh_token")
                 .and_then(Value::as_str)
@@ -892,12 +945,17 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             .map(|cached| cached.token.clone())
     }
 
-    fn store(&self, token: Token) {
+    fn store(&self, token: Token) -> Result<()> {
         let lifetime = token.expires_in().unwrap_or(DEFAULT_LIFETIME);
-        let usable_for = lifetime
-            .saturating_sub(self.refresh_margin)
-            .max(Duration::ZERO);
-        let usable_until = self.clock.now() + usable_for;
+        let usable_for = lifetime.saturating_sub(self.refresh_margin);
+        // `Duration` add panics on overflow (release builds included), so a clock
+        // reading near the end of the representable range must surface as a typed
+        // error instead of taking the process down.
+        let usable_until = self
+            .clock
+            .now()
+            .checked_add(usable_for)
+            .ok_or_else(|| Error::TokenResponse("token expiry overflows the clock".into()))?;
         let mut guard = self
             .cache
             .lock()
@@ -906,6 +964,7 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             token,
             usable_until,
         });
+        Ok(())
     }
 
     async fn fetch(&self) -> Result<Token> {
@@ -931,7 +990,7 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
             }
         }
         let token = self.fetch().await?;
-        self.store(token.clone());
+        self.store(token.clone())?;
         Ok(token)
     }
 
