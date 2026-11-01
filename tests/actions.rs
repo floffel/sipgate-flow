@@ -183,13 +183,13 @@ fn transfer_validates_number_and_timeout() {
     assert!(Transfer::new("49 151").is_err());
     assert!(Transfer::new("1".repeat(16)).is_err());
     assert!(Transfer::new("1".repeat(15)).is_ok());
-    assert!(Transfer::new("49").unwrap().with_timeout(4).is_err());
-    assert!(Transfer::new("49").unwrap().with_timeout(5).is_ok());
-    assert!(Transfer::new("49").unwrap().with_timeout(120).is_ok());
-    assert!(Transfer::new("49").unwrap().with_timeout(121).is_err());
-    assert!(Transfer::new("49")
+    assert!(Transfer::new("4915112").unwrap().with_timeout(4).is_err());
+    assert!(Transfer::new("4915112").unwrap().with_timeout(5).is_ok());
+    assert!(Transfer::new("4915112").unwrap().with_timeout(120).is_ok());
+    assert!(Transfer::new("4915112").unwrap().with_timeout(121).is_err());
+    assert!(Transfer::new("4915112")
         .unwrap()
-        .with_caller_id("", "49")
+        .with_caller_id("", "4915112")
         .is_err());
 }
 
@@ -316,7 +316,7 @@ fn send_sms_normalises_the_number() {
     assert!(SendSms::new("4915112345678", "").is_err());
     assert!(SendSms::new("1".repeat(16), "hi").is_err());
     // The documentation promises no length limit on the message.
-    assert!(SendSms::new("49", "x".repeat(10_000)).is_ok());
+    assert!(SendSms::new("4915112", "x".repeat(10_000)).is_ok());
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn no_action_exceeds_the_documented_type_names() {
         Action::audio_base64(SESSION, "UklGRiQ=").unwrap().kind(),
         Action::stop_audio(SESSION).unwrap().kind(),
         Action::hangup(SESSION).unwrap().kind(),
-        Action::transfer(SESSION, Transfer::new("49").unwrap())
+        Action::transfer(SESSION, Transfer::new("4915112").unwrap())
             .unwrap()
             .kind(),
         Action::barge_in(SESSION).unwrap().kind(),
@@ -347,7 +347,7 @@ fn no_action_exceeds_the_documented_type_names() {
         )
         .unwrap()
         .kind(),
-        Action::send_sms(SESSION, SendSms::new("49", "x").unwrap())
+        Action::send_sms(SESSION, SendSms::new("4915112", "x").unwrap())
             .unwrap()
             .kind(),
     ];

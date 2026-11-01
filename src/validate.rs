@@ -13,6 +13,8 @@ pub(crate) const MAX_SESSION_ID: usize = 200;
 
 /// Longest E.164 number: 15 digits, per ITU-T E.164.
 pub(crate) const MAX_PHONE_DIGITS: usize = 15;
+/// Shortest practical E.164 number: country code + national number.
+pub(crate) const MIN_PHONE_DIGITS: usize = 7;
 
 /// Longest BCP-47 tag accepted: the registry caps a tag at 35 characters.
 pub(crate) const MAX_LANGUAGE_TAG: usize = 35;
@@ -47,23 +49,26 @@ pub(crate) fn path_segment(field: &'static str, value: &str) -> Result<()> {
 }
 
 /// Validates and normalises a phone number: an optional leading `+` followed by
-/// 1..=15 digits. Returns the digits, because sipgate's Flow actions expect
+/// 7..=15 digits. Returns the digits, because sipgate's Flow actions expect
 /// E.164 *without* the `+` (it strips one if sent).
 pub(crate) fn phone(field: &'static str, value: &str) -> Result<String> {
     let digits = value.strip_prefix('+').unwrap_or(value);
-    if digits.is_empty() {
-        return Err(Error::validation(field, "must not be empty"));
-    }
     if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(Error::validation(
             field,
             "must be E.164 digits, optionally prefixed with + (no spaces, dashes or parentheses)",
         ));
     }
-    if digits.len() > MAX_PHONE_DIGITS {
+    if digits.len() < MIN_PHONE_DIGITS || digits.len() > MAX_PHONE_DIGITS {
         return Err(Error::validation(
             field,
-            format!("must be at most {MAX_PHONE_DIGITS} digits (E.164)"),
+            format!("must be {MIN_PHONE_DIGITS} to {MAX_PHONE_DIGITS} digits (E.164)"),
+        ));
+    }
+    if digits.starts_with('0') {
+        return Err(Error::validation(
+            field,
+            "must be an E.164 number with a non-zero country code",
         ));
     }
     Ok(digits.to_string())
@@ -108,4 +113,23 @@ pub(crate) fn language_tag(field: &'static str, value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::phone;
+
+    #[test]
+    fn phone_enforces_e164_length_boundaries() {
+        assert!(phone("number", "1").is_err());
+        assert!(phone("number", "1234567").is_ok());
+        assert!(phone("number", &"1".repeat(15)).is_ok());
+        assert!(phone("number", &"1".repeat(16)).is_err());
+    }
+
+    #[test]
+    fn phone_rejects_leading_zero_country_code() {
+        assert!(phone("number", "01234567").is_err());
+        assert!(phone("number", "+01234567").is_err());
+    }
 }
