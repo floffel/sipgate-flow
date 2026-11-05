@@ -1,8 +1,10 @@
 //! sipgate flow: inbound events, outbound actions, and the webhook handshake.
 //!
 //! The protocol is documented at <https://flow.sipgate.io/api/>. Events arrive
-//! as JSON; actions are returned in the *response* to the webhook call (or over
-//! the WebSocket), not posted to a separate endpoint. See `docs/contracts.md`
+//! as JSON; actions are returned in the *response* to the webhook call, not
+//! posted to a separate endpoint. This crate supports only the webhook-response
+//! channel; the WebSocket channel is not implemented (see
+//! <https://github.com/floffel/sipgate-flow/issues/11>). See `docs/contracts.md`
 //! for the exact source of every shape this module models.
 
 pub mod action;
