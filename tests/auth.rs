@@ -8,10 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{json_response, response, FakeClock, MockTransport, RecordingSleeper};
+use serde_json::Value;
 use sipgate_flow::auth::{DEFAULT_TOKEN_URL, MAX_TOKEN_LIFETIME};
+use sipgate_flow::transport::{Request, Response};
 use sipgate_flow::{
     ClientCredentials, Error, OAuth2Client, PersonalAccessToken, RestClient, Result, StaticToken,
-    Token, TokenSource,
+    Token, TokenSource, Transport,
 };
 
 fn credentials() -> ClientCredentials {
@@ -20,6 +22,59 @@ fn credentials() -> ClientCredentials {
 
 fn client(transport: MockTransport) -> OAuth2Client<MockTransport> {
     OAuth2Client::new(transport, credentials())
+}
+
+#[derive(Clone)]
+struct DelayedFirstTransport {
+    release: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl DelayedFirstTransport {
+    fn new(
+        release: Arc<std::sync::atomic::AtomicBool>,
+        started: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            release,
+            started,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl Transport for DelayedFirstTransport {
+    async fn execute(&self, request: Request<'_>) -> Result<Response> {
+        assert_eq!(request.url, DEFAULT_TOKEN_URL);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.started.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            Ok(json_response(&token_value("stale")))
+        } else {
+            Ok(json_response(&token_value("fresh")))
+        }
+    }
+}
+
+fn token_value(token: &str) -> Value {
+    serde_json::json!({
+        "access_token": token,
+        "expires_in": 300,
+    })
+}
+
+async fn wait_until(flag: &std::sync::atomic::AtomicBool) {
+    for _ in 0..10_000 {
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(flag.load(Ordering::SeqCst), "timed out waiting for flag");
 }
 
 #[tokio::test]
@@ -196,6 +251,80 @@ async fn a_force_refresh_bypasses_the_cache_and_invalidate_drops_it() {
         "three"
     );
     assert_eq!(transport.call_count(), 3);
+}
+
+#[tokio::test]
+async fn invalidate_prevents_an_in_flight_fetch_from_repopulating_the_cache() {
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let auth = Arc::new(OAuth2Client::new(
+        DelayedFirstTransport::new(Arc::clone(&release), Arc::clone(&started)),
+        credentials(),
+    ));
+
+    let first = {
+        let auth = Arc::clone(&auth);
+        tokio::spawn(async move { auth.access_token(false).await })
+    };
+    wait_until(&started).await;
+
+    auth.invalidate();
+    assert!(!auth.has_valid_token());
+    release.store(true, Ordering::SeqCst);
+    assert_eq!(
+        first.await.expect("task").expect("token").access_token(),
+        "stale"
+    );
+
+    assert!(
+        !auth.has_valid_token(),
+        "the stale fetch must not repopulate the cache after invalidate"
+    );
+    assert_eq!(
+        auth.access_token(false)
+            .await
+            .expect("fresh token")
+            .access_token(),
+        "fresh"
+    );
+}
+
+#[tokio::test]
+async fn a_slower_force_refresh_cannot_clobber_a_newer_cached_token() {
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let auth = Arc::new(OAuth2Client::new(
+        DelayedFirstTransport::new(Arc::clone(&release), Arc::clone(&started)),
+        credentials(),
+    ));
+
+    let stale = {
+        let auth = Arc::clone(&auth);
+        tokio::spawn(async move { auth.access_token(true).await })
+    };
+    wait_until(&started).await;
+
+    assert_eq!(
+        auth.access_token(true)
+            .await
+            .expect("fresh token")
+            .access_token(),
+        "fresh"
+    );
+    release.store(true, Ordering::SeqCst);
+    assert_eq!(
+        stale.await.expect("task").expect("token").access_token(),
+        "stale"
+    );
+
+    assert_eq!(
+        auth.access_token(false)
+            .await
+            .expect("cached token")
+            .access_token(),
+        "fresh",
+        "the slower refresh must not overwrite the newer cached token"
+    );
 }
 
 #[tokio::test]
