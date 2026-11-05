@@ -57,6 +57,10 @@ fn documented_event() -> impl Strategy<Value = Value> {
             if kind == "dtmf_received" {
                 object.insert("digit".into(), json!(digit.to_string()));
             }
+            if kind == "error" {
+                object.insert("code".into(), json!("internal_error"));
+                object.insert("severity".into(), json!("error"));
+            }
             if !extra_key.is_empty()
                 && !matches!(
                     extra_key.as_str(),

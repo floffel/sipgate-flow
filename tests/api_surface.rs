@@ -111,15 +111,24 @@ fn every_error_code_maps_back_to_its_wire_value() {
         "internal_error",
     ];
     for code in codes {
-        assert_eq!(sipgate_flow::ErrorCode::from_wire(code).as_str(), code);
+        let parsed = sipgate_flow::ErrorCode::from_wire(code).expect("known code");
+        assert_eq!(parsed.as_str(), code);
     }
+    assert_eq!(sipgate_flow::ErrorCode::from_wire(""), None);
+    assert_eq!(
+        sipgate_flow::ErrorCode::from_wire("future_code"),
+        Some(sipgate_flow::ErrorCode::Other("future_code".into()))
+    );
 }
 
 #[test]
 fn severity_and_unknown_events_keep_their_wire_identity() {
     assert_eq!(Severity::Error.as_str(), "error");
     assert_eq!(Severity::from_wire("notice").as_str(), "notice");
-    assert!(Severity::from_wire("notice").call_continues());
+    assert!(!Severity::from_wire("notice").call_continues());
+    assert_eq!(Severity::from_wire(""), Severity::Unknown);
+    assert_eq!(Severity::from_wire("unknown"), Severity::Unknown);
+    assert!(!Severity::Unknown.call_continues());
 
     let unknown = Event::parse(br#"{"type":"not_yet","session":{"id":"s"}}"#).expect("parses");
     assert_eq!(unknown.payload().known_kind(), None);
