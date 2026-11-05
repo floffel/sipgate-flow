@@ -10,6 +10,7 @@ use std::time::Duration;
 use common::{json_response, response, FakeClock, MockTransport, RecordingSleeper};
 use serde_json::Value;
 use sipgate_flow::auth::{DEFAULT_TOKEN_URL, MAX_TOKEN_LIFETIME};
+use sipgate_flow::rest::Sms;
 use sipgate_flow::transport::{Request, Response};
 use sipgate_flow::{
     ClientCredentials, Clock, Error, OAuth2Client, PersonalAccessToken, RestClient, Result,
@@ -890,7 +891,7 @@ fn a_pat_never_prints_its_token() {
 }
 
 #[tokio::test]
-async fn a_pat_is_never_refreshed_but_a_second_401_is_terminal() {
+async fn a_pat_401_is_terminal_without_a_resend() {
     let transport = MockTransport::new();
     transport.push_response(response(401, &[], b"{}"));
     transport.push_response(response(401, &[], b"{}"));
@@ -898,8 +899,32 @@ async fn a_pat_is_never_refreshed_but_a_second_401_is_terminal() {
     let client = RestClient::new(transport.clone(), auth);
 
     assert!(matches!(client.calls().await, Err(Error::Unauthorized)));
-    assert_eq!(transport.call_count(), 2, "one retry, then stop");
-    assert_eq!(transport.calls()[1].auth, transport.calls()[0].auth);
+    assert_eq!(transport.call_count(), 1, "PAT cannot refresh");
+}
+
+#[tokio::test]
+async fn a_pat_post_401_is_never_resent() {
+    let transport = MockTransport::new();
+    transport.push_response(response(401, &[], b"{}"));
+    transport.push_response(common::no_content());
+    let auth = PersonalAccessToken::new("token-FQ1V12", "e68ead46").expect("non-empty");
+    let client = RestClient::new(transport.clone(), auth);
+    let sms = Sms::new("s0", "4915112345678", "Ihr Code: 4242").expect("valid");
+
+    assert!(matches!(
+        client.send_sms(&sms).await,
+        Err(Error::Unauthorized)
+    ));
+    assert_eq!(transport.call_count(), 1, "a POST is never auto-retried");
+}
+
+#[test]
+fn token_sources_report_whether_a_401_can_be_refreshed() {
+    let static_token = StaticToken::new("token").expect("non-empty");
+    assert!(!static_token.refreshable());
+
+    let pat = PersonalAccessToken::new("token-FQ1V12", "e68ead46").expect("non-empty");
+    assert!(!pat.refreshable());
 }
 
 #[test]

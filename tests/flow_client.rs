@@ -167,21 +167,21 @@ async fn a_rate_limited_call_keeps_its_wait_hint_for_the_caller() {
 }
 
 #[tokio::test]
-async fn the_token_is_refreshed_once_on_401() {
+async fn a_post_with_401_is_not_resent() {
     let transport = MockTransport::new();
     transport.push_response(response(401, &[], b"expired"));
     transport.push_response(response(201, &[], br#"{"callSid":"pbx-c-retry"}"#));
     let client = FlowClient::new(transport.clone(), Rotating);
 
-    client
+    let error = client
         .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
         .await
-        .expect("retried with a fresh token");
+        .expect_err("POST must not be retried after 401");
+    assert!(matches!(error, Error::Unauthorized));
 
     let calls = transport.calls();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1, "a non-idempotent request is never resent");
     assert_eq!(calls[0].auth.bearer(), Some("t1"));
-    assert_eq!(calls[1].auth.bearer(), Some("t2"));
 }
 
 #[tokio::test]
@@ -337,6 +337,10 @@ fn the_client_is_send_and_sync() {
 struct Rotating;
 
 impl TokenSource for Rotating {
+    fn refreshable(&self) -> bool {
+        true
+    }
+
     fn access_token(
         &self,
         force_refresh: bool,

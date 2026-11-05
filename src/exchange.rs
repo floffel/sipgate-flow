@@ -1,9 +1,9 @@
 //! The authenticated request exchange shared by both clients.
 //!
-//! One rule lives here and only here: a 401 means the cached credential is
-//! stale, so the token that was actually used is refreshed single-flight and
-//! the request is retried exactly once. A second 401 is terminal — retrying it
-//! would burn rate limit for nothing.
+//! One rule lives here and only here: when an idempotent request gets a 401
+//! from a refreshable token source, the token that was actually used is
+//! refreshed single-flight and the request is retried exactly once. A second
+//! 401 is terminal — retrying it would burn rate limit for nothing.
 //!
 //! The caller's per-request timeout is a budget for the whole exchange, not a
 //! fresh allowance for each leg: a deadline is taken once at entry, every
@@ -47,7 +47,8 @@ pub(crate) struct Target<'a> {
     pub path: &'a str,
 }
 
-/// Sends `method path` with the credential's scheme, refreshing once on 401.
+/// Sends `method path` with the credential's scheme, refreshing once on 401
+/// when the method is idempotent and the token source is refreshable.
 ///
 /// `base_url` must be an absolute `https://` URL. `path` must start with a
 /// single `/` and must not contain `//`, `..`, `@`, CR or LF; the joined URL is
@@ -92,6 +93,15 @@ where
     .await?;
     if response.status() != 401 {
         return Ok(response);
+    }
+
+    // A 401 does not prove the credential is stale. If the source cannot mint
+    // a different credential (PAT/static token), or the request is
+    // non-idempotent, a resend would either be byte-identical or duplicate an
+    // operation such as sending an SMS. Both cases must be terminal instead of
+    // pretending the retry fixed the rejection.
+    if !auth.refreshable() || !method.is_idempotent() {
+        return Err(Error::Unauthorized);
     }
 
     let retry_after = retry_after_from(|name| response.header(name));
@@ -290,6 +300,49 @@ mod tests {
         fn invalidate(&self) {}
     }
 
+    struct RefreshAuth {
+        calls: AtomicUsize,
+    }
+
+    impl TokenSource for RefreshAuth {
+        fn refreshable(&self) -> bool {
+            true
+        }
+
+        fn access_token(
+            &self,
+            force_refresh: bool,
+        ) -> impl std::future::Future<Output = crate::Result<Token>> + Send {
+            let token = if force_refresh { "fresh" } else { "stale" };
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Token::from_json(
+                &serde_json::json!({ "access_token": token }),
+            ))
+        }
+
+        fn invalidate(&self) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        calls: AtomicUsize,
+    }
+
+    impl Transport for RecordingTransport {
+        fn execute(
+            &self,
+            _: Request<'_>,
+        ) -> impl std::future::Future<Output = crate::Result<Response>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let response = if call == 0 {
+                Response::new(401, std::iter::empty(), b"expired".to_vec())
+            } else {
+                Response::new(200, std::iter::empty(), b"{}".to_vec())
+            };
+            std::future::ready(Ok(response))
+        }
+    }
+
     struct NeverTransport;
 
     impl Transport for NeverTransport {
@@ -394,6 +447,141 @@ mod tests {
         assert!(matches!(error, Error::InvalidRequest { field: "path", .. }));
         assert!(!error.is_retryable());
         assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_non_refreshable_source_does_not_resend_a_401() {
+        let auth = CountingAuth::default();
+        let transport = RecordingTransport::default();
+        let error = authorized(
+            &transport,
+            &auth,
+            Target {
+                base_url: "https://api.sipgate.com",
+                allow_http_base_url: false,
+                path: "/v2/calls",
+            },
+            Pacing {
+                timeout: None,
+                retry: &RetryPolicy::none(),
+                sleeper: &crate::retry::NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await
+        .expect_err("401 from a non-refreshable source is terminal");
+
+        assert!(matches!(error, Error::Unauthorized));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refreshable_source_resends_an_idempotent_request_once() {
+        let auth = RefreshAuth {
+            calls: AtomicUsize::new(0),
+        };
+        let transport = RecordingTransport::default();
+        let response = authorized(
+            &transport,
+            &auth,
+            Target {
+                base_url: "https://api.sipgate.com",
+                allow_http_base_url: false,
+                path: "/v2/calls",
+            },
+            Pacing {
+                timeout: None,
+                retry: &RetryPolicy::none(),
+                sleeper: &crate::retry::NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await
+        .expect("refreshed");
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_non_idempotent_request_is_not_resent_even_with_a_refreshable_source() {
+        let auth = RefreshAuth {
+            calls: AtomicUsize::new(0),
+        };
+        let transport = RecordingTransport::default();
+        let error = authorized(
+            &transport,
+            &auth,
+            Target {
+                base_url: "https://api.sipgate.com",
+                allow_http_base_url: false,
+                path: "/v2/sessions/sms",
+            },
+            Pacing {
+                timeout: None,
+                retry: &RetryPolicy::none(),
+                sleeper: &crate::retry::NoSleep,
+            },
+            Method::Post,
+            None,
+        )
+        .await
+        .expect_err("post must not be resent");
+
+        assert!(matches!(error, Error::Unauthorized));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_second_401_is_terminal() {
+        struct AlwaysUnauthorized;
+
+        impl Transport for AlwaysUnauthorized {
+            fn execute(
+                &self,
+                _: Request<'_>,
+            ) -> impl std::future::Future<Output = crate::Result<Response>> {
+                std::future::ready(Ok(Response::new(
+                    401,
+                    std::iter::empty(),
+                    b"still no".to_vec(),
+                )))
+            }
+        }
+
+        let auth = RefreshAuth {
+            calls: AtomicUsize::new(0),
+        };
+        let error = authorized(
+            &AlwaysUnauthorized,
+            &auth,
+            Target {
+                base_url: "https://api.sipgate.com",
+                allow_http_base_url: false,
+                path: "/v2/calls",
+            },
+            Pacing {
+                timeout: None,
+                retry: &RetryPolicy::none(),
+                sleeper: &crate::retry::NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await
+        .expect_err("second 401 is terminal");
+
+        assert!(matches!(error, Error::Unauthorized));
+        assert_eq!(
+            auth.calls.load(Ordering::SeqCst),
+            2,
+            "refresh once, never loop"
+        );
     }
 
     #[test]
