@@ -116,7 +116,7 @@ pub use flow::webhook::{self, WebhookVerifier};
 pub use rest::RestClient;
 pub use retry::{
     classify, parse_retry_after, retry_after_from, FnSleeper, NoSleep, RetryOutcome, RetryPolicy,
-    Sleeper,
+    Sleeper, MIN_RETRY_DELAY,
 };
 pub use transport::{Method, Request, RequestBody, Response, Security, Transport};
 
