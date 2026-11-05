@@ -101,7 +101,7 @@ pub use auth::{
     ClientCredentials, Clock, OAuth2Client, PersonalAccessToken, StaticToken, SystemClock, Token,
     TokenSource,
 };
-pub use error::{Base64Error, Error, Result};
+pub use error::{Base64Error, Error, Result, MAX_RETRY_AFTER};
 pub use flow::action::{
     Action, ActionKind, Audio, BargeInConfig, BargeInStrategy, ConfigureTranscription, MixAudio,
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,

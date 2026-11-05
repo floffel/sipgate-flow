@@ -3,7 +3,7 @@
 //! Every variant states what the caller can do about it, and
 //! [`Error::is_retryable`] / [`Error::is_ambiguous`] / [`Error::retry_after`]
 //! answer the three questions a retry loop asks: may I repeat this, did it
-//! already happen, and how long must I wait. The enum is `#[non_exhaustive]`: new failure modes can be
+//! already happen, and what bounded wait hint did the server give. The enum is `#[non_exhaustive]`: new failure modes can be
 //! added without a breaking release, so match with a `_` arm.
 //!
 //! ```
@@ -23,6 +23,29 @@ use crate::transport::Method;
 
 /// Longest remote-controlled string kept in an error.
 const SAFE_TEXT_BYTES: usize = 512;
+
+/// Upper bound for a server-supplied `Retry-After` hint.
+///
+/// A broken proxy or hostile response can put an arbitrarily large
+/// delta-seconds value in `Retry-After`. Errors clamp the hint to this ceiling
+/// before exposing it through [`Error::retry_after`], so a caller that follows
+/// the documented retry-loop pattern cannot be parked for an unbounded time.
+///
+/// ```
+/// use std::time::Duration;
+/// use sipgate_flow::MAX_RETRY_AFTER;
+///
+/// assert_eq!(MAX_RETRY_AFTER, Duration::from_secs(24 * 60 * 60));
+/// ```
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn is_http_status(status: u16) -> bool {
+    (100..=599).contains(&status)
+}
+
+fn bounded_retry_after(retry_after: Option<Duration>) -> Option<Duration> {
+    retry_after.map(|hint| hint.min(MAX_RETRY_AFTER))
+}
 
 /// The category of a base64 decoding failure.
 ///
@@ -244,12 +267,13 @@ pub enum Error {
     #[non_exhaustive]
     #[error("api error {status}: {body}")]
     Api {
-        /// HTTP status.
+        /// HTTP status. The constructors reject values outside `100..=599`.
         status: u16,
         /// Response body, truncated to at most 512 bytes, with control
         /// characters replaced by `U+FFFD`.
         body: String,
-        /// Parsed `Retry-After` header, when the server sent one.
+        /// Parsed `Retry-After` header, when the server sent one, clamped to
+        /// [`MAX_RETRY_AFTER`].
         retry_after: Option<Duration>,
         /// `true` for 429, and for 5xx on an idempotent method only.
         retryable: bool,
@@ -553,7 +577,10 @@ impl Error {
     ///
     /// This is the safe constructor for [`Error::Api`]: `retryable` is
     /// `status == 429` or a 5xx on an idempotent method, while `ambiguous` is a
-    /// 5xx on a non-idempotent method.
+    /// 5xx on a non-idempotent method. The `status` must be in `100..=599`; an
+    /// invalid value returns [`Error::Validation`] instead of producing an
+    /// [`Error::Api`] with garbage. The `Retry-After` hint is clamped to
+    /// [`MAX_RETRY_AFTER`].
     ///
     /// ```
     /// use sipgate_flow::{Error, Method};
@@ -566,6 +593,9 @@ impl Error {
     /// let err = Error::api(Method::Get, 503, "maintenance", None);
     /// assert!(err.is_retryable());
     /// assert!(!err.is_ambiguous());
+    ///
+    /// let invalid = Error::api(Method::Get, 9999, "proxy garbage", None);
+    /// assert!(matches!(invalid, Error::Validation { field: "status", .. }));
     /// ```
     #[must_use]
     pub fn api(
@@ -574,13 +604,16 @@ impl Error {
         body: impl Into<String>,
         retry_after: Option<Duration>,
     ) -> Self {
+        if !is_http_status(status) {
+            return Self::validation("status", "must be in 100..=599");
+        }
         let server_error = (500..600).contains(&status);
         let retryable = status == 429 || (server_error && method.is_idempotent());
         let ambiguous = server_error && !method.is_idempotent();
         Self::Api {
             status,
             body: safe_text(&body.into()),
-            retry_after,
+            retry_after: bounded_retry_after(retry_after),
             retryable,
             ambiguous,
         }
@@ -647,10 +680,13 @@ impl Error {
         body: impl Into<String>,
         retry_after: Option<Duration>,
     ) -> Self {
+        if !is_http_status(status) {
+            return Self::validation("status", "must be in 100..=599");
+        }
         Self::Api {
             status,
             body: safe_text(&body.into()),
-            retry_after,
+            retry_after: bounded_retry_after(retry_after),
             retryable: true,
             ambiguous: false,
         }
@@ -797,7 +833,11 @@ impl Error {
         )
     }
 
-    /// The wait the server asked for in a `Retry-After` header.
+    /// The bounded wait hint the server asked for in a `Retry-After` header.
+    ///
+    /// Values are clamped to [`MAX_RETRY_AFTER`] when the error is built. This
+    /// is still only a hint: callers that sleep directly should apply their own
+    /// ceiling, for example through [`crate::RetryPolicy::max_delay`].
     ///
     /// ```
     /// use std::time::Duration;
@@ -805,6 +845,9 @@ impl Error {
     ///
     /// let err = Error::api(Method::Get, 429, String::new(), Some(Duration::from_secs(7)));
     /// assert_eq!(err.retry_after().unwrap().as_secs(), 7);
+    ///
+    /// let huge = Error::api(Method::Get, 429, String::new(), Some(Duration::MAX));
+    /// assert_eq!(huge.retry_after(), Some(sipgate_flow::MAX_RETRY_AFTER));
     /// ```
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
