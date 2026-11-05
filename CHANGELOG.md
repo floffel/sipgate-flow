@@ -93,6 +93,14 @@ with the pre-1.0 reading described in the README section *Versioning*.
   wire, response models decode camelCase and snake_case with unknown fields
   ignored and unknown enum values carried verbatim, and request builders
   refuse values the schema does not document instead of sending them.
+* The **REST v2 phonelines resource** (#167): the full documented surface under
+  `/{userId}/phonelines` is now typed, including phoneline CRUD and alias
+  updates, anonymous-call blocking, routed devices, forwardings, numbers,
+  parallel forwardings, sipgate.io settings and logs, voicemail settings,
+  greetings and transcription settings. Path parameters and E.164 destinations
+  are validated before the wire; list responses use the permissive `{"items":
+  [...]}` envelope; and request builders cover the schema's documented fields
+  and limits.
 
 ### Fixed
 
