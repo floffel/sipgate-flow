@@ -33,6 +33,11 @@ with the pre-1.0 reading described in the README section *Versioning*.
   rendered docs: the module-level "see the exact source of every shape" claims
   in `flow`, `rest` and the crate root linked the file as an inert code span,
   which is unclickable on docs.rs. They now point at the file by repository URL.
+* Transport `Debug` redaction now covers the common webhook, HMAC and OAuth
+  spellings that were missing from the credential-field list: `signature`,
+  `credential`, `auth`, `verifier`, `code` and `cert`. These names fail closed,
+  so ambiguous fields such as `error_code` are hidden too instead of risking a
+  log-time secret leak.
 * Retry pacing now has a hard `MIN_RETRY_DELAY` floor. `with_base_delay`,
   `with_max_delay`, local backoff and `Retry-After` values can no longer produce
   a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer
