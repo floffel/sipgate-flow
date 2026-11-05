@@ -55,6 +55,11 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* The retry module now records the exact reuse audit decision: `httpdate` already
+  owns HTTP-date `Retry-After` parsing, while `backoff` 0.4 cannot replace the
+  rest because it is unmaintained, would fail the advisory gate, and would
+  replace the runtime-free, pure `RetryPolicy`/`Sleeper` contract with stateful
+  or runtime-coupled retry machinery.
 * The `truncate_body` documentation no longer claims the helper bounds the
   transport read: it documents that it caps the string copied into an error
   message at 512 bytes by byte length, backing up to a UTF-8 boundary. The
