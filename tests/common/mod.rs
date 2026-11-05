@@ -318,10 +318,10 @@ impl FakeClock {
 }
 
 impl Clock for FakeClock {
-    fn now(&self) -> Duration {
-        *self
+    fn now(&self) -> Result<Duration> {
+        Ok(*self
             .now
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 }

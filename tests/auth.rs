@@ -12,8 +12,8 @@ use serde_json::Value;
 use sipgate_flow::auth::{DEFAULT_TOKEN_URL, MAX_TOKEN_LIFETIME};
 use sipgate_flow::transport::{Request, Response};
 use sipgate_flow::{
-    ClientCredentials, Error, OAuth2Client, PersonalAccessToken, RestClient, Result, StaticToken,
-    Token, TokenSource, Transport,
+    ClientCredentials, Clock, Error, OAuth2Client, PersonalAccessToken, RestClient, Result,
+    StaticToken, Token, TokenSource, Transport,
 };
 
 fn credentials() -> ClientCredentials {
@@ -57,6 +57,35 @@ impl Transport for DelayedFirstTransport {
         } else {
             Ok(json_response(&token_value("fresh")))
         }
+    }
+}
+
+#[derive(Clone)]
+struct SwitchableClock {
+    now: Arc<Mutex<Option<Duration>>>,
+}
+
+impl SwitchableClock {
+    fn new(start: Duration) -> Self {
+        Self {
+            now: Arc::new(Mutex::new(Some(start))),
+        }
+    }
+
+    fn fail_pre_epoch(&self) {
+        *self
+            .now
+            .lock()
+            .expect("not poisoned while no test panics mid-lock") = None;
+    }
+}
+
+impl Clock for SwitchableClock {
+    fn now(&self) -> Result<Duration> {
+        self.now
+            .lock()
+            .expect("not poisoned while no test panics mid-lock")
+            .ok_or_else(|| Error::transport_terminal("system clock is before the Unix epoch"))
     }
 }
 
@@ -224,6 +253,70 @@ async fn a_cached_token_is_reused_until_it_nears_expiry() {
         "second"
     );
     assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn a_clock_failure_does_not_serve_a_cached_token() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "access_token": "should-not-be-served",
+        "expires_in": 300,
+    })));
+    let clock = SwitchableClock::new(Duration::from_secs(1_700_000_000));
+    let auth = client(transport.clone())
+        .with_clock(clock.clone())
+        .with_refresh_margin(Duration::from_secs(60))
+        .expect("valid margin");
+
+    assert_eq!(
+        auth.access_token(false)
+            .await
+            .expect("normal clock caches")
+            .access_token(),
+        "should-not-be-served"
+    );
+    assert!(auth.has_valid_token());
+
+    clock.fail_pre_epoch();
+    let error = auth
+        .access_token(false)
+        .await
+        .expect_err("a broken clock must fail closed");
+    assert!(matches!(
+        error,
+        Error::Transport {
+            retryable: false,
+            ..
+        }
+    ));
+    assert!(!auth.has_valid_token());
+    assert_eq!(
+        transport.call_count(),
+        1,
+        "the cache path must fail closed, not fetch a replacement"
+    );
+}
+
+#[tokio::test]
+async fn a_normal_clock_still_caches() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "access_token": "cached",
+        "expires_in": 300,
+    })));
+    let clock = FakeClock::new(Duration::from_secs(1_700_000_000));
+    let auth = client(transport.clone()).with_clock(clock.clone());
+
+    assert_eq!(
+        auth.access_token(false).await.unwrap().access_token(),
+        "cached"
+    );
+    assert_eq!(
+        auth.access_token(false).await.unwrap().access_token(),
+        "cached"
+    );
+    assert_eq!(transport.call_count(), 1, "the second call uses the cache");
+    assert!(auth.has_valid_token());
 }
 
 #[tokio::test]

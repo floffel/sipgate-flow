@@ -128,37 +128,49 @@ fn cached_lifetime(lifetime: Duration, margin: Duration) -> Result<Duration> {
 
 /// A source of "now", so token expiry is testable without waiting.
 ///
+/// Implementations must report a wall-clock reading since the Unix epoch, or
+/// fail when no such reading is available. A failure is treated as terminal:
+/// the OAuth cache fails closed instead of guessing a time for token validity.
+///
 /// ```
 /// use std::time::Duration;
 /// use sipgate_flow::Clock;
 ///
 /// struct Fixed;
 /// impl Clock for Fixed {
-///     fn now(&self) -> Duration {
-///         Duration::from_secs(1_700_000_000)
+///     fn now(&self) -> sipgate_flow::Result<Duration> {
+///         Ok(Duration::from_secs(1_700_000_000))
 ///     }
 /// }
-/// assert_eq!(Fixed.now().as_secs(), 1_700_000_000);
+/// assert_eq!(Fixed.now()?.as_secs(), 1_700_000_000);
+/// # Ok::<(), sipgate_flow::Error>(())
 /// ```
 pub trait Clock: Send + Sync {
     /// Seconds since the Unix epoch.
-    fn now(&self) -> Duration;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the implementation cannot produce a reliable
+    /// wall-clock reading. For [`SystemClock`] this is a terminal transport
+    /// error when the system time is before the Unix epoch.
+    fn now(&self) -> Result<Duration>;
 }
 
 /// Wall clock, reading `SystemTime`.
 ///
 /// ```
 /// use sipgate_flow::{Clock, SystemClock};
-/// assert!(SystemClock.now().as_secs() > 1_700_000_000);
+/// assert!(SystemClock.now()?.as_secs() > 1_700_000_000);
+/// # Ok::<(), sipgate_flow::Error>(())
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
-    fn now(&self) -> Duration {
+    fn now(&self) -> Result<Duration> {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
+            .map_err(|_| Error::transport_terminal("system clock is before the Unix epoch"))
     }
 }
 
@@ -1043,20 +1055,20 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
     /// ```
     #[must_use]
     pub fn has_valid_token(&self) -> bool {
-        self.cached().is_some()
+        matches!(self.cached(), Ok(Some(_)))
     }
 
-    fn cached(&self) -> Option<Token> {
-        let now = self.clock.now();
+    fn cached(&self) -> Result<Option<Token>> {
+        let now = self.clock.now()?;
         let guard = self
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard
+        Ok(guard
             .cached
             .as_ref()
             .filter(|cached| now < cached.usable_until)
-            .map(|cached| cached.token.clone())
+            .map(|cached| cached.token.clone()))
     }
 
     fn begin_fetch(&self) -> u64 {
@@ -1067,8 +1079,8 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
         guard.next_generation()
     }
 
-    fn begin_refresh(&self, stale: &Token) -> RefreshAttempt {
-        let now = self.clock.now();
+    fn begin_refresh(&self, stale: &Token) -> Result<RefreshAttempt> {
+        let now = self.clock.now()?;
         let mut guard = self
             .cache
             .lock()
@@ -1079,16 +1091,16 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             .filter(|cached| now < cached.usable_until);
         match cached {
             Some(cached) if !same_token(&cached.token, stale) => {
-                return RefreshAttempt::Ready(cached.token.clone());
+                return Ok(RefreshAttempt::Ready(cached.token.clone()));
             }
             _ => {}
         }
         if guard.refresh_generation.is_some() {
-            return RefreshAttempt::Waiting;
+            return Ok(RefreshAttempt::Waiting);
         }
         let generation = guard.next_generation();
         guard.refresh_generation = Some(generation);
-        RefreshAttempt::Fetch(generation)
+        Ok(RefreshAttempt::Fetch(generation))
     }
 
     fn store(&self, token: Token, generation: u64) -> Result<()> {
@@ -1099,7 +1111,7 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
         // error instead of taking the process down.
         let usable_until = self
             .clock
-            .now()
+            .now()?
             .checked_add(usable_for)
             .ok_or_else(|| Error::TokenResponse("token expiry overflows the clock".into()))?;
         let mut guard = self
@@ -1162,7 +1174,7 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
 impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
     async fn access_token(&self, force_refresh: bool) -> Result<Token> {
         if !force_refresh {
-            if let Some(token) = self.cached() {
+            if let Some(token) = self.cached()? {
                 return Ok(token);
             }
         }
@@ -1174,7 +1186,7 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
 
     async fn refresh_after(&self, stale: &Token) -> Result<Token> {
         let generation = loop {
-            match self.begin_refresh(stale) {
+            match self.begin_refresh(stale)? {
                 RefreshAttempt::Ready(token) => return Ok(token),
                 RefreshAttempt::Fetch(generation) => break generation,
                 RefreshAttempt::Waiting => {
