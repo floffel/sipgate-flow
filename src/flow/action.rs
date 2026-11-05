@@ -1378,7 +1378,8 @@ impl Transfer {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the number is not 1..=15 digits.
+    /// [`Error::Validation`] when the number is not 7..=15 E.164 digits with a
+    /// country code.
     pub fn new(target_phone_number: impl Into<String>) -> Result<Self> {
         let target = validate::phone("target_phone_number", &target_phone_number.into())?;
         Ok(Self {

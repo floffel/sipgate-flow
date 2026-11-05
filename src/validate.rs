@@ -12,6 +12,9 @@ use url::Url;
 /// the cap keeps a hostile string out of headers and log lines.
 pub(crate) const MAX_SESSION_ID: usize = 200;
 
+/// Shortest E.164 number accepted: country code plus subscriber number.
+pub(crate) const MIN_PHONE_DIGITS: usize = 7;
+
 /// Longest E.164 number: 15 digits, per ITU-T E.164.
 pub(crate) const MAX_PHONE_DIGITS: usize = 15;
 
@@ -48,8 +51,9 @@ pub(crate) fn path_segment(field: &'static str, value: &str) -> Result<()> {
 }
 
 /// Validates and normalises a phone number: an optional leading `+` followed by
-/// 1..=15 digits. Returns the digits, because sipgate's Flow actions expect
-/// E.164 *without* the `+` (it strips one if sent).
+/// 7..=15 digits whose first digit is 1-9. Returns the digits, because
+/// sipgate's Flow actions expect E.164 *without* the `+` (it strips one if
+/// sent).
 pub(crate) fn phone(field: &'static str, value: &str) -> Result<String> {
     let digits = value.strip_prefix('+').unwrap_or(value);
     if digits.is_empty() {
@@ -59,6 +63,18 @@ pub(crate) fn phone(field: &'static str, value: &str) -> Result<String> {
         return Err(Error::validation(
             field,
             "must be E.164 digits, optionally prefixed with + (no spaces, dashes or parentheses)",
+        ));
+    }
+    if digits.len() < MIN_PHONE_DIGITS {
+        return Err(Error::validation(
+            field,
+            format!("must be at least {MIN_PHONE_DIGITS} digits (E.164 with country code)"),
+        ));
+    }
+    if digits.starts_with('0') {
+        return Err(Error::validation(
+            field,
+            "must be E.164 digits with a country code (leading digit 1-9, no leading 0 or 00)",
         ));
     }
     if digits.len() > MAX_PHONE_DIGITS {

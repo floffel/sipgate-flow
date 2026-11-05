@@ -747,7 +747,7 @@ fn transfer_request_supports_blind_attended_and_a_caller_id() {
         .expect("valid");
     assert_eq!(with_id.to_json()["callerId"], "+4921112345678");
     assert!(TransferRequest::blind("no").is_err());
-    assert!(TransferRequest::blind("49")
+    assert!(TransferRequest::blind("4915112345678")
         .expect("valid")
         .with_caller_id("no")
         .is_err());
