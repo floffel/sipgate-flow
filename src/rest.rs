@@ -2521,3 +2521,1135 @@ pub struct VoicemailSettings {
     #[serde(default)]
     pub timeout: u32,
 }
+
+// --- REST v2 history resource (#166) --------------------------------------
+//
+// This block is intentionally self-contained so sibling REST resource work
+// (#164 devices, #165 contacts, #167 phonelines) can be rebased independently.
+
+/// Largest documented `offset` accepted by `GET /v2/history`.
+///
+/// ```
+/// use sipgate_flow::rest::MAX_HISTORY_OFFSET;
+///
+/// assert_eq!(MAX_HISTORY_OFFSET, 2_147_483_647);
+/// ```
+pub const MAX_HISTORY_OFFSET: u32 = 2_147_483_647;
+
+/// Largest documented `limit` accepted by `GET /v2/history`.
+///
+/// ```
+/// use sipgate_flow::rest::MAX_HISTORY_LIMIT;
+///
+/// assert_eq!(MAX_HISTORY_LIMIT, 1000);
+/// ```
+pub const MAX_HISTORY_LIMIT: u32 = 1000;
+
+/// Largest list accepted by `PUT /v2/history`.
+///
+/// The upstream operation documents that the list must be less than 150, so
+/// this is the largest accepted element count.
+///
+/// ```
+/// use sipgate_flow::rest::MAX_HISTORY_UPDATE_ENTRIES;
+///
+/// assert_eq!(MAX_HISTORY_UPDATE_ENTRIES, 149);
+/// ```
+pub const MAX_HISTORY_UPDATE_ENTRIES: usize = 149;
+
+wire_enum! {
+    /// History starred filter, from the `starred` query parameter.
+    pub enum HistoryStarred {
+        /// Only starred entries.
+        Starred => "starred",
+        /// Only unstarred entries.
+        Unstarred => "unstarred",
+    }
+}
+
+/// Query filters for `GET /v2/history` and `GET /v2/history/export`.
+///
+/// ```
+/// use sipgate_flow::rest::{HistoryEntryKind, HistoryQuery};
+///
+/// let mut query = HistoryQuery::new();
+/// query.types.push(HistoryEntryKind::Call);
+/// query.limit = Some(10);
+/// assert!(query.to_query()?.contains("types=CALL"));
+/// assert!(query.to_query()?.contains("limit=10"));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryQuery {
+    /// Filter by entry kind; each value is sent as a repeated `types` query
+    /// parameter.
+    pub types: Vec<HistoryEntryKind>,
+    /// Filter by direction; each value is sent as a repeated `directions`
+    /// query parameter.
+    pub directions: Vec<HistoryDirection>,
+    /// Filter by starred state; each value is sent as a repeated `starred`
+    /// query parameter.
+    pub starred: Vec<HistoryStarred>,
+    /// Pagination offset. The documented range is `0..=MAX_HISTORY_OFFSET`.
+    pub offset: Option<u32>,
+    /// Page size. The documented range is `0..=MAX_HISTORY_LIMIT`.
+    pub limit: Option<u32>,
+    /// Whether to show only archived entries.
+    pub archived: Option<bool>,
+    /// Lower bound as an ISO-8601 date-time string.
+    pub from: Option<String>,
+    /// Upper bound as an ISO-8601 date-time string.
+    pub to: Option<String>,
+    /// Filter events to or from this number. This filter is not supported by
+    /// [`HistoryExportRequest`].
+    pub phone_number: Option<String>,
+    /// Whether to include events from all account users. The upstream endpoint
+    /// documents this as admin-only.
+    pub include_all_users: Option<bool>,
+    /// Classic connection IDs or channel UUIDs.
+    pub connection_ids: Vec<String>,
+}
+
+impl HistoryQuery {
+    /// Builds an empty history query.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::HistoryQuery;
+    ///
+    /// assert_eq!(HistoryQuery::new().to_query()?, "");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Encodes the query string without the leading `?`.
+    ///
+    /// The documented pagination and field bounds are checked here, so a
+    /// caller can validate the request before a client method tries to send
+    /// it.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{HistoryQuery, MAX_HISTORY_LIMIT};
+    ///
+    /// let mut query = HistoryQuery::new();
+    /// query.limit = Some(MAX_HISTORY_LIMIT);
+    /// assert_eq!(query.to_query()?, format!("limit={MAX_HISTORY_LIMIT}"));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an out-of-range pagination value, an empty
+    /// date or phone filter, or a connection id that would escape its slot.
+    pub fn to_query(&self) -> Result<String> {
+        Ok(encode_history_query(&self.query_pairs(true)?))
+    }
+
+    fn query_pairs(&self, include_phone_number: bool) -> Result<Vec<(String, String)>> {
+        self.validate(include_phone_number)?;
+        let mut pairs = Vec::new();
+        for kind in &self.types {
+            pairs.push(("types".to_string(), history_kind_query_value(kind)));
+        }
+        for direction in &self.directions {
+            pairs.push((
+                "directions".to_string(),
+                history_direction_query_value(direction),
+            ));
+        }
+        if let Some(offset) = self.offset {
+            pairs.push(("offset".to_string(), offset.to_string()));
+        }
+        if let Some(limit) = self.limit {
+            pairs.push(("limit".to_string(), limit.to_string()));
+        }
+        if let Some(archived) = self.archived {
+            pairs.push(("archived".to_string(), archived.to_string()));
+        }
+        for starred in &self.starred {
+            pairs.push(("starred".to_string(), history_starred_query_value(starred)));
+        }
+        if let Some(from) = &self.from {
+            pairs.push(("from".to_string(), from.clone()));
+        }
+        if let Some(to) = &self.to {
+            pairs.push(("to".to_string(), to.clone()));
+        }
+        if include_phone_number {
+            if let Some(phone_number) = &self.phone_number {
+                pairs.push(("phonenumber".to_string(), phone_number.clone()));
+            }
+        }
+        if let Some(include_all_users) = self.include_all_users {
+            pairs.push(("includeAllUsers".to_string(), include_all_users.to_string()));
+        }
+        for connection_id in &self.connection_ids {
+            pairs.push(("connectionIds".to_string(), connection_id.clone()));
+        }
+        Ok(pairs)
+    }
+
+    fn validate(&self, include_phone_number: bool) -> Result<()> {
+        if let Some(offset) = self.offset {
+            if offset > MAX_HISTORY_OFFSET {
+                return Err(Error::validation(
+                    "offset",
+                    format!("must be at most {MAX_HISTORY_OFFSET}"),
+                ));
+            }
+        }
+        if let Some(limit) = self.limit {
+            if limit > MAX_HISTORY_LIMIT {
+                return Err(Error::validation(
+                    "limit",
+                    format!("must be at most {MAX_HISTORY_LIMIT}"),
+                ));
+            }
+        }
+        if let Some(from) = &self.from {
+            validate::non_empty("from", from, validate::MAX_REST_FIELD_BYTES)?;
+        }
+        if let Some(to) = &self.to {
+            validate::non_empty("to", to, validate::MAX_REST_FIELD_BYTES)?;
+        }
+        if include_phone_number {
+            if let Some(phone_number) = &self.phone_number {
+                validate::non_empty("phonenumber", phone_number, validate::MAX_REST_FIELD_BYTES)?;
+            }
+        }
+        for connection_id in &self.connection_ids {
+            validate::path_segment("connectionIds", connection_id)?;
+        }
+        Ok(())
+    }
+}
+
+/// Request for `GET /v2/history/export`.
+///
+/// ```
+/// use sipgate_flow::rest::{HistoryExportRequest, HistoryQuery};
+///
+/// let request = HistoryExportRequest::new(HistoryQuery::new());
+/// assert_eq!(request.to_query()?, "");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryExportRequest {
+    /// The documented history filters. `phone_number` is refused because the
+    /// export operation does not document that query parameter.
+    pub query: HistoryQuery,
+}
+
+impl HistoryExportRequest {
+    /// Builds an export request from the shared history query.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{HistoryExportRequest, HistoryQuery};
+    ///
+    /// let request = HistoryExportRequest::new(HistoryQuery::new());
+    /// assert_eq!(request.query.limit, None);
+    /// ```
+    #[must_use]
+    pub fn new(query: HistoryQuery) -> Self {
+        Self { query }
+    }
+
+    /// Encodes the export query string without the leading `?`.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{HistoryExportRequest, HistoryQuery};
+    ///
+    /// let mut query = HistoryQuery::new();
+    /// query.limit = Some(5);
+    /// assert_eq!(HistoryExportRequest::new(query).to_query()?, "limit=5");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for the same bounds as [`HistoryQuery::to_query`]
+    /// and for a `phone_number` filter, which `/history/export` does not
+    /// document.
+    pub fn to_query(&self) -> Result<String> {
+        if self.query.phone_number.is_some() {
+            return Err(Error::validation(
+                "phonenumber",
+                "is not supported by /v2/history/export",
+            ));
+        }
+        Ok(encode_history_query(&self.query.query_pairs(false)?))
+    }
+}
+
+/// Request for `DELETE /v2/history`.
+///
+/// ```
+/// use sipgate_flow::rest::DeleteHistoryEntriesRequest;
+///
+/// let request = DeleteHistoryEntriesRequest::new(["100001234".to_string()])?;
+/// assert_eq!(request.to_query()?, "id=100001234");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeleteHistoryEntriesRequest {
+    /// Entry ids to delete. The list must be non-empty and ids must not repeat.
+    pub ids: Vec<String>,
+}
+
+impl DeleteHistoryEntriesRequest {
+    /// Builds a checked bulk-delete request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DeleteHistoryEntriesRequest;
+    ///
+    /// let request = DeleteHistoryEntriesRequest::new([
+    ///     "100001234".to_string(),
+    ///     "100001235".to_string(),
+    /// ])?;
+    /// assert_eq!(request.ids.len(), 2);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the list is empty, an id is empty or too
+    /// long, or an id repeats.
+    pub fn new(ids: impl IntoIterator<Item = String>) -> Result<Self> {
+        let request = Self {
+            ids: ids.into_iter().collect(),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Encodes the repeated `id` query parameters without the leading `?`.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DeleteHistoryEntriesRequest;
+    ///
+    /// let request = DeleteHistoryEntriesRequest::new(["a".to_string(), "b".to_string()])?;
+    /// assert_eq!(request.to_query()?, "id=a&id=b");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the request is invalid.
+    pub fn to_query(&self) -> Result<String> {
+        self.validate()?;
+        let pairs = self
+            .ids
+            .iter()
+            .map(|id| ("id".to_string(), id.clone()))
+            .collect::<Vec<_>>();
+        Ok(encode_history_query(&pairs))
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.ids.is_empty() {
+            return Err(Error::validation(
+                "id",
+                "must contain at least one entry id",
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for id in &self.ids {
+            validate::path_segment("id", id)?;
+            if !seen.insert(id.as_str()) {
+                return Err(Error::validation("id", "must not repeat"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One entry update in `PUT /v2/history`.
+///
+/// ```
+/// use sipgate_flow::rest::HistoryEntryUpdate;
+///
+/// let mut update = HistoryEntryUpdate::new("100001234")?;
+/// update.read = Some(true);
+/// assert_eq!(update.to_json()["id"], "100001234");
+/// assert_eq!(update.to_json()["read"], true);
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryEntryUpdate {
+    /// Entry id to update.
+    pub id: String,
+    /// New archived state, when changing it.
+    pub archived: Option<bool>,
+    /// New read state, when changing it.
+    pub read: Option<bool>,
+    /// New starred state, when changing it.
+    pub starred: Option<bool>,
+}
+
+impl HistoryEntryUpdate {
+    /// Builds an update for one entry id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::HistoryEntryUpdate;
+    ///
+    /// let update = HistoryEntryUpdate::new("100001234")?;
+    /// assert_eq!(update.id, "100001234");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the id is empty or cannot be sent safely.
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let update = Self {
+            id: id.into(),
+            archived: None,
+            read: None,
+            starred: None,
+        };
+        update.validate()?;
+        Ok(update)
+    }
+
+    /// Renders the documented camel-case update object.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::HistoryEntryUpdate;
+    ///
+    /// let update = HistoryEntryUpdate::new("100001234")?;
+    /// assert_eq!(update.to_json(), serde_json::json!({"id": "100001234"}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        body.insert("id".to_string(), json!(self.id));
+        if let Some(archived) = self.archived {
+            body.insert("archived".to_string(), json!(archived));
+        }
+        if let Some(read) = self.read {
+            body.insert("read".to_string(), json!(read));
+        }
+        if let Some(starred) = self.starred {
+            body.insert("starred".to_string(), json!(starred));
+        }
+        Value::Object(body)
+    }
+
+    fn validate(&self) -> Result<()> {
+        validate::path_segment("id", &self.id)
+    }
+}
+
+/// Request for `PUT /v2/history`.
+///
+/// ```
+/// use sipgate_flow::rest::{HistoryEntryUpdate, UpdateHistoryEntriesRequest};
+///
+/// let update = HistoryEntryUpdate::new("100001234")?;
+/// let request = UpdateHistoryEntriesRequest::new([update])?;
+/// assert!(request.to_json().is_array());
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpdateHistoryEntriesRequest {
+    /// Updates to apply. The documented maximum is
+    /// `MAX_HISTORY_UPDATE_ENTRIES`.
+    pub entries: Vec<HistoryEntryUpdate>,
+}
+
+impl UpdateHistoryEntriesRequest {
+    /// Builds a checked bulk-update request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{HistoryEntryUpdate, UpdateHistoryEntriesRequest};
+    ///
+    /// let request = UpdateHistoryEntriesRequest::new([
+    ///     HistoryEntryUpdate::new("100001234")?,
+    /// ])?;
+    /// assert_eq!(request.entries.len(), 1);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the list has 150 or more entries or any
+    /// entry id is invalid.
+    pub fn new(entries: impl IntoIterator<Item = HistoryEntryUpdate>) -> Result<Self> {
+        let request = Self {
+            entries: entries.into_iter().collect(),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Renders the documented JSON array body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{HistoryEntryUpdate, UpdateHistoryEntriesRequest};
+    ///
+    /// let request = UpdateHistoryEntriesRequest::new([
+    ///     HistoryEntryUpdate::new("100001234")?,
+    /// ])?;
+    /// assert_eq!(request.to_json()[0]["id"], "100001234");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Array(
+            self.entries
+                .iter()
+                .map(HistoryEntryUpdate::to_json)
+                .collect(),
+        )
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.entries.len() > MAX_HISTORY_UPDATE_ENTRIES {
+            return Err(Error::validation(
+                "entries",
+                format!("must contain at most {MAX_HISTORY_UPDATE_ENTRIES} entries"),
+            ));
+        }
+        for entry in &self.entries {
+            entry.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Request for `PUT /v2/history/{entryId}`.
+///
+/// ```
+/// use sipgate_flow::rest::UpdateHistoryEntryRequest;
+///
+/// let mut request = UpdateHistoryEntryRequest::new();
+/// request.read = Some(true);
+/// assert_eq!(request.to_json()["read"], true);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpdateHistoryEntryRequest {
+    /// New archived state, when changing it.
+    pub archived: Option<bool>,
+    /// New read state, when changing it.
+    pub read: Option<bool>,
+    /// New starred state, when changing it.
+    pub starred: Option<bool>,
+    /// New note, when changing it.
+    pub note: Option<String>,
+}
+
+impl UpdateHistoryEntryRequest {
+    /// Builds an empty update request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::UpdateHistoryEntryRequest;
+    ///
+    /// assert_eq!(UpdateHistoryEntryRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Renders the documented JSON object body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::UpdateHistoryEntryRequest;
+    ///
+    /// let mut request = UpdateHistoryEntryRequest::new();
+    /// request.note = Some("Customer called back".to_string());
+    /// assert_eq!(request.to_json()["note"], "Customer called back");
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if let Some(archived) = self.archived {
+            body.insert("archived".to_string(), json!(archived));
+        }
+        if let Some(read) = self.read {
+            body.insert("read".to_string(), json!(read));
+        }
+        if let Some(starred) = self.starred {
+            body.insert("starred".to_string(), json!(starred));
+        }
+        if let Some(note) = &self.note {
+            body.insert("note".to_string(), json!(note));
+        }
+        Value::Object(body)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(note) = &self.note {
+            validate::non_empty("note", note, validate::MAX_REST_FIELD_BYTES)?;
+        }
+        Ok(())
+    }
+}
+
+/// Request for `PUT /v2/history/{entryId}/archive`.
+///
+/// ```
+/// use sipgate_flow::rest::SetHistoryEntryArchiveRequest;
+///
+/// assert_eq!(
+///     SetHistoryEntryArchiveRequest::new(true).to_json(),
+///     serde_json::json!({"value": true})
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SetHistoryEntryArchiveRequest {
+    /// New archive state.
+    pub value: bool,
+}
+
+impl SetHistoryEntryArchiveRequest {
+    /// Builds an archive-state request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SetHistoryEntryArchiveRequest;
+    ///
+    /// assert!(SetHistoryEntryArchiveRequest::new(false).to_json()["value"] == false);
+    /// ```
+    #[must_use]
+    pub fn new(value: bool) -> Self {
+        Self { value }
+    }
+
+    /// Renders the documented JSON object body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SetHistoryEntryArchiveRequest;
+    ///
+    /// assert_eq!(SetHistoryEntryArchiveRequest::new(true).to_json()["value"], true);
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"value": self.value})
+    }
+}
+
+/// Request for `PUT /v2/history/{entryId}/note`.
+///
+/// ```
+/// use sipgate_flow::rest::SetHistoryEntryNoteRequest;
+///
+/// let request = SetHistoryEntryNoteRequest::new("Customer called back")?;
+/// assert_eq!(request.to_json()["note"], "Customer called back");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SetHistoryEntryNoteRequest {
+    /// Note text.
+    pub note: String,
+}
+
+impl SetHistoryEntryNoteRequest {
+    /// Builds a checked note request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SetHistoryEntryNoteRequest;
+    ///
+    /// assert!(SetHistoryEntryNoteRequest::new("done").is_ok());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the note is empty or too long.
+    pub fn new(note: impl Into<String>) -> Result<Self> {
+        let request = Self { note: note.into() };
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Renders the documented JSON object body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SetHistoryEntryNoteRequest;
+    ///
+    /// assert_eq!(SetHistoryEntryNoteRequest::new("done")?.to_json(), serde_json::json!({"note": "done"}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"note": self.note})
+    }
+
+    fn validate(&self) -> Result<()> {
+        validate::non_empty("note", &self.note, validate::MAX_REST_FIELD_BYTES)
+    }
+}
+
+/// Request for `PUT /v2/history/{entryId}/read`.
+///
+/// ```
+/// use sipgate_flow::rest::SetHistoryEntryReadRequest;
+///
+/// assert_eq!(
+///     SetHistoryEntryReadRequest::new(true).to_json(),
+///     serde_json::json!({"value": true})
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SetHistoryEntryReadRequest {
+    /// New read state.
+    pub value: bool,
+}
+
+impl SetHistoryEntryReadRequest {
+    /// Builds a read-state request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SetHistoryEntryReadRequest;
+    ///
+    /// assert!(SetHistoryEntryReadRequest::new(false).to_json()["value"] == false);
+    /// ```
+    #[must_use]
+    pub fn new(value: bool) -> Self {
+        Self { value }
+    }
+
+    /// Renders the documented JSON object body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SetHistoryEntryReadRequest;
+    ///
+    /// assert_eq!(SetHistoryEntryReadRequest::new(true).to_json()["value"], true);
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"value": self.value})
+    }
+}
+
+/// Response for `GET /v2/history`.
+///
+/// ```
+/// use sipgate_flow::rest::HistoryResponse;
+///
+/// let mut response = HistoryResponse::default();
+/// response.total_count = Some(0);
+/// assert_eq!(response.items, []);
+/// assert_eq!(response.total_count, Some(0));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryResponse {
+    /// History entries in the requested page.
+    pub items: Vec<HistoryEntry>,
+    /// Total matching rows reported by the server, when present.
+    pub total_count: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHistoryResponse {
+    #[serde(default)]
+    items: Option<Vec<HistoryEntry>>,
+    #[serde(default, alias = "total_count")]
+    total_count: Option<i64>,
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/history` — one typed page of calls, faxes, SMS messages and
+    /// voicemails, with the documented filters applied.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{HistoryEntryKind, HistoryQuery};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let mut query = HistoryQuery::new();
+    /// query.types.push(HistoryEntryKind::Call);
+    /// query.limit = Some(50);
+    /// let page = client.history_page(&query).await?;
+    /// for entry in page.items {
+    ///     println!("{}", entry.id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an invalid query, [`Error::Json`] when the
+    /// body is not the documented `{"items": [...]}` envelope, plus transport
+    /// and auth errors.
+    pub async fn history_page(&self, query: &HistoryQuery) -> Result<HistoryResponse> {
+        let query = query.to_query()?;
+        let path = history_path("/v2/history", &query);
+        let value = self.send(Method::Get, &path, None).await?;
+        let response =
+            serde_json::from_value::<RawHistoryResponse>(value).map_err(Error::json_parse)?;
+        Ok(HistoryResponse {
+            items: response.items.unwrap_or_default(),
+            total_count: response.total_count,
+        })
+    }
+
+    /// `GET /v2/history/export` — the documented history export as CSV text.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{HistoryExportRequest, HistoryQuery};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let mut query = HistoryQuery::new();
+    /// query.limit = Some(50);
+    /// let csv = client.history_export_csv(&HistoryExportRequest::new(query)).await?;
+    /// println!("{csv}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an invalid query or an unsupported
+    /// `phonenumber` filter, plus transport and auth errors.
+    pub async fn history_export_csv(&self, request: &HistoryExportRequest) -> Result<String> {
+        let query = request.to_query()?;
+        let path = history_path("/v2/history/export", &query);
+        let response = self.send_raw(Method::Get, &path, None).await?;
+        Ok(response.text())
+    }
+
+    /// `GET /v2/history/{entryId}` — one history entry, typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let entry = client.history_entry("100001234").await?;
+    /// println!("{}", entry.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable entry id, [`Error::Json`] when
+    /// the body is not a history entry object, plus transport and auth errors.
+    pub async fn history_entry(&self, entry_id: &str) -> Result<HistoryEntry> {
+        validate::path_segment("entry_id", entry_id)?;
+        let path = format!("/v2/history/{entry_id}");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/history` — delete multiple history entries.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::DeleteHistoryEntriesRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = DeleteHistoryEntriesRequest::new(["100001234".to_string()])?;
+    /// client.delete_history_entries(&request).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty list or an invalid id, plus
+    /// transport and auth errors.
+    pub async fn delete_history_entries(
+        &self,
+        request: &DeleteHistoryEntriesRequest,
+    ) -> Result<()> {
+        let query = request.to_query()?;
+        let path = history_path("/v2/history", &query);
+        self.send_empty(Method::Delete, &path, None).await
+    }
+
+    /// `DELETE /v2/history/{entryId}` — delete one history entry.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_history_entry("100001234").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable entry id, plus transport and auth
+    /// errors.
+    pub async fn delete_history_entry(&self, entry_id: &str) -> Result<()> {
+        validate::path_segment("entry_id", entry_id)?;
+        let path = format!("/v2/history/{entry_id}");
+        self.send_empty(Method::Delete, &path, None).await
+    }
+
+    /// `PUT /v2/history` — update multiple history entries.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{HistoryEntryUpdate, UpdateHistoryEntriesRequest};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let mut update = HistoryEntryUpdate::new("100001234")?;
+    /// update.read = Some(true);
+    /// client.update_history_entries(&UpdateHistoryEntriesRequest::new([update])?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the list has 150 or more entries or an entry
+    /// id is invalid, plus transport and auth errors.
+    pub async fn update_history_entries(
+        &self,
+        request: &UpdateHistoryEntriesRequest,
+    ) -> Result<()> {
+        request.validate()?;
+        let body = request.to_json();
+        self.send_empty(Method::Put, "/v2/history", Some(&body))
+            .await
+    }
+
+    /// `PUT /v2/history/{entryId}` — update one history entry.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::UpdateHistoryEntryRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let mut request = UpdateHistoryEntryRequest::new();
+    /// request.starred = Some(true);
+    /// client.update_history_entry("100001234", &request).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable entry id or an empty note, plus
+    /// transport and auth errors.
+    pub async fn update_history_entry(
+        &self,
+        entry_id: &str,
+        request: &UpdateHistoryEntryRequest,
+    ) -> Result<()> {
+        validate::path_segment("entry_id", entry_id)?;
+        request.validate()?;
+        let path = format!("/v2/history/{entry_id}");
+        let body = request.to_json();
+        self.send_empty(Method::Put, &path, Some(&body)).await
+    }
+
+    /// `PUT /v2/history/{entryId}/archive` — set archive state.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::SetHistoryEntryArchiveRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_history_entry_archive("100001234", &SetHistoryEntryArchiveRequest::new(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable entry id, plus transport and auth
+    /// errors.
+    pub async fn set_history_entry_archive(
+        &self,
+        entry_id: &str,
+        request: &SetHistoryEntryArchiveRequest,
+    ) -> Result<()> {
+        validate::path_segment("entry_id", entry_id)?;
+        let path = format!("/v2/history/{entry_id}/archive");
+        let body = request.to_json();
+        self.send_empty(Method::Put, &path, Some(&body)).await
+    }
+
+    /// `PUT /v2/history/{entryId}/note` — set the note.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::SetHistoryEntryNoteRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_history_entry_note("100001234", &SetHistoryEntryNoteRequest::new("done")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable entry id or an empty note, plus
+    /// transport and auth errors.
+    pub async fn set_history_entry_note(
+        &self,
+        entry_id: &str,
+        request: &SetHistoryEntryNoteRequest,
+    ) -> Result<()> {
+        validate::path_segment("entry_id", entry_id)?;
+        request.validate()?;
+        let path = format!("/v2/history/{entry_id}/note");
+        let body = request.to_json();
+        self.send_empty(Method::Put, &path, Some(&body)).await
+    }
+
+    /// `PUT /v2/history/{entryId}/read` — set read state.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::SetHistoryEntryReadRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_history_entry_read("100001234", &SetHistoryEntryReadRequest::new(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable entry id, plus transport and auth
+    /// errors.
+    pub async fn set_history_entry_read(
+        &self,
+        entry_id: &str,
+        request: &SetHistoryEntryReadRequest,
+    ) -> Result<()> {
+        validate::path_segment("entry_id", entry_id)?;
+        let path = format!("/v2/history/{entry_id}/read");
+        let body = request.to_json();
+        self.send_empty(Method::Put, &path, Some(&body)).await
+    }
+
+    async fn send_raw(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<crate::transport::Response> {
+        let mut attempts_failed = 0_u32;
+        loop {
+            let error = match self.attempt_raw(method, path, body).await {
+                Ok(response) => return Ok(response),
+                Err(error) => error,
+            };
+            if !error.is_retryable() {
+                return Err(error);
+            }
+            attempts_failed += 1;
+            match self.retry.delay(attempts_failed, error.retry_after()) {
+                Some(delay) => self.sleeper.sleep(delay).await,
+                None => return Err(error),
+            }
+        }
+    }
+
+    async fn attempt_raw(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<crate::transport::Response> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: true,
+                path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &self.retry,
+                sleeper: &self.sleeper,
+            },
+            method,
+            body,
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(response);
+        }
+        Err(api_error(
+            method,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    async fn send_empty(&self, method: Method, path: &str, body: Option<&Value>) -> Result<()> {
+        self.send_raw(method, path, body).await.map(|_response| ())
+    }
+}
+
+fn history_path(path: &str, query: &str) -> String {
+    if query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
+fn encode_history_query(pairs: &[(String, String)]) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs)
+        .finish()
+}
+
+fn history_kind_query_value(kind: &HistoryEntryKind) -> String {
+    match kind {
+        HistoryEntryKind::Other(value) => value.clone(),
+        _ => kind.as_str().to_ascii_uppercase(),
+    }
+}
+
+fn history_direction_query_value(direction: &HistoryDirection) -> String {
+    match direction {
+        HistoryDirection::Other(value) => value.clone(),
+        HistoryDirection::Incoming => "INCOMING".to_string(),
+        HistoryDirection::Outgoing => "OUTGOING".to_string(),
+        HistoryDirection::MissedIncoming => "MISSED_INCOMING".to_string(),
+        HistoryDirection::MissedOutgoing => "MISSED_OUTGOING".to_string(),
+    }
+}
+
+fn history_starred_query_value(starred: &HistoryStarred) -> String {
+    match starred {
+        HistoryStarred::Other(value) => value.clone(),
+        _ => starred.as_str().to_ascii_uppercase(),
+    }
+}
