@@ -202,7 +202,8 @@ async fn a_cached_token_is_reused_until_it_nears_expiry() {
     let clock = FakeClock::new(Duration::from_secs(1_700_000_000));
     let auth = client(transport.clone())
         .with_clock(clock.clone())
-        .with_refresh_margin(Duration::from_secs(60));
+        .with_refresh_margin(Duration::from_secs(60))
+        .expect("valid margin");
 
     assert_eq!(
         auth.access_token(false).await.unwrap().access_token(),
@@ -565,22 +566,119 @@ async fn a_token_without_expires_in_is_cached_for_the_assumed_lifetime() {
 }
 
 #[tokio::test]
-async fn a_margin_longer_than_the_lifetime_still_yields_a_usable_token() {
+async fn a_margin_just_below_the_lifetime_still_caches() {
     let transport = MockTransport::new();
     transport.push_response(json_response(&serde_json::json!({
-        "access_token": "short",
+        "access_token": "first",
+        "expires_in": 30,
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "access_token": "second",
         "expires_in": 30,
     })));
     let clock = FakeClock::new(Duration::ZERO);
     let auth = client(transport.clone())
-        .with_clock(clock)
-        .with_refresh_margin(Duration::from_secs(60));
+        .with_clock(clock.clone())
+        .with_refresh_margin(Duration::from_secs(29))
+        .expect("valid margin");
 
     assert_eq!(
         auth.access_token(false).await.unwrap().access_token(),
-        "short"
+        "first"
+    );
+    // The margin is below the lifetime but above half of it, so it is clamped
+    // to half: 15 seconds usable instead of zero.
+    clock.advance(Duration::from_secs(14));
+    assert_eq!(
+        auth.access_token(false).await.unwrap().access_token(),
+        "first"
     );
     assert_eq!(transport.call_count(), 1);
+
+    clock.advance(Duration::from_secs(1));
+    assert_eq!(
+        auth.access_token(false).await.unwrap().access_token(),
+        "second"
+    );
+    assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn a_margin_at_or_above_the_lifetime_is_clamped_to_leave_cache_time() {
+    for margin in [Duration::from_secs(30), Duration::from_secs(60)] {
+        let transport = MockTransport::new();
+        transport.push_response(json_response(&serde_json::json!({
+            "access_token": "short",
+            "expires_in": 30,
+        })));
+        transport.push_response(json_response(&serde_json::json!({
+            "access_token": "next",
+            "expires_in": 30,
+        })));
+        let clock = FakeClock::new(Duration::ZERO);
+        let auth = client(transport.clone())
+            .with_clock(clock.clone())
+            .with_refresh_margin(margin)
+            .expect("valid margin");
+
+        assert_eq!(
+            auth.access_token(false).await.unwrap().access_token(),
+            "short"
+        );
+        assert_eq!(transport.call_count(), 1);
+
+        // The margin is clamped to half of the 30 second lifetime, so the token
+        // is cached for 15 seconds instead of being stored as already expired.
+        clock.advance(Duration::from_secs(14));
+        assert_eq!(
+            auth.access_token(false).await.unwrap().access_token(),
+            "short",
+            "margin {margin:?}"
+        );
+        assert_eq!(transport.call_count(), 1);
+
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            auth.access_token(false).await.unwrap().access_token(),
+            "next",
+            "margin {margin:?}"
+        );
+        assert_eq!(transport.call_count(), 2);
+    }
+}
+
+#[tokio::test]
+async fn an_expires_in_of_zero_is_refused_and_never_cached() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({
+        "access_token": "zero",
+        "expires_in": 0,
+    })));
+    let auth = client(transport.clone());
+
+    let error = auth.access_token(false).await.expect_err("zero lifetime");
+    let Error::TokenResponse(reason) = &error else {
+        panic!("expected TokenResponse, got {error:?}");
+    };
+    assert!(reason.contains("expires_in of 0"), "{reason}");
+    assert_eq!(transport.call_count(), 1);
+    assert!(
+        !auth.has_valid_token(),
+        "a zero-lifetime token must not enter the cache"
+    );
+}
+
+#[test]
+fn an_absurd_refresh_margin_is_a_typed_validation_error() {
+    let transport = MockTransport::new();
+    let error = client(transport)
+        .with_refresh_margin(MAX_TOKEN_LIFETIME)
+        .expect_err("the maximum lifetime is not a valid margin");
+    let Error::Validation { field, message } = &error else {
+        panic!("expected Validation, got {error:?}");
+    };
+    assert_eq!(*field, "refresh_margin");
+    assert!(message.contains("smaller"), "{message}");
 }
 
 #[test]
