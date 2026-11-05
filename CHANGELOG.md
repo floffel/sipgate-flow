@@ -35,6 +35,10 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* The `truncate_body` documentation no longer claims the helper bounds the
+  transport read: it documents that it caps the string copied into an error
+  message at 512 bytes by byte length, backing up to a UTF-8 boundary. The
+  exact-limit, one-past-limit and multibyte boundary cases now have tests.
 * `RetryPolicy::delay(0, ...)` no longer schedules a full backoff step. The
   parameter is documented as completed *failures*, so zero completed failures
   now returns `None` instead of treating the first caller attempt index as an

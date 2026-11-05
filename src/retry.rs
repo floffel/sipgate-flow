@@ -494,8 +494,13 @@ pub fn classify(method: Method, status: u16) -> RetryOutcome {
     }
 }
 
-/// Truncates a response body for an error message, so a multi-megabyte error
-/// page cannot be held in memory or written to a log.
+/// Bounds the string this module copies into an error message.
+///
+/// The transport has already read and allocated the response body by the time
+/// this runs, so this does not protect the connection read. It only caps the
+/// copy that an error retains and may later log: at most 512 bytes, backing up
+/// to the nearest UTF-8 boundary and appending `…` when the input was longer.
+/// The decision uses byte length, not character count.
 pub(crate) fn truncate_body(body: &str) -> String {
     const LIMIT: usize = 512;
     if body.len() <= LIMIT {
@@ -542,8 +547,9 @@ pub(crate) fn api_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, RetryOutcome};
+    use super::{classify, truncate_body, RetryOutcome};
     use crate::transport::Method;
+    use proptest::prelude::*;
 
     #[test]
     fn classify_pins_the_refined_status_table() {
@@ -564,5 +570,57 @@ mod tests {
         assert_eq!(classify(Method::Get, 500), RetryOutcome::Retry);
         assert_eq!(classify(Method::Get, 501), RetryOutcome::Terminal);
         assert_eq!(classify(Method::Get, 505), RetryOutcome::Terminal);
+    }
+
+    #[test]
+    fn truncate_body_keeps_bodies_at_or_below_the_byte_limit_verbatim() {
+        for len in [0_usize, 1, 511, 512] {
+            let body = "x".repeat(len);
+            assert_eq!(truncate_body(&body), body, "{len} bytes");
+        }
+    }
+
+    #[test]
+    fn truncate_body_appends_the_marker_above_the_byte_limit() {
+        let body = "x".repeat(513);
+        let truncated = truncate_body(&body);
+        assert_eq!(truncated, format!("{}…", "x".repeat(512)));
+        assert!(truncated.ends_with('…'));
+        assert_eq!(truncated.len(), 512 + '…'.len_utf8());
+    }
+
+    #[test]
+    fn truncate_body_backs_up_when_byte_512_is_inside_a_multibyte_character() {
+        // 511 ASCII bytes, then a 2-byte character spanning bytes 512 and 513:
+        // byte 512 is not a character boundary, so the prefix must stop at 511.
+        let body = format!("{}ä", "x".repeat(511));
+        assert_eq!(body.len(), 513);
+        assert!(!body.is_char_boundary(512));
+
+        let truncated = truncate_body(&body);
+        assert_eq!(truncated, format!("{}…", "x".repeat(511)));
+        assert_eq!(truncated.len(), 511 + '…'.len_utf8());
+        assert!(!truncated.contains('ä'));
+    }
+
+    proptest! {
+        #[test]
+        fn truncate_body_stays_on_a_char_boundary_and_bounds_the_copied_prefix(
+            body in prop::collection::vec(any::<char>(), 0..800)
+                .prop_map(|chars| chars.into_iter().collect::<String>()),
+        ) {
+            const LIMIT: usize = 512;
+            let truncated = truncate_body(&body);
+
+            if body.len() <= LIMIT {
+                prop_assert_eq!(truncated, body);
+            } else {
+                prop_assert!(truncated.ends_with('…'));
+                let prefix = &truncated[..truncated.len() - '…'.len_utf8()];
+                prop_assert!(prefix.len() <= LIMIT, "{prefix:?}");
+                prop_assert!(body.is_char_boundary(prefix.len()));
+                prop_assert_eq!(&body[..prefix.len()], prefix);
+            }
+        }
     }
 }
