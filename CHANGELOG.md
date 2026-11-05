@@ -49,6 +49,7 @@ with the pre-1.0 reading described in the README section *Versioning*.
   intermittently failing
   `thirty_two_tasks_share_one_token_cache_without_corruption` test, whose bound
   is now tightened to exactly one request.
+* The crate-root "Calling the REST API" section now ships a runnable example. An in-memory `Transport` drives `RestClient::send_sms` and asserts the URL that goes out, so the renderer-free path is executed by the doctest runner (including under `--no-default-features`); the `reqwest` half is split out so only the `ReqwestTransport` lines sit behind the `http` feature instead of the whole example compiling away.
 * `RetryPolicy::delay(0, ...)` no longer schedules a full backoff step. The
   parameter is documented as completed *failures*, so zero completed failures
   now returns `None` instead of treating the first caller attempt index as an
