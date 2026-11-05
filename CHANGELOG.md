@@ -81,6 +81,14 @@ with the pre-1.0 reading described in the README section *Versioning*.
   them as the repeated query parameters Swagger documents. Response decoding
   remains permissive, including `total_count`/`totalCount`, while single-entry
   and bulk write requests carry typed bodies.
+* The **REST v2 contacts resource** (#165): typed request/response types and
+  `RestClient` methods for every documented `/v2/contacts...` endpoint — list
+  with the documented `phonenumbers`/`limit`/`offset`/`lastId`/`scopes` paging,
+  get, create, update, single and bulk delete, CSV export, CSV import, Google
+  import, the deprecated internal list, and the structured vCard get/put. Path,
+  query and body fields run through the crate's validation gates before the
+  wire, list responses stay permissive, and the paging limit reuses the
+  documented 5000 default as its ceiling.
 
 * The **REST v2 `devices` resource** (#164, split from #12): typed models and
   `RestClient` methods for the documented `/devices` surface — the device

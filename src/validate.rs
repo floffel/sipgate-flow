@@ -66,6 +66,38 @@ pub(crate) const MAX_AUDIO_BASE64_CHARS: usize =
 /// only multi-megabyte values are refused.
 pub(crate) const MAX_REST_FIELD_BYTES: usize = MAX_FLOW_ACTION_FIELD_BYTES;
 
+/// Largest documented `limit` for the REST v2 contact list/vCard endpoints.
+pub(crate) const MAX_CONTACT_PAGE_LIMIT: i64 = 5000;
+
+/// Validates the documented contact page `limit`.
+///
+/// The Swagger marks `limit` as an `int32` with a default of 5000; this uses
+/// the default as the ceiling so a caller cannot ask for more than one
+/// documented page.
+pub(crate) fn contact_page_limit(limit: i64) -> Result<i64> {
+    if !(1..=MAX_CONTACT_PAGE_LIMIT).contains(&limit) {
+        return Err(Error::validation(
+            "limit",
+            format!("must be between 1 and {MAX_CONTACT_PAGE_LIMIT}"),
+        ));
+    }
+    Ok(limit)
+}
+
+/// Validates the deprecated documented contact paging `offset`.
+///
+/// The Swagger marks `offset` as an `int32`; a negative value is refused before
+/// it can reach the query string.
+pub(crate) fn contact_offset(offset: i64) -> Result<i64> {
+    if !(0..=i64::from(i32::MAX)).contains(&offset) {
+        return Err(Error::validation(
+            "offset",
+            "must be between 0 and 2147483647",
+        ));
+    }
+    Ok(offset)
+}
+
 /// Rejects empty or over-long string fields.
 ///
 /// `max_bytes` is the field-specific ceiling. The caller supplies it at every

@@ -29,14 +29,14 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::auth::{StaticToken, TokenSource};
 use crate::error::{Error, Result};
 use crate::exchange;
 use crate::retry::{api_error, NoSleep, RetryPolicy, Sleeper};
-use crate::transport::{Method, Transport};
+use crate::transport::{Method, Response, Transport};
 use crate::validate;
 
 /// Base URL of the REST API; the Swagger document's `host` plus `basePath`
@@ -272,12 +272,40 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
     }
 
     /// Sends one request with 401 refresh, bounded retries and `Retry-After`
-    /// pacing.
+    /// pacing, and decodes a successful JSON body.
     async fn send(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+        self.send_response(method, path, body).await?.json()
+    }
+
+    /// Sends one request and discards a successful body.
+    ///
+    /// Endpoints whose documented success status (`201`, `204`) may carry no
+    /// body are read through this instead of [`RestClient::send`], which would
+    /// fail closed on an empty non-`204` payload.
+    async fn send_unit(&self, method: Method, path: &str, body: Option<&Value>) -> Result<()> {
+        let _ = self.send_response(method, path, body).await?;
+        Ok(())
+    }
+
+    /// Sends one request and returns a successful body as text.
+    ///
+    /// Used for the documented `text/csv` contact export.
+    async fn send_text(&self, method: Method, path: &str, body: Option<&Value>) -> Result<String> {
+        Ok(self.send_response(method, path, body).await?.text())
+    }
+
+    /// Sends one request with 401 refresh, bounded retries and `Retry-After`
+    /// pacing, returning the raw success response.
+    async fn send_response(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Response> {
         let mut attempts_failed = 0_u32;
         loop {
             let error = match self.attempt(method, path, body).await {
-                Ok(value) => return Ok(value),
+                Ok(response) => return Ok(response),
                 Err(error) => error,
             };
             if !error.is_retryable() {
@@ -292,7 +320,7 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
     }
 
     /// One logical attempt: refresh the token once on 401, then give up.
-    async fn attempt(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+    async fn attempt(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Response> {
         let response = exchange::authorized(
             &self.transport,
             &self.auth,
@@ -311,7 +339,7 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
         )
         .await?;
         if response.is_success() {
-            return response.json();
+            return Ok(response);
         }
         Err(api_error(
             method,
@@ -665,6 +693,341 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
     pub async fn phonelines(&self) -> Result<Vec<Phoneline>> {
         self.get_items("/v2/phonelines").await
     }
+
+    // --- BEGIN REST v2 contacts resource (#165) ---
+
+    /// `GET /v2/contacts` with the documented paging and filter parameters.
+    ///
+    /// Returns the documented `{"items": [...], "totalCount": N}` envelope
+    /// instead of only the list, so a caller can page with [`ContactQuery`].
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{ContactQuery, ContactScopeQuery};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let query = ContactQuery::new()
+    ///     .with_limit(100)?
+    ///     .with_scopes([ContactScopeQuery::Shared]);
+    /// let page = client.contact_page(&query).await?;
+    /// println!("{} of {:?}", page.items.len(), page.total_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable page limit, offset, `lastId` or
+    /// scope value, [`Error::Json`] when the body is not the documented
+    /// envelope, plus transport and auth errors.
+    pub async fn contact_page(&self, query: &ContactQuery) -> Result<ContactPage> {
+        let path = query.path();
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `POST /v2/contacts` — create a contact.
+    ///
+    /// The schema documents `201 Created` with no response body.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ContactRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let contact = ContactRequest::new().with_name("Ada Lovelace")?;
+    /// client.create_contact(&contact).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when a field is empty or above the crate's field
+    /// ceiling, plus transport and auth errors.
+    pub async fn create_contact(&self, request: &ContactRequest) -> Result<()> {
+        self.send_unit(Method::Post, "/v2/contacts", Some(&request.to_json()))
+            .await
+    }
+
+    /// `PUT /v2/contacts/{contactId}` — replace a contact.
+    ///
+    /// The schema documents `204 No Content` on success.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ContactRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let contact = ContactRequest::new().with_name("Ada Lovelace")?;
+    /// client.update_contact("b3d9af4a-78f9-11e6-8b77-86f30ca893d3", &contact).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable contact id or request field, plus
+    /// transport and auth errors.
+    pub async fn update_contact(&self, contact_id: &str, request: &ContactRequest) -> Result<()> {
+        validate::path_segment("contact_id", contact_id)?;
+        let path = format!("/v2/contacts/{contact_id}");
+        self.send_unit(Method::Put, &path, Some(&request.to_json()))
+            .await
+    }
+
+    /// `DELETE /v2/contacts/{contactid}` — delete one contact.
+    ///
+    /// Returns the documented `{"deleteCount": N}` body.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let result = client.delete_contact("b3d9af4a-78f9-11e6-8b77-86f30ca893d3").await?;
+    /// println!("deleted {}", result.delete_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable contact id, [`Error::Api`] with
+    /// 404 for an unknown contact, plus transport and auth errors.
+    pub async fn delete_contact(&self, contact_id: &str) -> Result<ContactDeleteResult> {
+        validate::path_segment("contact_id", contact_id)?;
+        let path = format!("/v2/contacts/{contact_id}");
+        let value = self.send(Method::Delete, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/contacts` — delete all or a specified set of contacts.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ContactDeleteRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = ContactDeleteRequest::new()
+    ///     .with_contact_ids(["b3d9af4a-78f9-11e6-8b77-86f30ca893d3"])?;
+    /// let result = client.delete_contacts(&request).await?;
+    /// println!("deleted {}", result.delete_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable contact id in the request, plus
+    /// transport and auth errors.
+    pub async fn delete_contacts(
+        &self,
+        request: &ContactDeleteRequest,
+    ) -> Result<ContactDeleteResult> {
+        let value = self
+            .send(Method::Delete, "/v2/contacts", Some(&request.to_json()))
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/contacts/csv` — export contacts as CSV.
+    ///
+    /// The response is `text/csv`, not JSON, so it is returned verbatim.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{ContactCsvQuery, ContactScopeQuery};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let query = ContactCsvQuery::new([ContactScopeQuery::Private]);
+    /// let csv = client.export_contacts_csv(&query).await?;
+    /// println!("{csv}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the query carries no scope, plus transport and
+    /// auth errors.
+    pub async fn export_contacts_csv(&self, query: &ContactCsvQuery) -> Result<String> {
+        let path = query.path();
+        self.send_text(Method::Get, &path, None).await
+    }
+
+    /// `POST /v2/contacts/import/csv` — import a base64-encoded CSV.
+    ///
+    /// The schema documents `204 No Content` on success.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ContactCsvImport;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let import = ContactCsvImport::new("Zmlyc3RuYW1lLGxhc3RuYW1l")?;
+    /// client.import_contacts_csv(&import).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for empty or oversized content, plus transport and
+    /// auth errors.
+    pub async fn import_contacts_csv(&self, import: &ContactCsvImport) -> Result<()> {
+        self.send_unit(
+            Method::Post,
+            "/v2/contacts/import/csv",
+            Some(&import.to_json()),
+        )
+        .await
+    }
+
+    /// `POST /v2/contacts/import/google` — import contacts from Google.
+    ///
+    /// Returns the documented `{"totalCount": N}` body.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{ContactGoogleImport, ContactRequestScope};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let import = ContactGoogleImport::new("oauth-token")?.with_scope(ContactRequestScope::Private);
+    /// let result = client.import_contacts_google(&import).await?;
+    /// println!("imported {}", result.total_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty token, plus transport and auth errors.
+    pub async fn import_contacts_google(
+        &self,
+        import: &ContactGoogleImport,
+    ) -> Result<ContactImportResult> {
+        let value = self
+            .send(
+                Method::Post,
+                "/v2/contacts/import/google",
+                Some(&import.to_json()),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/contacts/internal` — internal sipgate contacts (deprecated).
+    ///
+    /// Sipgate marks this endpoint deprecated in favour of
+    /// `GET /v2/contacts?scopes=INTERNAL`; it is modelled so a caller can still
+    /// read it.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for contact in client.internal_contacts().await? {
+    ///     println!("{}", contact.name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not the documented `{"items": [...]}`
+    /// envelope, plus transport and auth errors.
+    pub async fn internal_contacts(&self) -> Result<Vec<InternalContact>> {
+        self.get_items("/v2/contacts/internal").await
+    }
+
+    /// `GET /v2/contacts/vcard` — structured vCards, paginated.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let query = ContactVCardsQuery::new([ContactScopeQuery::Shared]).with_limit(50)?;
+    /// let page = client.contact_vcards(&query).await?;
+    /// println!("{} of {:?}", page.contacts.len(), page.overall_matches);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a missing scope or unusable paging value,
+    /// [`Error::Json`] when the body is not the documented envelope, plus
+    /// transport and auth errors.
+    pub async fn contact_vcards(&self, query: &ContactVCardsQuery) -> Result<ContactVCardsPage> {
+        let path = query.path();
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/contacts/vcard` — store one or more structured vCards.
+    ///
+    /// Returns the documented `{"result": [...]}` body.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsRequest};
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = ContactVCardsRequest::new();
+    /// let result = client
+    ///     .put_contact_vcards(ContactScopeQuery::Private, &request)
+    ///     .await?;
+    /// println!("stored {}", result.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not the documented envelope, plus
+    /// transport and auth errors.
+    pub async fn put_contact_vcards(
+        &self,
+        scope: ContactScopeQuery,
+        request: &ContactVCardsRequest,
+    ) -> Result<Vec<ContactUpsertResult>> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("scope", scope.as_str())
+            .finish();
+        let path = format!("/v2/contacts/vcard?{query}");
+        let value = self
+            .send(Method::Put, &path, Some(&request.to_json()))
+            .await?;
+        let response: ContactVCardsResponse =
+            serde_json::from_value(value).map_err(Error::json_parse)?;
+        Ok(response.result)
+    }
+
+    // --- END REST v2 contacts resource (#165) ---
 
     async fn get_items<I>(&self, path: &str) -> Result<Vec<I>>
     where
@@ -3094,6 +3457,2041 @@ fn fold_wire(value: &str) -> String {
         .flat_map(char::to_lowercase)
         .collect()
 }
+
+// --- BEGIN REST v2 contacts resource (#165) ---
+// Types for the `contacts` resource of the account administration API. Kept in
+// one delimited block so the sibling resource work rebases cleanly.
+
+/// Largest `limit` accepted by the contact list and vCard queries.
+///
+/// The Swagger documents `5000` as the default page size for `GET /v2/contacts`
+/// and `GET /v2/contacts/vcard`; the crate reuses it as the ceiling so a caller
+/// cannot ask for more than a documented page.
+///
+/// ```
+/// assert_eq!(sipgate_flow::rest::MAX_CONTACT_PAGE_LIMIT, 5000);
+/// ```
+pub const MAX_CONTACT_PAGE_LIMIT: i64 = 5000;
+
+/// Contact scope as used by the `scopes`, `scope` and `DeleteRequest` query and
+/// body parameters (uppercase on the wire).
+///
+/// ```
+/// use sipgate_flow::rest::ContactScopeQuery;
+///
+/// assert_eq!(ContactScopeQuery::Private.as_str(), "PRIVATE");
+/// assert_eq!(ContactScopeQuery::from_wire("shared"), ContactScopeQuery::Shared);
+/// assert_eq!(
+///     ContactScopeQuery::from_wire("FUTURE"),
+///     ContactScopeQuery::Other("FUTURE".into())
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContactScopeQuery {
+    /// Contacts visible only to the owning user.
+    Private,
+    /// Contacts shared with the account.
+    Shared,
+    /// Internal sipgate contacts.
+    Internal,
+    /// A value this crate does not model yet, kept verbatim.
+    Other(String),
+}
+
+impl ContactScopeQuery {
+    /// Maps a wire value, keeping unknown values verbatim.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactScopeQuery;
+    /// assert_eq!(ContactScopeQuery::from_wire("INTERNAL"), ContactScopeQuery::Internal);
+    /// ```
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("PRIVATE") {
+            Self::Private
+        } else if value.eq_ignore_ascii_case("SHARED") {
+            Self::Shared
+        } else if value.eq_ignore_ascii_case("INTERNAL") {
+            Self::Internal
+        } else {
+            Self::Other(value.to_string())
+        }
+    }
+
+    /// The canonical wire value (uppercase).
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactScopeQuery;
+    /// assert_eq!(ContactScopeQuery::Shared.as_str(), "SHARED");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Private => "PRIVATE",
+            Self::Shared => "SHARED",
+            Self::Internal => "INTERNAL",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+/// Scope value accepted by the create/update contact body.
+///
+/// The Swagger enum additionally allows the combined value `PRIVATE,SHARED`,
+/// which [`ContactScopeQuery`] (used for query parameters) does not.
+///
+/// ```
+/// use sipgate_flow::rest::ContactRequestScope;
+///
+/// assert_eq!(ContactRequestScope::PrivateShared.as_str(), "PRIVATE,SHARED");
+/// assert_eq!(
+///     ContactRequestScope::from_wire("internal"),
+///     ContactRequestScope::Internal
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContactRequestScope {
+    /// Contacts visible only to the owning user.
+    Private,
+    /// Contacts shared with the account.
+    Shared,
+    /// Internal sipgate contacts.
+    Internal,
+    /// A combined private-and-shared scope.
+    PrivateShared,
+    /// A value this crate does not model yet, kept verbatim.
+    Other(String),
+}
+
+impl ContactRequestScope {
+    /// Maps a wire value, keeping unknown values verbatim.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequestScope;
+    /// assert_eq!(
+    ///     ContactRequestScope::from_wire("PRIVATE,SHARED"),
+    ///     ContactRequestScope::PrivateShared
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("PRIVATE") {
+            Self::Private
+        } else if value.eq_ignore_ascii_case("SHARED") {
+            Self::Shared
+        } else if value.eq_ignore_ascii_case("INTERNAL") {
+            Self::Internal
+        } else if value.eq_ignore_ascii_case("PRIVATE,SHARED") {
+            Self::PrivateShared
+        } else {
+            Self::Other(value.to_string())
+        }
+    }
+
+    /// The canonical wire value.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequestScope;
+    /// assert_eq!(ContactRequestScope::Private.as_str(), "PRIVATE");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Private => "PRIVATE",
+            Self::Shared => "SHARED",
+            Self::Internal => "INTERNAL",
+            Self::PrivateShared => "PRIVATE,SHARED",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+/// `GET /v2/contacts` query parameters.
+///
+/// The documented parameters are `phonenumbers`, `limit`, `offset`, `lastId`
+/// and `scopes`. `offset` is deprecated in favour of `lastId` but still
+/// modelled. An empty query sends no parameters, which returns the service
+/// default page.
+///
+/// ```
+/// use sipgate_flow::rest::{ContactQuery, ContactScopeQuery};
+///
+/// let query = ContactQuery::new()
+///     .with_limit(100)?
+///     .with_last_id("contact-1")?
+///     .with_scopes([ContactScopeQuery::Shared]);
+/// assert_eq!(
+///     query.path(),
+///     "/v2/contacts?limit=100&lastId=contact-1&scopes=SHARED"
+/// );
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+    last_id: Option<String>,
+    scopes: Vec<ContactScopeQuery>,
+    phonenumbers: Vec<String>,
+}
+
+impl ContactQuery {
+    /// An empty query: no filter, no paging.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactQuery;
+    /// assert_eq!(ContactQuery::new().path(), "/v2/contacts");
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the documented page size.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactQuery;
+    ///
+    /// assert!(ContactQuery::new().with_limit(5000).is_ok());
+    /// assert!(ContactQuery::new().with_limit(0).is_err());
+    /// assert!(ContactQuery::new().with_limit(5001).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `limit` is `0` or above
+    /// [`MAX_CONTACT_PAGE_LIMIT`].
+    pub fn with_limit(mut self, limit: i64) -> Result<Self> {
+        self.limit = Some(validate::contact_page_limit(limit)?);
+        Ok(self)
+    }
+
+    /// Sets the deprecated `offset` paging parameter.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactQuery;
+    /// assert_eq!(ContactQuery::new().with_offset(10)?.path(), "/v2/contacts?offset=10");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `offset` is negative or does not fit the
+    /// documented `int32`.
+    pub fn with_offset(mut self, offset: i64) -> Result<Self> {
+        self.offset = Some(validate::contact_offset(offset)?);
+        Ok(self)
+    }
+
+    /// Sets `lastId`, the id the next page starts after.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactQuery;
+    /// assert!(ContactQuery::new().with_last_id("contact-1").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or path-unsafe id.
+    pub fn with_last_id(mut self, last_id: impl Into<String>) -> Result<Self> {
+        let last_id = last_id.into();
+        validate::path_segment("lastId", &last_id)?;
+        self.last_id = Some(last_id);
+        Ok(self)
+    }
+
+    /// Sets the included scopes; an empty list means the service default.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactQuery, ContactScopeQuery};
+    /// let query = ContactQuery::new().with_scopes([ContactScopeQuery::Private]);
+    /// assert_eq!(query.path(), "/v2/contacts?scopes=PRIVATE");
+    /// ```
+    #[must_use]
+    pub fn with_scopes(mut self, scopes: impl IntoIterator<Item = ContactScopeQuery>) -> Self {
+        self.scopes = scopes.into_iter().collect();
+        self
+    }
+
+    /// Sets the phone-number filter.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactQuery;
+    /// assert!(ContactQuery::new().with_phonenumbers(["+4915112345678"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value that is not E.164 digits.
+    pub fn with_phonenumbers<I, S>(mut self, numbers: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for number in numbers {
+            let digits = validate::phone("phonenumbers", &number.into())?;
+            collected.push(format!("+{digits}"));
+        }
+        self.phonenumbers = collected;
+        Ok(self)
+    }
+
+    /// Renders the path plus query string for the request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactQuery;
+    /// assert_eq!(ContactQuery::new().path(), "/v2/contacts");
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for number in &self.phonenumbers {
+            serializer.append_pair("phonenumbers", number);
+        }
+        if let Some(limit) = self.limit {
+            serializer.append_pair("limit", &limit.to_string());
+        }
+        if let Some(offset) = self.offset {
+            serializer.append_pair("offset", &offset.to_string());
+        }
+        if let Some(last_id) = &self.last_id {
+            serializer.append_pair("lastId", last_id);
+        }
+        for scope in &self.scopes {
+            serializer.append_pair("scopes", scope.as_str());
+        }
+        query_path("/v2/contacts", &serializer.finish())
+    }
+}
+
+/// The documented `{"items": [...], "totalCount": N}` response of
+/// `GET /v2/contacts`.
+///
+/// ```
+/// use sipgate_flow::rest::{Contact, ContactPage};
+///
+/// let page: ContactPage = serde_json::from_value(serde_json::json!({
+///     "items": [{"id": "c1", "name": "Ada"}],
+///     "totalCount": 1,
+///     "futureField": true
+/// }))
+/// .unwrap();
+/// assert_eq!(page.items.len(), 1);
+/// assert_eq!(page.total_count, Some(1));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactPage {
+    /// Contacts in this page.
+    #[serde(default)]
+    pub items: Vec<Contact>,
+    /// Total number of contacts, when the service reports it.
+    #[serde(default, alias = "total_count")]
+    pub total_count: Option<u32>,
+}
+
+/// `DELETE /v2/contacts` body (`DeleteRequest`).
+///
+/// The schema sends this body even when deleting everything; an empty request
+/// therefore deletes the scoped contacts, which matches the documented
+/// operation.
+///
+/// ```
+/// use sipgate_flow::rest::ContactDeleteRequest;
+///
+/// let request = ContactDeleteRequest::new()
+///     .with_contact_ids(["b3d9af4a-78f9-11e6-8b77-86f30ca893d3"])?;
+/// assert_eq!(
+///     request.to_json()["contactIds"][0],
+///     "b3d9af4a-78f9-11e6-8b77-86f30ca893d3"
+/// );
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactDeleteRequest {
+    contact_ids: Vec<String>,
+    scopes: Vec<ContactScopeQuery>,
+    source: Option<String>,
+}
+
+impl ContactDeleteRequest {
+    /// An empty delete request (the service applies its documented default).
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactDeleteRequest;
+    /// assert_eq!(ContactDeleteRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Restricts the delete to these contact ids.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactDeleteRequest;
+    /// assert!(ContactDeleteRequest::new().with_contact_ids(["c1"]).is_ok());
+    /// assert!(ContactDeleteRequest::new().with_contact_ids(["a/b"]).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an id that is empty or path-unsafe.
+    pub fn with_contact_ids<I, S>(mut self, ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for id in ids {
+            let id = id.into();
+            validate::path_segment("contactIds", &id)?;
+            collected.push(id);
+        }
+        self.contact_ids = collected;
+        Ok(self)
+    }
+
+    /// Restricts the delete to these scopes.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactDeleteRequest, ContactScopeQuery};
+    /// let request = ContactDeleteRequest::new().with_scopes([ContactScopeQuery::Shared]);
+    /// assert_eq!(request.to_json()["scope"], serde_json::json!(["SHARED"]));
+    /// ```
+    #[must_use]
+    pub fn with_scopes(mut self, scopes: impl IntoIterator<Item = ContactScopeQuery>) -> Self {
+        self.scopes = scopes.into_iter().collect();
+        self
+    }
+
+    /// Sets the documented `source` field.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactDeleteRequest;
+    /// assert_eq!(
+    ///     ContactDeleteRequest::new().with_source("api").to_json()["source"],
+    ///     "api"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    /// Renders the `DeleteRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactDeleteRequest;
+    /// assert_eq!(ContactDeleteRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if !self.contact_ids.is_empty() {
+            body.insert("contactIds".into(), json!(self.contact_ids));
+        }
+        if !self.scopes.is_empty() {
+            let scopes: Vec<&str> = self.scopes.iter().map(ContactScopeQuery::as_str).collect();
+            body.insert("scope".into(), json!(scopes));
+        }
+        if let Some(source) = &self.source {
+            body.insert("source".into(), json!(source));
+        }
+        Value::Object(body)
+    }
+}
+
+/// `DELETE /v2/contacts` and `DELETE /v2/contacts/{contactid}` response.
+///
+/// ```
+/// use sipgate_flow::rest::ContactDeleteResult;
+///
+/// let result: ContactDeleteResult =
+///     serde_json::from_value(serde_json::json!({"deleteCount": 3})).unwrap();
+/// assert_eq!(result.delete_count, 3);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactDeleteResult {
+    /// Number of contacts the service deleted.
+    #[serde(default, alias = "delete_count")]
+    pub delete_count: i64,
+}
+
+/// `POST /v2/contacts/import/csv` body (`ImportCSVRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::ContactCsvImport;
+///
+/// let import = ContactCsvImport::new("Zmlyc3RuYW1lLGxhc3RuYW1l")?;
+/// assert_eq!(import.to_json()["base64Content"], "Zmlyc3RuYW1lLGxhc3RuYW1l");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactCsvImport {
+    base64_content: String,
+}
+
+impl ContactCsvImport {
+    /// Builds the import body from base64-encoded CSV.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactCsvImport;
+    ///
+    /// assert!(ContactCsvImport::new("Zmlyc3RuYW1l").is_ok());
+    /// assert!(ContactCsvImport::new("").is_err());
+    /// assert!(ContactCsvImport::new("not base64!").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `base64_content` is empty, above the crate's
+    /// generic field ceiling, or not standard base64.
+    pub fn new(base64_content: impl Into<String>) -> Result<Self> {
+        let base64_content = base64_content.into();
+        validate::non_empty(
+            "base64Content",
+            &base64_content,
+            validate::MAX_REST_FIELD_BYTES,
+        )?;
+        if !crate::base64::is_valid(&base64_content) {
+            return Err(Error::validation(
+                "base64Content",
+                "must be standard base64 (RFC 4648)",
+            ));
+        }
+        Ok(Self { base64_content })
+    }
+
+    /// The encoded CSV payload.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactCsvImport;
+    /// assert_eq!(ContactCsvImport::new("Zmlyc3RuYW1l")?.content(), "Zmlyc3RuYW1l");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.base64_content
+    }
+
+    /// Renders the `ImportCSVRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactCsvImport;
+    /// assert_eq!(ContactCsvImport::new("Zmlyc3RuYW1l")?.to_json()["base64Content"], "Zmlyc3RuYW1l");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "base64Content": self.base64_content })
+    }
+}
+
+/// `POST /v2/contacts/import/google` body (`ImportGoogleRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::{ContactGoogleImport, ContactRequestScope};
+///
+/// let import = ContactGoogleImport::new("token")?.with_scope(ContactRequestScope::Private);
+/// assert_eq!(import.to_json()["scope"], "PRIVATE");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactGoogleImport {
+    token: String,
+    scope: Option<ContactRequestScope>,
+}
+
+impl ContactGoogleImport {
+    /// Builds the import body from the Google OAuth token.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactGoogleImport;
+    ///
+    /// assert!(ContactGoogleImport::new("token").is_ok());
+    /// assert!(ContactGoogleImport::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `token` is empty or above the crate's field
+    /// ceiling.
+    pub fn new(token: impl Into<String>) -> Result<Self> {
+        let token = token.into();
+        validate::non_empty("token", &token, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self { token, scope: None })
+    }
+
+    /// Sets the documented import scope.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactGoogleImport, ContactRequestScope};
+    /// assert_eq!(
+    ///     ContactGoogleImport::new("t")?.with_scope(ContactRequestScope::Shared).to_json()["scope"],
+    ///     "SHARED"
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_scope(mut self, scope: ContactRequestScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Renders the `ImportGoogleRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactGoogleImport;
+    /// assert_eq!(ContactGoogleImport::new("t")?.to_json()["token"], "t");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if !self.token.is_empty() {
+            body.insert("token".into(), json!(self.token));
+        }
+        if let Some(scope) = &self.scope {
+            body.insert("scope".into(), json!(scope.as_str()));
+        }
+        Value::Object(body)
+    }
+}
+
+/// `POST /v2/contacts/import/google` response (`ImportGoogleResponse`).
+///
+/// ```
+/// use sipgate_flow::rest::ContactImportResult;
+///
+/// let result: ContactImportResult =
+///     serde_json::from_value(serde_json::json!({"totalCount": 7})).unwrap();
+/// assert_eq!(result.total_count, 7);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactImportResult {
+    /// Number of contacts the service imported.
+    #[serde(default, alias = "total_count")]
+    pub total_count: u32,
+}
+
+/// One entry of `GET /v2/contacts/internal` (`InternalContactResponse`).
+///
+/// ```
+/// use sipgate_flow::rest::InternalContact;
+///
+/// let contact: InternalContact = serde_json::from_value(serde_json::json!({
+///     "contactId": "e6bdd18a-74c2-4d3c-9d95-5e91f6f335dc",
+///     "id": "0a50261e",
+///     "name": "Ada Lovelace",
+///     "mobile": ["+4915112345678"],
+///     "futureField": true
+/// }))
+/// .unwrap();
+/// assert_eq!(contact.name, "Ada Lovelace");
+/// assert_eq!(contact.mobile, ["+4915112345678"]);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct InternalContact {
+    /// sipgate contact id.
+    #[serde(default, alias = "contact_id")]
+    pub contact_id: String,
+    /// Account-internal id.
+    #[serde(default)]
+    pub id: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// Direct-dial numbers.
+    #[serde(default)]
+    pub directdial: Vec<String>,
+    /// Email addresses.
+    #[serde(default)]
+    pub emails: Vec<String>,
+    /// Fax numbers.
+    #[serde(default)]
+    pub fax: Vec<String>,
+    /// Landline numbers.
+    #[serde(default)]
+    pub landline: Vec<String>,
+    /// Mobile numbers.
+    #[serde(default)]
+    pub mobile: Vec<String>,
+}
+
+/// `GET /v2/contacts/csv` query parameters.
+///
+/// ```
+/// use sipgate_flow::rest::{ContactCsvQuery, ContactScopeQuery};
+///
+/// let query = ContactCsvQuery::new([ContactScopeQuery::Private, ContactScopeQuery::Shared]);
+/// assert_eq!(query.path(), "/v2/contacts/csv?scope=PRIVATE&scope=SHARED");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactCsvQuery {
+    scopes: Vec<ContactScopeQuery>,
+}
+
+impl ContactCsvQuery {
+    /// Builds the export query; the schema marks `scope` required.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactCsvQuery, ContactScopeQuery};
+    ///
+    /// let query = ContactCsvQuery::new([ContactScopeQuery::Shared]);
+    /// assert_eq!(query.path(), "/v2/contacts/csv?scope=SHARED");
+    /// assert!(ContactCsvQuery::new([]).scopes().is_empty());
+    /// ```
+    #[must_use]
+    pub fn new(scopes: impl IntoIterator<Item = ContactScopeQuery>) -> Self {
+        Self {
+            scopes: scopes.into_iter().collect(),
+        }
+    }
+
+    /// The requested scopes.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactCsvQuery, ContactScopeQuery};
+    /// assert_eq!(ContactCsvQuery::new([ContactScopeQuery::Private]).scopes().len(), 1);
+    /// ```
+    #[must_use]
+    pub fn scopes(&self) -> &[ContactScopeQuery] {
+        &self.scopes
+    }
+
+    /// Renders the path plus query string.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactCsvQuery, ContactScopeQuery};
+    /// assert_eq!(ContactCsvQuery::new([ContactScopeQuery::Private]).path(), "/v2/contacts/csv?scope=PRIVATE");
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for scope in &self.scopes {
+            serializer.append_pair("scope", scope.as_str());
+        }
+        query_path("/v2/contacts/csv", &serializer.finish())
+    }
+}
+
+/// `GET /v2/contacts/vcard` query parameters.
+///
+/// ```
+/// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+///
+/// let query = ContactVCardsQuery::new([ContactScopeQuery::Shared]).with_limit(50)?;
+/// assert_eq!(query.path(), "/v2/contacts/vcard?scope=SHARED&limit=50");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactVCardsQuery {
+    scopes: Vec<ContactScopeQuery>,
+    labels: Vec<String>,
+    contact_ids: Vec<String>,
+    wanted_fields: Vec<String>,
+    filter: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    last_id: Option<String>,
+}
+
+impl ContactVCardsQuery {
+    /// Builds the query; the schema marks `scope` required.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert_eq!(
+    ///     ContactVCardsQuery::new([ContactScopeQuery::Private]).path(),
+    ///     "/v2/contacts/vcard?scope=PRIVATE"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn new(scopes: impl IntoIterator<Item = ContactScopeQuery>) -> Self {
+        Self {
+            scopes: scopes.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Sets the documented page size.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    ///
+    /// let query = ContactVCardsQuery::new([ContactScopeQuery::Private]);
+    /// assert!(query.clone().with_limit(5000).is_ok());
+    /// assert!(query.clone().with_limit(0).is_err());
+    /// assert!(query.with_limit(5001).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `limit` is `0` or above
+    /// [`MAX_CONTACT_PAGE_LIMIT`].
+    pub fn with_limit(mut self, limit: i64) -> Result<Self> {
+        self.limit = Some(validate::contact_page_limit(limit)?);
+        Ok(self)
+    }
+
+    /// Sets the deprecated `offset` paging parameter.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert!(ContactVCardsQuery::new([ContactScopeQuery::Private]).with_offset(1).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `offset` is negative or does not fit the
+    /// documented `int32`.
+    pub fn with_offset(mut self, offset: i64) -> Result<Self> {
+        self.offset = Some(validate::contact_offset(offset)?);
+        Ok(self)
+    }
+
+    /// Sets `lastId`, the id the next page starts after.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert!(ContactVCardsQuery::new([ContactScopeQuery::Private]).with_last_id("c1").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or path-unsafe id.
+    pub fn with_last_id(mut self, last_id: impl Into<String>) -> Result<Self> {
+        let last_id = last_id.into();
+        validate::path_segment("lastId", &last_id)?;
+        self.last_id = Some(last_id);
+        Ok(self)
+    }
+
+    /// Sets the label filter.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert!(ContactVCardsQuery::new([ContactScopeQuery::Private]).with_labels(["friend"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized label.
+    pub fn with_labels<I, S>(mut self, labels: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for label in labels {
+            let label = label.into();
+            validate::non_empty("labels", &label, validate::MAX_REST_FIELD_BYTES)?;
+            collected.push(label);
+        }
+        self.labels = collected;
+        Ok(self)
+    }
+
+    /// Restricts the response to these contact ids.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert!(ContactVCardsQuery::new([ContactScopeQuery::Private]).with_contact_ids(["c1"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an id that is empty or path-unsafe.
+    pub fn with_contact_ids<I, S>(mut self, ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for id in ids {
+            let id = id.into();
+            validate::path_segment("contactIds", &id)?;
+            collected.push(id);
+        }
+        self.contact_ids = collected;
+        Ok(self)
+    }
+
+    /// Restricts the returned fields.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert!(ContactVCardsQuery::new([ContactScopeQuery::Private]).with_wanted_fields(["name"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized field name.
+    pub fn with_wanted_fields<I, S>(mut self, fields: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for field in fields {
+            let field = field.into();
+            validate::non_empty("wantedFields", &field, validate::MAX_REST_FIELD_BYTES)?;
+            collected.push(field);
+        }
+        self.wanted_fields = collected;
+        Ok(self)
+    }
+
+    /// Sets the free-text `filter`.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert!(ContactVCardsQuery::new([ContactScopeQuery::Private]).with_filter("Ada").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized filter.
+    pub fn with_filter(mut self, filter: impl Into<String>) -> Result<Self> {
+        let filter = filter.into();
+        validate::non_empty("filter", &filter, validate::MAX_REST_FIELD_BYTES)?;
+        self.filter = Some(filter);
+        Ok(self)
+    }
+
+    /// Renders the path plus query string.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactScopeQuery, ContactVCardsQuery};
+    /// assert_eq!(
+    ///     ContactVCardsQuery::new([ContactScopeQuery::Private]).path(),
+    ///     "/v2/contacts/vcard?scope=PRIVATE"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for scope in &self.scopes {
+            serializer.append_pair("scope", scope.as_str());
+        }
+        for label in &self.labels {
+            serializer.append_pair("labels", label);
+        }
+        for id in &self.contact_ids {
+            serializer.append_pair("contactIds", id);
+        }
+        for field in &self.wanted_fields {
+            serializer.append_pair("wantedFields", field);
+        }
+        if let Some(filter) = &self.filter {
+            serializer.append_pair("filter", filter);
+        }
+        if let Some(limit) = self.limit {
+            serializer.append_pair("limit", &limit.to_string());
+        }
+        if let Some(offset) = self.offset {
+            serializer.append_pair("offset", &offset.to_string());
+        }
+        if let Some(last_id) = &self.last_id {
+            serializer.append_pair("lastId", last_id);
+        }
+        query_path("/v2/contacts/vcard", &serializer.finish())
+    }
+}
+
+/// `GET /v2/contacts/vcard` response (`GetStructuredVCardsResponse`).
+///
+/// ```
+/// use sipgate_flow::rest::ContactVCardsPage;
+///
+/// let page: ContactVCardsPage = serde_json::from_value(serde_json::json!({
+///     "contacts": [{"meta": {"UUID": "u1"}, "items": {}}],
+///     "overallMatches": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(page.contacts.len(), 1);
+/// assert_eq!(page.overall_matches, Some(1));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactVCardsPage {
+    /// Structured vCards in this page.
+    #[serde(default)]
+    pub contacts: Vec<StructuredVCard>,
+    /// Total matches, when the service reports them.
+    #[serde(default, alias = "overall_matches")]
+    pub overall_matches: Option<u32>,
+}
+
+/// `PUT /v2/contacts/vcard` body (`PutStructuredVCardsRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::{ContactVCardsRequest, StructuredVCardUpsertData};
+///
+/// let request = ContactVCardsRequest::new().with_data([StructuredVCardUpsertData::new()]);
+/// assert_eq!(request.to_json()["data"].as_array().map(Vec::len), Some(1));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactVCardsRequest {
+    data: Vec<StructuredVCardUpsertData>,
+}
+
+impl ContactVCardsRequest {
+    /// An empty request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactVCardsRequest;
+    /// assert_eq!(ContactVCardsRequest::new().to_json(), serde_json::json!({"data": []}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replaces the vCard payload.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactVCardsRequest, StructuredVCardUpsertData};
+    /// let request = ContactVCardsRequest::new().with_data([StructuredVCardUpsertData::new()]);
+    /// assert_eq!(request.to_json()["data"].as_array().map(Vec::len), Some(1));
+    /// ```
+    #[must_use]
+    pub fn with_data(mut self, data: impl IntoIterator<Item = StructuredVCardUpsertData>) -> Self {
+        self.data = data.into_iter().collect();
+        self
+    }
+
+    /// The vCard payload.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactVCardsRequest;
+    /// assert!(ContactVCardsRequest::new().data().is_empty());
+    /// ```
+    #[must_use]
+    pub fn data(&self) -> &[StructuredVCardUpsertData] {
+        &self.data
+    }
+
+    /// Renders the `PutStructuredVCardsRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactVCardsRequest;
+    /// assert_eq!(ContactVCardsRequest::new().to_json(), serde_json::json!({"data": []}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "data": self.data })
+    }
+}
+
+/// The `result` entries of `PUT /v2/contacts/vcard`
+/// (`ContactsSetResult`).
+///
+/// ```
+/// use sipgate_flow::rest::ContactUpsertResult;
+///
+/// let result: ContactUpsertResult = serde_json::from_value(serde_json::json!({
+///     "contactId": "c1",
+///     "valid_from": "2016-02-10T14:19:39Z"
+/// }))
+/// .unwrap();
+/// assert_eq!(result.contact_id, "c1");
+/// assert_eq!(result.valid_from, "2016-02-10T14:19:39Z");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactUpsertResult {
+    /// The stored contact's id.
+    #[serde(default, alias = "contact_id")]
+    pub contact_id: String,
+    /// The contact's validity start.
+    #[serde(default, rename = "valid_from", alias = "validFrom")]
+    pub valid_from: String,
+}
+
+/// One `PUT /v2/contacts/vcard` entry (`StructuredVCardUpsertData`).
+///
+/// ```
+/// use sipgate_flow::rest::StructuredVCardUpsertData;
+///
+/// let entry = StructuredVCardUpsertData::new().with_contact_id("c1");
+/// assert_eq!(entry.to_json()["contactId"], "c1");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct StructuredVCardUpsertData {
+    /// Existing contact to overwrite; omitted to add a new contact.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "contact_id")]
+    pub contact_id: Option<String>,
+    /// vCard properties keyed by field name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub item: std::collections::BTreeMap<String, Vec<StructuredVCardItem>>,
+}
+
+impl StructuredVCardUpsertData {
+    /// An empty entry.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::StructuredVCardUpsertData;
+    /// assert_eq!(StructuredVCardUpsertData::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the contact id to overwrite.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::StructuredVCardUpsertData;
+    /// assert_eq!(StructuredVCardUpsertData::new().with_contact_id("c1").to_json()["contactId"], "c1");
+    /// ```
+    #[must_use]
+    pub fn with_contact_id(mut self, contact_id: impl Into<String>) -> Self {
+        self.contact_id = Some(contact_id.into());
+        self
+    }
+
+    /// Renders the entry.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::StructuredVCardUpsertData;
+    /// assert_eq!(StructuredVCardUpsertData::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+}
+
+/// One structured vCard (`StructuredVCard`).
+///
+/// ```
+/// use sipgate_flow::rest::StructuredVCard;
+///
+/// let card: StructuredVCard = serde_json::from_value(serde_json::json!({
+///     "meta": {"UUID": "u1", "owner": "w0"},
+///     "items": {"FN": [{"value": "Ada Lovelace"}]},
+///     "futureField": true
+/// }))
+/// .unwrap();
+/// assert_eq!(card.meta.uuid, "u1");
+/// assert_eq!(card.items["FN"][0].value, "Ada Lovelace");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct StructuredVCard {
+    /// vCard metadata.
+    #[serde(default)]
+    pub meta: StructuredVCardMeta,
+    /// vCard properties keyed by field name.
+    #[serde(default)]
+    pub items: std::collections::BTreeMap<String, Vec<StructuredVCardItem>>,
+}
+
+/// Metadata of a structured vCard (`StructuredVCardMeta`).
+///
+/// ```
+/// use sipgate_flow::rest::StructuredVCardMeta;
+///
+/// let meta: StructuredVCardMeta = serde_json::from_value(serde_json::json!({
+///     "UUID": "u1",
+///     "owner": "w0",
+///     "valid_from": "2020-01-01",
+///     "valid_thru": "2021-01-01"
+/// }))
+/// .unwrap();
+/// assert_eq!(meta.uuid, "u1");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct StructuredVCardMeta {
+    /// The vCard's UUID.
+    #[serde(default, rename = "UUID", alias = "uuid")]
+    pub uuid: String,
+    /// The owning account.
+    #[serde(default)]
+    pub owner: String,
+    /// Valid-from date.
+    #[serde(default, rename = "valid_from", alias = "validFrom")]
+    pub valid_from: String,
+    /// Valid-through date.
+    #[serde(default, rename = "valid_thru", alias = "validThru")]
+    pub valid_thru: String,
+}
+
+/// One structured vCard property (`StructuredVCardItem`).
+///
+/// ```
+/// use sipgate_flow::rest::StructuredVCardItem;
+///
+/// let item: StructuredVCardItem = serde_json::from_value(serde_json::json!({
+///     "value": "Ada Lovelace",
+///     "family": "Lovelace",
+///     "po_box": "1",
+///     "post_code": "40219",
+///     "x-local-number": "+49151",
+///     "futureField": true
+/// }))
+/// .unwrap();
+/// assert_eq!(item.value, "Ada Lovelace");
+/// assert_eq!(item.post_code, "40219");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct StructuredVCardItem {
+    /// Locality.
+    #[serde(default)]
+    pub city: String,
+    /// Country.
+    #[serde(default)]
+    pub country: String,
+    /// Extended address.
+    #[serde(default)]
+    pub extended: String,
+    /// Family name.
+    #[serde(default)]
+    pub family: String,
+    /// Given name.
+    #[serde(default)]
+    pub given: String,
+    /// Group.
+    #[serde(default, rename = "group")]
+    pub r#group: String,
+    /// Latitude.
+    #[serde(default)]
+    pub lat: String,
+    /// Longitude.
+    #[serde(default)]
+    pub long: String,
+    /// Middle name.
+    #[serde(default)]
+    pub middle: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// Post-office box.
+    #[serde(default, rename = "po_box", alias = "poBox")]
+    pub po_box: String,
+    /// Postal code.
+    #[serde(default, rename = "post_code", alias = "postCode")]
+    pub post_code: String,
+    /// Name prefixes.
+    #[serde(default)]
+    pub prefixes: String,
+    /// Region.
+    #[serde(default)]
+    pub region: String,
+    /// Street.
+    #[serde(default)]
+    pub street: String,
+    /// Name suffixes.
+    #[serde(default)]
+    pub suffixes: String,
+    /// Property types.
+    #[serde(default)]
+    pub types: Vec<String>,
+    /// Address unit.
+    #[serde(default)]
+    pub unit: Vec<String>,
+    /// Value.
+    #[serde(default)]
+    pub value: String,
+    /// Local number (`x-local-number`).
+    #[serde(default, rename = "x-local-number", alias = "xlocalNumber")]
+    pub x_local_number: String,
+}
+
+/// `PUT /v2/contacts/vcard` response wrapper.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContactVCardsResponse {
+    #[serde(default)]
+    result: Vec<ContactUpsertResult>,
+}
+
+/// Renders `/path` plus `?query`, or just `/path` when the query is empty.
+fn query_path(path: &str, query: &str) -> String {
+    if query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
+/// `POST /v2/contacts` and `PUT /v2/contacts/{contactId}` body
+/// (`CreateContactRequest` / `UpdateContactRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::{ContactEmailRequest, ContactNumberRequest, ContactRequest};
+///
+/// let request = ContactRequest::new()
+///     .with_name("Ada Lovelace")?
+///     .with_given("Ada")?
+///     .with_family("Lovelace")?
+///     .with_emails([ContactEmailRequest::new("ada@example.com")?])
+///     .with_numbers([ContactNumberRequest::new("+4915112345678")?]);
+/// let body = request.to_json();
+/// assert_eq!(body["name"], "Ada Lovelace");
+/// assert_eq!(body["emails"][0]["email"], "ada@example.com");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactRequest {
+    id: Option<String>,
+    name: Option<String>,
+    given: Option<String>,
+    family: Option<String>,
+    note: Option<String>,
+    picture: Option<String>,
+    scope: Option<ContactRequestScope>,
+    addresses: Vec<ContactAddressRequest>,
+    emails: Vec<ContactEmailRequest>,
+    numbers: Vec<ContactNumberRequest>,
+    websites: Vec<ContactWebsiteRequest>,
+    organization: Vec<Vec<String>>,
+}
+
+impl ContactRequest {
+    /// An empty request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert_eq!(ContactRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the contact id (documented only on the update body).
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert_eq!(ContactRequest::new().with_id("c1").to_json()["id"], "c1");
+    /// ```
+    #[must_use]
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Sets the display name.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert_eq!(ContactRequest::new().with_name("Ada")?.to_json()["name"], "Ada");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `name` is empty or oversized.
+    pub fn with_name(mut self, name: impl Into<String>) -> Result<Self> {
+        self.name = Some(field_value("name", name.into())?);
+        Ok(self)
+    }
+
+    /// Sets the given name.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert_eq!(ContactRequest::new().with_given("Ada")?.to_json()["given"], "Ada");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `given` is empty or oversized.
+    pub fn with_given(mut self, given: impl Into<String>) -> Result<Self> {
+        let given = given.into();
+        validate::non_empty("given", &given, validate::MAX_REST_FIELD_BYTES)?;
+        self.given = Some(given);
+        Ok(self)
+    }
+
+    /// Sets the family name.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert_eq!(ContactRequest::new().with_family("Lovelace")?.to_json()["family"], "Lovelace");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `family` is empty or oversized.
+    pub fn with_family(mut self, family: impl Into<String>) -> Result<Self> {
+        let family = family.into();
+        validate::non_empty("family", &family, validate::MAX_REST_FIELD_BYTES)?;
+        self.family = Some(family);
+        Ok(self)
+    }
+
+    /// Sets the note text.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert_eq!(ContactRequest::new().with_note("hi")?.to_json()["note"], "hi");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `note` is oversized.
+    pub fn with_note(mut self, note: impl Into<String>) -> Result<Self> {
+        let note = note.into();
+        validate::non_empty("note", &note, validate::MAX_REST_FIELD_BYTES)?;
+        self.note = Some(note);
+        Ok(self)
+    }
+
+    /// Sets the base64-encoded contact picture.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert!(ContactRequest::new().with_picture("Zm9v").is_ok());
+    /// assert!(ContactRequest::new().with_picture("not base64!").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `picture` is empty or not standard base64.
+    pub fn with_picture(mut self, picture: impl Into<String>) -> Result<Self> {
+        let picture = picture.into();
+        validate::non_empty("picture", &picture, validate::MAX_REST_FIELD_BYTES)?;
+        if !crate::base64::is_valid(&picture) {
+            return Err(Error::validation(
+                "picture",
+                "must be standard base64 (RFC 4648)",
+            ));
+        }
+        self.picture = Some(picture);
+        Ok(self)
+    }
+
+    /// Sets the contact scope.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactRequest, ContactRequestScope};
+    /// assert_eq!(
+    ///     ContactRequest::new().with_scope(ContactRequestScope::Shared).to_json()["scope"],
+    ///     "SHARED"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn with_scope(mut self, scope: ContactRequestScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Sets the postal addresses.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactAddressRequest, ContactRequest};
+    /// let request = ContactRequest::new().with_addresses([ContactAddressRequest::new()]);
+    /// assert_eq!(request.to_json()["addresses"].as_array().map(Vec::len), Some(1));
+    /// ```
+    #[must_use]
+    pub fn with_addresses(
+        mut self,
+        addresses: impl IntoIterator<Item = ContactAddressRequest>,
+    ) -> Self {
+        self.addresses = addresses.into_iter().collect();
+        self
+    }
+
+    /// Sets the email addresses.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactEmailRequest, ContactRequest};
+    /// let request = ContactRequest::new().with_emails([ContactEmailRequest::new("a@b.c")?]);
+    /// assert_eq!(request.to_json()["emails"][0]["email"], "a@b.c");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_emails(mut self, emails: impl IntoIterator<Item = ContactEmailRequest>) -> Self {
+        self.emails = emails.into_iter().collect();
+        self
+    }
+
+    /// Sets the phone numbers.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactNumberRequest, ContactRequest};
+    /// let request = ContactRequest::new().with_numbers([ContactNumberRequest::new("+4915112345678")?]);
+    /// assert_eq!(request.to_json()["numbers"][0]["number"], "+4915112345678");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_numbers(mut self, numbers: impl IntoIterator<Item = ContactNumberRequest>) -> Self {
+        self.numbers = numbers.into_iter().collect();
+        self
+    }
+
+    /// Sets the websites.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{ContactRequest, ContactWebsiteRequest};
+    /// let request = ContactRequest::new().with_websites([ContactWebsiteRequest::new("example.com")?]);
+    /// assert_eq!(request.to_json()["websites"][0]["url"], "example.com");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_websites(
+        mut self,
+        websites: impl IntoIterator<Item = ContactWebsiteRequest>,
+    ) -> Self {
+        self.websites = websites.into_iter().collect();
+        self
+    }
+
+    /// Sets the structured organization rows.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// let request = ContactRequest::new().with_organization([["Acme".to_string(), "Eng".to_string()]]);
+    /// assert_eq!(request.to_json()["organization"][0][1], "Eng");
+    /// ```
+    #[must_use]
+    pub fn with_organization(
+        mut self,
+        organization: impl IntoIterator<Item = impl IntoIterator<Item = impl Into<String>>>,
+    ) -> Self {
+        self.organization = organization
+            .into_iter()
+            .map(|row| row.into_iter().map(Into::into).collect())
+            .collect();
+        self
+    }
+
+    /// Renders the `CreateContactRequest` / `UpdateContactRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactRequest;
+    /// assert_eq!(ContactRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if let Some(id) = &self.id {
+            body.insert("id".into(), json!(id));
+        }
+        if let Some(name) = &self.name {
+            body.insert("name".into(), json!(name));
+        }
+        if let Some(given) = &self.given {
+            body.insert("given".into(), json!(given));
+        }
+        if let Some(family) = &self.family {
+            body.insert("family".into(), json!(family));
+        }
+        if let Some(note) = &self.note {
+            body.insert("note".into(), json!(note));
+        }
+        if let Some(picture) = &self.picture {
+            body.insert("picture".into(), json!(picture));
+        }
+        if let Some(scope) = &self.scope {
+            body.insert("scope".into(), json!(scope.as_str()));
+        }
+        if !self.addresses.is_empty() {
+            body.insert(
+                "addresses".into(),
+                Value::Array(
+                    self.addresses
+                        .iter()
+                        .map(ContactAddressRequest::to_json)
+                        .collect(),
+                ),
+            );
+        }
+        if !self.emails.is_empty() {
+            body.insert(
+                "emails".into(),
+                Value::Array(
+                    self.emails
+                        .iter()
+                        .map(ContactEmailRequest::to_json)
+                        .collect(),
+                ),
+            );
+        }
+        if !self.numbers.is_empty() {
+            body.insert(
+                "numbers".into(),
+                Value::Array(
+                    self.numbers
+                        .iter()
+                        .map(ContactNumberRequest::to_json)
+                        .collect(),
+                ),
+            );
+        }
+        if !self.websites.is_empty() {
+            body.insert(
+                "websites".into(),
+                Value::Array(
+                    self.websites
+                        .iter()
+                        .map(ContactWebsiteRequest::to_json)
+                        .collect(),
+                ),
+            );
+        }
+        if !self.organization.is_empty() {
+            body.insert("organization".into(), json!(self.organization));
+        }
+        Value::Object(body)
+    }
+}
+
+/// One postal address in a create/update contact body (`AddressRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::ContactAddressRequest;
+///
+/// let address = ContactAddressRequest::new()
+///     .with_street_address("1 Spring Gardens")?
+///     .with_city("Düsseldorf")?;
+/// assert_eq!(address.to_json()["streetAddress"], "1 Spring Gardens");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactAddressRequest {
+    country: Option<String>,
+    extended_address: Option<String>,
+    locality: Option<String>,
+    po_box: Option<String>,
+    postal_code: Option<String>,
+    region: Option<String>,
+    street_address: Option<String>,
+    types: Vec<String>,
+}
+
+impl ContactAddressRequest {
+    /// An empty address.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert_eq!(ContactAddressRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the street address.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert_eq!(ContactAddressRequest::new().with_street_address("1 A St")?.to_json()["streetAddress"], "1 A St");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty or oversized.
+    pub fn with_street_address(mut self, value: impl Into<String>) -> Result<Self> {
+        self.street_address = Some(field_value("streetAddress", value.into())?);
+        Ok(self)
+    }
+
+    /// Sets the extended address.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert!(ContactAddressRequest::new().with_extended_address("Flat A").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty or oversized.
+    pub fn with_extended_address(mut self, value: impl Into<String>) -> Result<Self> {
+        self.extended_address = Some(field_value("extendedAddress", value.into())?);
+        Ok(self)
+    }
+
+    /// Sets the city or locality.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert!(ContactAddressRequest::new().with_city("Berlin").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty or oversized.
+    pub fn with_city(mut self, value: impl Into<String>) -> Result<Self> {
+        self.locality = Some(field_value("locality", value.into())?);
+        Ok(self)
+    }
+
+    /// Sets the post-office box.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert!(ContactAddressRequest::new().with_po_box("1").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty or oversized.
+    pub fn with_po_box(mut self, value: impl Into<String>) -> Result<Self> {
+        self.po_box = Some(field_value("poBox", value.into())?);
+        Ok(self)
+    }
+
+    /// Sets the postal code.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert!(ContactAddressRequest::new().with_postal_code("40219").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty or oversized.
+    pub fn with_postal_code(mut self, value: impl Into<String>) -> Result<Self> {
+        self.postal_code = Some(field_value("postalCode", value.into())?);
+        Ok(self)
+    }
+
+    /// Sets the region or state.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert!(ContactAddressRequest::new().with_region("NRW").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty or oversized.
+    pub fn with_region(mut self, value: impl Into<String>) -> Result<Self> {
+        self.region = Some(field_value("region", value.into())?);
+        Ok(self)
+    }
+
+    /// Sets the ISO country.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert!(ContactAddressRequest::new().with_country("DE").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty or oversized.
+    pub fn with_country(mut self, value: impl Into<String>) -> Result<Self> {
+        self.country = Some(field_value("country", value.into())?);
+        Ok(self)
+    }
+
+    /// Sets the free-form address labels.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert_eq!(ContactAddressRequest::new().with_types(["home"]).to_json()["type"][0], "home");
+    /// ```
+    #[must_use]
+    pub fn with_types<I, S>(mut self, types: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.types = types.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Renders the `AddressRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactAddressRequest;
+    /// assert_eq!(ContactAddressRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        insert_opt(&mut body, "country", self.country.as_ref());
+        insert_opt(&mut body, "extendedAddress", self.extended_address.as_ref());
+        insert_opt(&mut body, "locality", self.locality.as_ref());
+        insert_opt(&mut body, "poBox", self.po_box.as_ref());
+        insert_opt(&mut body, "postalCode", self.postal_code.as_ref());
+        insert_opt(&mut body, "region", self.region.as_ref());
+        insert_opt(&mut body, "streetAddress", self.street_address.as_ref());
+        if !self.types.is_empty() {
+            body.insert("type".into(), json!(self.types));
+        }
+        Value::Object(body)
+    }
+}
+
+/// One email address in a create/update contact body (`EmailRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::ContactEmailRequest;
+///
+/// let email = ContactEmailRequest::new("ada@example.com")?;
+/// assert_eq!(email.to_json()["email"], "ada@example.com");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactEmailRequest {
+    email: String,
+    types: Vec<String>,
+}
+
+impl ContactEmailRequest {
+    /// Builds the email entry.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactEmailRequest;
+    ///
+    /// assert!(ContactEmailRequest::new("ada@example.com").is_ok());
+    /// assert!(ContactEmailRequest::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `email` is empty or oversized.
+    pub fn new(email: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            email: field_value("email", email.into())?,
+            types: Vec::new(),
+        })
+    }
+
+    /// Sets the free-form labels.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactEmailRequest;
+    /// assert_eq!(ContactEmailRequest::new("a@b.c")?.with_types(["work"]).to_json()["type"][0], "work");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_types<I, S>(mut self, types: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.types = types.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Renders the `EmailRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactEmailRequest;
+    /// assert_eq!(ContactEmailRequest::new("a@b.c")?.to_json()["email"], "a@b.c");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "email": self.email, "type": self.types })
+    }
+}
+
+/// One phone number in a create/update contact body (`NumberRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::ContactNumberRequest;
+///
+/// let number = ContactNumberRequest::new("+4915112345678")?;
+/// assert_eq!(number.to_json()["number"], "+4915112345678");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactNumberRequest {
+    number: String,
+    types: Vec<String>,
+}
+
+impl ContactNumberRequest {
+    /// Builds the number entry.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactNumberRequest;
+    ///
+    /// assert!(ContactNumberRequest::new("+4915112345678").is_ok());
+    /// assert!(ContactNumberRequest::new("12").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `number` is not E.164 digits.
+    pub fn new(number: impl Into<String>) -> Result<Self> {
+        let digits = validate::phone("number", &number.into())?;
+        Ok(Self {
+            number: format!("+{digits}"),
+            types: Vec::new(),
+        })
+    }
+
+    /// Sets the free-form labels.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactNumberRequest;
+    /// assert_eq!(ContactNumberRequest::new("+4915112345678")?.with_types(["mobile"]).to_json()["type"][0], "mobile");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_types<I, S>(mut self, types: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.types = types.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Renders the `NumberRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactNumberRequest;
+    /// assert_eq!(ContactNumberRequest::new("+4915112345678")?.to_json()["number"], "+4915112345678");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "number": self.number, "type": self.types })
+    }
+}
+
+/// One website in a create/update contact body (`WebsiteRequest`).
+///
+/// The schema's example is a bare host (`example.com`), so a full absolute URL
+/// is not required; empty values are still refused.
+///
+/// ```
+/// use sipgate_flow::rest::ContactWebsiteRequest;
+///
+/// let website = ContactWebsiteRequest::new("example.com")?;
+/// assert_eq!(website.to_json()["url"], "example.com");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContactWebsiteRequest {
+    url: String,
+    types: Vec<String>,
+}
+
+impl ContactWebsiteRequest {
+    /// Builds the website entry.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactWebsiteRequest;
+    ///
+    /// assert!(ContactWebsiteRequest::new("example.com").is_ok());
+    /// assert!(ContactWebsiteRequest::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `url` is empty or oversized.
+    pub fn new(url: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            url: field_value("url", url.into())?,
+            types: Vec::new(),
+        })
+    }
+
+    /// Sets the free-form labels.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactWebsiteRequest;
+    /// assert_eq!(ContactWebsiteRequest::new("example.com")?.with_types(["work"]).to_json()["type"][0], "work");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_types<I, S>(mut self, types: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.types = types.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Renders the `WebsiteRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ContactWebsiteRequest;
+    /// assert_eq!(ContactWebsiteRequest::new("example.com")?.to_json()["url"], "example.com");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "url": self.url, "type": self.types })
+    }
+}
+
+/// Validates a non-empty, bounded string field and returns it.
+fn field_value(field: &'static str, value: String) -> Result<String> {
+    validate::non_empty(field, &value, validate::MAX_REST_FIELD_BYTES)?;
+    Ok(value)
+}
+
+/// Inserts `key` into `body` when `value` is `Some`.
+fn insert_opt(body: &mut Map<String, Value>, key: &str, value: Option<&String>) {
+    if let Some(value) = value {
+        body.insert(key.to_string(), json!(value));
+    }
+}
+
+// --- END REST v2 contacts resource (#165) ---
 
 /// One device from `GET /v2/devices/{deviceId}`.
 ///
