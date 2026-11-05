@@ -200,7 +200,7 @@ impl Transport for MockTransport {
         match reply {
             Some(Reply::Response(response)) => Ok(response),
             Some(Reply::Failure { message, retryable }) => Err(if retryable {
-                Error::transport(message)
+                Error::transport_before_write(message)
             } else {
                 Error::transport_terminal(message)
             }),

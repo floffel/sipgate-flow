@@ -101,8 +101,10 @@ pub enum Error {
     #[error("unauthorized after refreshing the access token")]
     Unauthorized,
 
-    /// The transport failed before a usable response existed (DNS, TLS,
-    /// timeout, reset). `retryable` says whether another attempt could help.
+    /// The transport failed before a usable response existed. `retryable` is
+    /// true only when the failure provably happened before the request was
+    /// written (DNS, TLS, connect); post-write timeouts and resets are
+    /// [`Error::Ambiguous`].
     #[error("transport error: {message}")]
     Transport {
         /// Transport-supplied description.
@@ -162,14 +164,40 @@ impl Error {
         }
     }
 
-    /// Builds a transient transport error (retryable).
+    /// Builds an ambiguous transport error when the write phase is unknown.
+    ///
+    /// This is the fail-closed constructor for transport failures whose write
+    /// phase is not known: a timeout, reset or truncated response may have
+    /// happened after the request was written, so it must not be retried
+    /// automatically. Use [`Error::transport_before_write`] only when the
+    /// failure provably happened before the request was written, for example
+    /// DNS, TCP connect or TLS handshake failure.
     ///
     /// ```
     /// use sipgate_flow::Error;
-    /// assert!(Error::transport("connection reset").is_retryable());
+    ///
+    /// let err = Error::transport("connection reset");
+    /// assert!(err.is_ambiguous());
+    /// assert!(!err.is_retryable());
     /// ```
     #[must_use]
     pub fn transport(message: impl Into<String>) -> Self {
+        Self::ambiguous(None, message)
+    }
+
+    /// Builds a retryable transport error for a failure that provably happened
+    /// before the request was written, for example DNS, TCP connect or TLS
+    /// handshake failure.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::transport_before_write("connect: refused");
+    /// assert!(err.is_retryable());
+    /// assert!(!err.is_ambiguous());
+    /// ```
+    #[must_use]
+    pub fn transport_before_write(message: impl Into<String>) -> Self {
         Self::Transport {
             message: message.into(),
             retryable: true,
@@ -223,8 +251,9 @@ impl Error {
     /// ```
     /// use sipgate_flow::Error;
     ///
-    /// assert!(Error::transport("dns").is_retryable());
+    /// assert!(Error::transport_before_write("dns").is_retryable());
     /// assert!(!Error::Unauthorized.is_retryable());
+    /// assert!(!Error::transport("timeout after write").is_retryable());
     /// assert!(!Error::ambiguous(None, "timeout after write").is_retryable());
     /// ```
     #[must_use]

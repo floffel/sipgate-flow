@@ -190,6 +190,61 @@ fn an_ambiguous_error_is_never_retryable_whatever_it_carries() {
     }
 }
 
+#[test]
+fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
+    let cases = [
+        Error::from(serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON")),
+        Error::EmptyBody,
+        Error::validation("text", "must not be empty"),
+        Error::EmptyCredentials,
+        Error::EmptySecret,
+        Error::MissingSecret,
+        Error::SecretMismatch,
+        Error::UnsupportedContentType {
+            content_type: "text/plain".to_string(),
+        },
+        Error::BodyTooLarge { size: 2, limit: 1 },
+        Error::AuthRejected {
+            status: 401,
+            body: "denied".to_string(),
+        },
+        Error::TokenResponse("missing access token".to_string()),
+        Error::Unauthorized,
+        Error::transport_before_write("connect: dns failure"),
+        Error::transport("transport failure with unknown write phase"),
+        Error::transport_terminal("unsupported scheme"),
+        Error::Api {
+            status: 429,
+            body: "slow down".to_string(),
+            retry_after: Some(Duration::from_secs(1)),
+            retryable: true,
+        },
+        Error::Api {
+            status: 400,
+            body: "bad request".to_string(),
+            retry_after: None,
+            retryable: false,
+        },
+        Error::ambiguous(None, "timeout after the write"),
+        Error::ambiguous(Some(500), "5xx after a POST"),
+    ];
+
+    for error in cases {
+        assert!(
+            !(error.is_retryable() && error.is_ambiguous()),
+            "retryable and ambiguous are mutually exclusive: {error:?}"
+        );
+    }
+
+    let before_write = Error::transport_before_write("connect: dns failure");
+    assert!(before_write.is_retryable());
+    assert!(!before_write.is_ambiguous());
+
+    let after_write = Error::ambiguous(None, "timeout after the write");
+    assert!(!after_write.is_retryable());
+    assert!(after_write.is_ambiguous());
+}
+
 #[tokio::test]
 async fn a_multibyte_error_body_is_cut_at_a_character_boundary() {
     // `truncate_body` stops at 512 bytes, but only on a UTF-8 boundary: cutting

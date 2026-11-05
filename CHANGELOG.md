@@ -10,6 +10,12 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* Transport failures with an unknown write phase now fail closed:
+  `Error::transport` returns an ambiguous outcome instead of a retryable one,
+  while the new `Error::transport_before_write` marks DNS, TCP connect and TLS
+  failures that provably happened before the request was written as retryable.
+  This keeps `Error::is_retryable()` and `Error::is_ambiguous()` from
+  disagreeing on timeouts/resets after a request may have been written.
 * A token response whose `expires_in` does not fit the cache clock no longer
   panics the process: `Token::from_json` refuses a lifetime above the new
   `auth::MAX_TOKEN_LIFETIME` (24 hours) with `Error::TokenResponse`, and the
