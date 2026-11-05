@@ -4,7 +4,8 @@
 //! as JSON; actions are returned in the *response* to the webhook call, not
 //! posted to a separate endpoint. This crate supports only the webhook-response
 //! channel; the WebSocket channel is not implemented (see
-//! <https://github.com/floffel/sipgate-flow/issues/11>). See `docs/contracts.md`
+//! <https://github.com/floffel/sipgate-flow/issues/11>). See
+//! [docs/contracts.md](https://github.com/floffel/sipgate-flow/blob/main/docs/contracts.md)
 //! for the exact source of every shape this module models.
 //!
 //! Every submodule stays `pub` so the detailed paths keep working, but this
