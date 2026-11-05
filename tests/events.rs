@@ -262,23 +262,62 @@ fn error_events_branch_on_code_and_severity() {
     let warning = parse(
         r#"{"type":"error","code":"transcription_unavailable","severity":"warning","message":"m","session":{"id":"s"}}"#,
     );
+    let EventPayload::Error { severity, .. } = warning.payload() else {
+        panic!("expected error");
+    };
+    assert_eq!(severity, &Severity::Warning);
+    assert!(severity.call_continues());
+
+    let missing =
+        parse(r#"{"type":"error","code":"internal_error","message":"m","session":{"id":"s"}}"#);
     assert!(matches!(
-        warning.payload(),
+        missing.payload(),
         EventPayload::Error {
-            severity: Severity::Warning,
+            severity: Severity::Unknown,
             ..
         }
     ));
+    let EventPayload::Error { severity, .. } = missing.payload() else {
+        panic!("expected error");
+    };
+    assert!(
+        !severity.call_continues(),
+        "missing severity must stop the call"
+    );
 
     let future = parse(
-        r#"{"type":"error","code":"quantum_flux","severity":"notice","message":"m","session":{"id":"s"}}"#,
+        r#"{"type":"error","code":"quantum_flux","severity":"fatal","message":"m","session":{"id":"s"}}"#,
     );
     let EventPayload::Error { code, severity, .. } = future.payload() else {
         panic!("expected error");
     };
     assert_eq!(code, &ErrorCode::Other("quantum_flux".into()));
-    assert_eq!(severity, &Severity::Other("notice".into()));
-    assert!(severity.call_continues(), "unknown severity is not fatal");
+    assert_eq!(severity, &Severity::Other("fatal".into()));
+    assert!(
+        !severity.call_continues(),
+        "unrecognised severity must stop the call"
+    );
+
+    assert_eq!(ErrorCode::from_wire(""), None);
+    assert_eq!(
+        ErrorCode::from_wire("future_code"),
+        Some(ErrorCode::Other("future_code".into()))
+    );
+
+    let missing_code =
+        Event::parse(br#"{"type":"error","severity":"error","message":"m","session":{"id":"s"}}"#);
+    assert!(matches!(
+        missing_code,
+        Err(Error::Validation { field: "code", .. })
+    ));
+
+    let empty_code = Event::parse(
+        br#"{"type":"error","code":"","severity":"error","message":"m","session":{"id":"s"}}"#,
+    );
+    assert!(matches!(
+        empty_code,
+        Err(Error::Validation { field: "code", .. })
+    ));
 }
 
 #[test]

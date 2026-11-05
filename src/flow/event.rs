@@ -269,6 +269,15 @@ pub enum Severity {
     Warning,
     /// The intended effect did not happen.
     Error,
+    /// The severity was absent, empty, or explicitly `unknown`.
+    ///
+    /// ```
+    /// use sipgate_flow::Severity;
+    ///
+    /// assert_eq!(Severity::from_wire(""), Severity::Unknown);
+    /// assert!(!Severity::Unknown.call_continues());
+    /// ```
+    Unknown,
     /// A value this crate does not model yet.
     Other(String),
 }
@@ -285,6 +294,7 @@ impl Severity {
         match value {
             "warning" => Self::Warning,
             "error" => Self::Error,
+            "" | "unknown" => Self::Unknown,
             other => Self::Other(other.to_string()),
         }
     }
@@ -300,25 +310,27 @@ impl Severity {
         match self {
             Self::Warning => "warning",
             Self::Error => "error",
+            Self::Unknown => "unknown",
             Self::Other(value) => value,
         }
     }
 
     /// Whether the call keeps running after this failure.
     ///
-    /// Unknown severities are treated as continuations: reacting to an unknown
-    /// warning costs nothing, whereas assuming a fatal error would.
+    /// Unclassified severities stop the call: a handler that cannot tell whether
+    /// an error was fatal must not keep the call alive by default.
     ///
     /// ```
     /// use sipgate_flow::Severity;
     ///
     /// assert!(Severity::Warning.call_continues());
     /// assert!(!Severity::Error.call_continues());
-    /// assert!(Severity::Other("notice".into()).call_continues());
+    /// assert!(!Severity::Unknown.call_continues());
+    /// assert!(!Severity::Other("notice".into()).call_continues());
     /// ```
     #[must_use]
     pub fn call_continues(&self) -> bool {
-        !matches!(self, Self::Error)
+        matches!(self, Self::Warning)
     }
 }
 
@@ -331,8 +343,8 @@ impl Severity {
 /// use sipgate_flow::ErrorCode;
 ///
 /// assert_eq!(
-///     ErrorCode::from_wire("synthesis_unavailable").as_str(),
-///     "synthesis_unavailable"
+///     ErrorCode::from_wire("synthesis_unavailable"),
+///     Some(ErrorCode::SynthesisUnavailable)
 /// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,19 +373,21 @@ impl ErrorCode {
     ///
     /// ```
     /// use sipgate_flow::ErrorCode;
-    /// assert_eq!(ErrorCode::from_wire("internal_error"), ErrorCode::InternalError);
+    /// assert_eq!(ErrorCode::from_wire("internal_error"), Some(ErrorCode::InternalError));
+    /// assert_eq!(ErrorCode::from_wire(""), None);
     /// ```
     #[must_use]
-    pub fn from_wire(value: &str) -> Self {
+    pub fn from_wire(value: &str) -> Option<Self> {
         match value {
-            "action_invalid" => Self::ActionInvalid,
-            "action_unknown_session" => Self::ActionUnknownSession,
-            "transcription_unavailable" => Self::TranscriptionUnavailable,
-            "transcription_switch_failed" => Self::TranscriptionSwitchFailed,
-            "synthesis_unavailable" => Self::SynthesisUnavailable,
-            "transfer_target_invalid" => Self::TransferTargetInvalid,
-            "internal_error" => Self::InternalError,
-            other => Self::Other(other.to_string()),
+            "" => None,
+            "action_invalid" => Some(Self::ActionInvalid),
+            "action_unknown_session" => Some(Self::ActionUnknownSession),
+            "transcription_unavailable" => Some(Self::TranscriptionUnavailable),
+            "transcription_switch_failed" => Some(Self::TranscriptionSwitchFailed),
+            "synthesis_unavailable" => Some(Self::SynthesisUnavailable),
+            "transfer_target_invalid" => Some(Self::TransferTargetInvalid),
+            "internal_error" => Some(Self::InternalError),
+            other => Some(Self::Other(other.to_string())),
         }
     }
 
@@ -723,6 +737,8 @@ impl Event {
     ///   strict field of the wrong type, or repeats a known key.
     /// * [`Error::Validation`] when a `dtmf_received` event does not carry
     ///   exactly one key from `0`-`9`, `*` or `#`.
+    /// * [`Error::Validation`] when an `error` event does not carry a non-empty
+    ///   `code`.
     pub fn parse(body: &[u8]) -> Result<Self> {
         if body.len() > MAX_EVENT_BODY_BYTES {
             return Err(Error::BodyTooLarge {
@@ -805,7 +821,8 @@ impl Event {
                 message: raw.message,
             },
             Some("error") => EventPayload::Error {
-                code: ErrorCode::from_wire(raw.code.as_deref().unwrap_or_default()),
+                code: ErrorCode::from_wire(raw.code.as_deref().unwrap_or_default())
+                    .ok_or_else(|| Error::validation("code", "must not be empty"))?,
                 severity: Severity::from_wire(raw.severity.as_deref().unwrap_or_default()),
                 message: raw.message.unwrap_or_default(),
                 action_type: raw.action_type,
