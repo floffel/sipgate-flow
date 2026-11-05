@@ -309,7 +309,7 @@ proptest! {
                 prop_assert_eq!(token.expires_in(), Some(Duration::from_secs(seconds)));
                 prop_assert!(Duration::from_secs(seconds) <= MAX_TOKEN_LIFETIME);
             }
-            Err(Error::TokenResponse(reason)) => {
+            Err(Error::TokenResponse { message: reason, .. }) => {
                 prop_assert!(Duration::from_secs(seconds) > MAX_TOKEN_LIFETIME);
                 prop_assert!(reason.contains("expires_in"), "{}", reason);
             }

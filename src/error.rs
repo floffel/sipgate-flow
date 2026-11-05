@@ -47,10 +47,22 @@ fn safe_text(value: &str) -> String {
 pub enum Error {
     /// The body was not valid JSON, or a documented required field had the
     /// wrong JSON type. Serde's position information is kept as the source.
+    ///
+    /// Build this variant with [`Error::json_parse`].
     #[error("invalid JSON payload: {source}")]
     Json {
         /// The underlying serde error.
-        #[from]
+        source: serde_json::Error,
+    },
+
+    /// A value this crate emitted could not be encoded as JSON. This is
+    /// distinct from [`Error::Json`]: the failure is on the way out, not a
+    /// remote payload that failed to parse.
+    ///
+    /// Build this variant with [`Error::json_encode`].
+    #[error("could not encode JSON body: {source}")]
+    JsonEncode {
+        /// The underlying serde error.
         source: serde_json::Error,
     },
 
@@ -136,8 +148,18 @@ pub enum Error {
 
     /// The token response could not be used (missing `access_token`, wrong
     /// JSON type, empty value).
-    #[error("unusable token response: {0}")]
-    TokenResponse(String),
+    ///
+    /// Build this variant with [`Error::token_response`] or
+    /// [`Error::token_response_with_source`].
+    #[error("unusable token response: {message}")]
+    TokenResponse {
+        /// What is wrong with the response, without any credential.
+        message: String,
+        /// The underlying error, when one exists (for example a serde error
+        /// from decoding the response).
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A request was rejected with 401 even after refreshing the token once.
     #[error("unauthorized after refreshing the access token")]
@@ -151,6 +173,11 @@ pub enum Error {
     Transport {
         /// Transport-supplied description.
         message: String,
+        /// The underlying transport error, when one exists. Keeping the real
+        /// error preserves the `reqwest` failure that answers
+        /// `is_timeout()`/`is_connect()`.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
         /// `true` for transient failures (I/O, timeouts), `false` otherwise.
         retryable: bool,
     },
@@ -226,6 +253,83 @@ pub enum Error {
 }
 
 impl Error {
+    /// Builds a JSON parse error, keeping serde's position information as the
+    /// source.
+    ///
+    /// This is the only constructor that claims `invalid JSON payload`; a
+    /// failure on the way out uses [`Error::json_encode`] instead.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let serde = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+    /// let err = Error::json_parse(serde);
+    /// assert!(matches!(err, Error::Json { .. }));
+    /// assert!(std::error::Error::source(&err).is_some());
+    /// ```
+    #[must_use]
+    pub fn json_parse(source: serde_json::Error) -> Self {
+        Self::Json { source }
+    }
+
+    /// Builds a JSON encode error for a value this crate emitted.
+    ///
+    /// A serialisation failure while building a request body is a bug on our
+    /// side, not a bad remote payload, so it never claims
+    /// `invalid JSON payload`.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let mut map = std::collections::BTreeMap::new();
+    /// map.insert((1_u8, "key"), 1_u8);
+    /// let serde = serde_json::to_vec(&map).unwrap_err();
+    /// let err = Error::json_encode(serde);
+    /// assert!(matches!(err, Error::JsonEncode { .. }));
+    /// assert!(std::error::Error::source(&err).is_some());
+    /// ```
+    #[must_use]
+    pub fn json_encode(source: serde_json::Error) -> Self {
+        Self::JsonEncode { source }
+    }
+
+    /// Builds a token response error with no underlying source.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::token_response("missing or empty access_token");
+    /// assert!(matches!(err, Error::TokenResponse { .. }));
+    /// assert!(std::error::Error::source(&err).is_none());
+    /// ```
+    #[must_use]
+    pub fn token_response(message: impl Into<String>) -> Self {
+        Self::TokenResponse {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Builds a token response error that keeps the underlying failure.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let cause = std::io::Error::other("truncated body");
+    /// let err = Error::token_response_with_source("could not decode token", cause);
+    /// assert!(std::error::Error::source(&err).is_some());
+    /// ```
+    #[must_use]
+    pub fn token_response_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::TokenResponse {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
     /// Builds a validation error. `field` is the dotted path, `message` the
     /// human readable detail.
     ///
@@ -393,6 +497,7 @@ impl Error {
     pub fn transport_before_write(message: impl Into<String>) -> Self {
         Self::Transport {
             message: message.into(),
+            source: None,
             retryable: true,
         }
     }
@@ -408,7 +513,25 @@ impl Error {
     pub fn transport_terminal(message: impl Into<String>) -> Self {
         Self::Transport {
             message: message.into(),
+            source: None,
             retryable: false,
+        }
+    }
+
+    /// Builds a transport error that keeps the underlying failure.
+    ///
+    /// This is the crate-internal constructor the `reqwest` adapter uses so the
+    /// real transport error, which answers `is_timeout()`/`is_connect()`,
+    /// survives on the cause chain.
+    pub(crate) fn transport_with_source(
+        message: impl Into<String>,
+        retryable: bool,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Transport {
+            message: message.into(),
+            source: Some(Box::new(source)),
+            retryable,
         }
     }
 

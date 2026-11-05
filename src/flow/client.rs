@@ -468,7 +468,9 @@ impl OutboundCallReceipt {
     /// parses but is not the documented object is tolerated, because the call
     /// did start either way.
     pub fn parse(body: &[u8]) -> Result<Self> {
-        Ok(Self::from_json(serde_json::from_slice(body)?))
+        Ok(Self::from_json(
+            serde_json::from_slice(body).map_err(Error::json_parse)?,
+        ))
     }
 
     /// Reads an already-decoded body.

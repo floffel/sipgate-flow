@@ -163,13 +163,13 @@ fn the_token_request_body_follows_the_documented_form() {
 #[test]
 fn token_responses_are_parsed_leniently_but_not_silently() {
     let missing = Token::from_json(&serde_json::json!({})).expect_err("no access_token");
-    assert!(matches!(missing, Error::TokenResponse(_)));
+    assert!(matches!(missing, Error::TokenResponse { .. }));
 
     let empty = Token::from_json(&serde_json::json!({"access_token": ""})).expect_err("empty");
-    assert!(matches!(empty, Error::TokenResponse(_)));
+    assert!(matches!(empty, Error::TokenResponse { .. }));
 
     let wrong_type = Token::from_json(&serde_json::json!({"access_token": 5})).expect_err("number");
-    assert!(matches!(wrong_type, Error::TokenResponse(_)));
+    assert!(matches!(wrong_type, Error::TokenResponse { .. }));
 
     let minimal = Token::from_json(&serde_json::json!({"access_token": "a"})).expect("valid");
     assert_eq!(minimal.token_type(), "bearer");
@@ -750,7 +750,10 @@ async fn an_expires_in_of_zero_is_refused_and_never_cached() {
     let auth = client(transport.clone());
 
     let error = auth.access_token(false).await.expect_err("zero lifetime");
-    let Error::TokenResponse(reason) = &error else {
+    let Error::TokenResponse {
+        message: reason, ..
+    } = &error
+    else {
         panic!("expected TokenResponse, got {error:?}");
     };
     assert!(reason.contains("expires_in of 0"), "{reason}");
@@ -919,7 +922,10 @@ fn an_expires_in_above_the_ceiling_is_a_typed_error() {
             "expires_in": seconds,
         }))
         .expect_err("a lifetime the clock cannot add is refused");
-        let Error::TokenResponse(reason) = &refused else {
+        let Error::TokenResponse {
+            message: reason, ..
+        } = &refused
+        else {
             panic!("expected TokenResponse for {seconds}, got {refused:?}");
         };
         assert!(
@@ -962,7 +968,10 @@ async fn a_clock_add_that_would_overflow_is_a_typed_error_and_never_caches() {
         .access_token(false)
         .await
         .expect_err("overflow is an error");
-    let Error::TokenResponse(reason) = &failed else {
+    let Error::TokenResponse {
+        message: reason, ..
+    } = &failed
+    else {
         panic!("expected TokenResponse, got {failed:?}");
     };
     assert!(reason.contains("overflow"), "{reason}");

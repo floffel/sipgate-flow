@@ -539,7 +539,9 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
     /// envelope, plus transport and auth errors.
     pub async fn calls(&self) -> Result<Vec<CallInfo>> {
         let value = self.send(Method::Get, "/v2/calls", None).await?;
-        Ok(serde_json::from_value::<CallList>(value)?.into_entries())
+        Ok(serde_json::from_value::<CallList>(value)
+            .map_err(Error::json_parse)?
+            .into_entries())
     }
 
     /// `DELETE /v2/calls/{callId}` — hang up.
@@ -1685,7 +1687,9 @@ impl CallList {
 ///
 /// [`Error::Json`] when the body is not JSON or `data` is not an array.
 pub fn parse_calls(body: &[u8]) -> Result<Vec<CallInfo>> {
-    Ok(serde_json::from_slice::<CallList>(body)?.into_entries())
+    Ok(serde_json::from_slice::<CallList>(body)
+        .map_err(Error::json_parse)?
+        .into_entries())
 }
 
 /// One entry of `GET /v2/calls` (`Call` in the schema).

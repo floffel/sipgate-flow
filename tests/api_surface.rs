@@ -15,7 +15,7 @@ use sipgate_flow::rest::{ChannelCall, RecordingSession};
 use sipgate_flow::{
     wav, Action, Audio, BargeInConfig, BargeInStrategy, ClientCredentials, ConfigureTranscription,
     Direction, Error, Event, EventPayload, FnSleeper, MixAudio, NoSleep, OAuth2Client, RestClient,
-    RetryPolicy, SendSms, Severity, Sleeper, SmsFailureReason, Speak, StaticToken, Transfer,
+    RetryPolicy, SendSms, Severity, Sleeper, SmsFailureReason, Speak, StaticToken, Token, Transfer,
     TransferFailedReason, Tts, Vad,
 };
 
@@ -513,4 +513,64 @@ fn the_standalone_rest_parsers_report_a_body_they_cannot_use() {
         "data must be an array"
     );
     assert!(parse_calls(b"").is_err(), "an empty body is not JSON");
+}
+
+#[test]
+fn a_parse_failure_keeps_the_serde_source_on_the_cause_chain() {
+    let error = Event::parse(br#"{"type":"user_speak","text":"#).expect_err("truncated");
+    match &error {
+        Error::Json { source } => {
+            assert!(source.line() >= 1, "{source}");
+            assert!(source.column() >= 1, "{source}");
+        }
+        other => panic!("expected Error::Json, got {other:?}"),
+    }
+    let source = std::error::Error::source(&error).expect("serde source is reachable");
+    assert!(
+        source.downcast_ref::<serde_json::Error>().is_some(),
+        "the source is the serde error: {source}"
+    );
+    assert!(
+        error.to_string().starts_with("invalid JSON payload"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_request_body_encode_failure_is_not_a_parse_error() {
+    // A map whose key is a tuple cannot be serialised: a bug on our side,
+    // not a remote payload.
+    let mut map = std::collections::BTreeMap::new();
+    map.insert((1_u8, "value"), 0_u8);
+    let serde = serde_json::to_vec(&map).expect_err("a tuple is not a JSON object key");
+    let error = Error::json_encode(serde);
+    assert!(matches!(error, Error::JsonEncode { .. }), "{error:?}");
+    assert!(
+        !matches!(error, Error::Json { .. }),
+        "an encode failure must not be reported as a parse failure: {error:?}"
+    );
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "the serde error stays on the chain"
+    );
+}
+
+#[test]
+fn a_token_response_error_carries_its_source() {
+    let error = Token::from_json(&serde_json::json!({"access_token": 5}))
+        .expect_err("access_token must be a string");
+    match &error {
+        Error::TokenResponse { message, source } => {
+            assert!(message.contains("access_token"), "{message}");
+            assert!(source.is_some(), "the serde error survives");
+        }
+        other => panic!("expected TokenResponse, got {other:?}"),
+    }
+    assert!(std::error::Error::source(&error).is_some(), "{error:?}");
+
+    let without_source = Token::from_json(&serde_json::json!({})).expect_err("missing token");
+    assert!(
+        std::error::Error::source(&without_source).is_none(),
+        "a missing field has no underlying error: {without_source:?}"
+    );
 }
