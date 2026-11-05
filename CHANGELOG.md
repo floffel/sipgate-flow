@@ -109,6 +109,16 @@ with the pre-1.0 reading described in the README section *Versioning*.
   are validated before the wire; list responses use the permissive `{"items":
   [...]}` envelope; and request builders cover the schema's documented fields
   and limits.
+* Part of the **v3 account administration** surface (#170): `FlowClient`
+  now models the three documented `/v3/account-settings/*` families — the
+  privacy announcement for recorded and transcribed calls and the transfer
+  caller-ID source — plus the account-level call-event retention setting at
+  `/v3/analytics/call-events/settings/retention`. Each setting has a typed
+  `GET` reader and `PUT`/`DELETE` writer, values are validated before the wire
+  (unmodelled enum values must be a plausible ASCII wire token within
+  `MAX_ACCOUNT_SETTING_TOKEN_BYTES`, and retention must fall inside the
+  documented `1..=MAX_EVENT_RETENTION_DAYS` range), unknown enum values are
+  carried verbatim, and every public item has a doctest.
 
 ### Fixed
 

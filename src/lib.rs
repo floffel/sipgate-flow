@@ -368,8 +368,11 @@ pub use flow::action::{
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
 };
 pub use flow::client::{
-    AgentVoices, AiWebhookSettings, CurrentVoice, FlowClient, OutboundCall, OutboundCallReceipt,
-    SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio, TtsSetting, TtsVoice,
+    AccountRetentionSettings, AgentVoices, AiWebhookSettings, CurrentVoice, FlowClient,
+    OutboundCall, OutboundCallReceipt, RecordingAnnouncementMode, SetAccountRetentionSettings,
+    SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio, TranscriptionAnnouncementMode,
+    TransferCallerIdSource, TtsSetting, TtsVoice, MAX_ACCOUNT_SETTING_TOKEN_BYTES,
+    MAX_EVENT_RETENTION_DAYS, MIN_EVENT_RETENTION_DAYS,
 };
 pub use flow::event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,

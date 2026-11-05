@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use common::{json_response, no_content, response, static_auth, Body, MockTransport};
 use sipgate_flow::{
-    AiWebhookSettings, Error, FlowClient, OutboundCall, OutboundCallReceipt, Result, StaticToken,
-    Token, TokenSource, TtsVoice,
+    AccountRetentionSettings, AiWebhookSettings, Error, FlowClient, OutboundCall,
+    OutboundCallReceipt, RecordingAnnouncementMode, Result, SetAccountRetentionSettings,
+    StaticToken, Token, TokenSource, TranscriptionAnnouncementMode, TransferCallerIdSource,
+    TtsVoice, MAX_ACCOUNT_SETTING_TOKEN_BYTES, MAX_EVENT_RETENTION_DAYS,
 };
 
 const FLOW_ID: &str = "e3670012-96a3-4ae5-ac42-87abe22015c3";
@@ -862,4 +864,413 @@ fn agent_voices_tolerates_missing_and_unknown_fields() {
     let current = CurrentVoice::from_json(&serde_json::json!({"voice_id": "v1"})).expect("camel");
     assert_eq!(current.voice_id(), "v1");
     assert!(CurrentVoice::from_json(&serde_json::json!({})).is_err());
+}
+// v3 account administration (#170)
+// ---------------------------------------------------------------------------
+
+fn account_client(transport: MockTransport) -> FlowClient<MockTransport, StaticToken> {
+    FlowClient::new(transport, static_auth())
+}
+
+#[tokio::test]
+async fn recording_announcement_mode_reads_the_documented_path_and_body() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({"mode": "OPT_OUT"})));
+    let client = account_client(transport.clone());
+
+    let mode = client.recording_announcement_mode().await.expect("read");
+    assert_eq!(mode, RecordingAnnouncementMode::OptOut);
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "GET");
+    assert_eq!(
+        recorded.url,
+        "https://api.sipgate.com/v3/account-settings/privacyAnnouncements/recording"
+    );
+    assert_eq!(recorded.auth.bearer(), Some("access-token"));
+    assert_eq!(recorded.body, Body::Empty);
+}
+
+#[tokio::test]
+async fn recording_announcement_mode_maps_both_documented_values() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({"mode": "INFORM_ONLY"})));
+    let client = account_client(transport);
+    assert_eq!(
+        client.recording_announcement_mode().await.expect("read"),
+        RecordingAnnouncementMode::InformOnly
+    );
+    assert_eq!(
+        RecordingAnnouncementMode::from_wire("opt_out"),
+        RecordingAnnouncementMode::OptOut
+    );
+    assert_eq!(
+        RecordingAnnouncementMode::from_wire("future_mode").as_str(),
+        "future_mode"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_recording_mode_is_a_typed_validation_error() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({})));
+    let client = account_client(transport);
+    let error = client
+        .recording_announcement_mode()
+        .await
+        .expect_err("missing mode");
+    assert!(matches!(
+        error,
+        Error::Validation { field, .. } if field == "recording_announcement_mode"
+    ));
+}
+
+#[tokio::test]
+async fn setting_the_recording_announcement_puts_the_documented_body() {
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = account_client(transport.clone());
+
+    client
+        .set_recording_announcement_mode(&RecordingAnnouncementMode::InformOnly)
+        .await
+        .expect("204");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "PUT");
+    assert_eq!(
+        recorded.url,
+        "https://api.sipgate.com/v3/account-settings/privacyAnnouncements/recording"
+    );
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({"mode": "INFORM_ONLY"}))
+    );
+}
+
+#[tokio::test]
+async fn an_unmodelled_recording_mode_is_validated_before_the_wire() {
+    let transport = MockTransport::new();
+    let client = account_client(transport.clone());
+
+    let error = client
+        .set_recording_announcement_mode(&RecordingAnnouncementMode::Other("has space".into()))
+        .await
+        .expect_err("rejected before the wire");
+    assert!(matches!(
+        error,
+        Error::Validation { field, .. } if field == "recording_announcement_mode"
+    ));
+    assert_eq!(transport.call_count(), 0, "nothing may reach the transport");
+
+    transport.push_response(no_content());
+    client
+        .set_recording_announcement_mode(&RecordingAnnouncementMode::Other("FUTURE_MODE".into()))
+        .await
+        .expect("a plausible forward-compatible token is sent");
+    assert_eq!(transport.call_count(), 1, "the valid token did go out");
+}
+
+#[test]
+fn the_recording_mode_token_boundary_is_proven() {
+    let inside = format!("M{}", "A".repeat(MAX_ACCOUNT_SETTING_TOKEN_BYTES - 1));
+    let outside = format!("M{}", "A".repeat(MAX_ACCOUNT_SETTING_TOKEN_BYTES));
+    assert!(RecordingAnnouncementMode::Other(inside).validate().is_ok());
+    assert!(RecordingAnnouncementMode::Other(outside)
+        .validate()
+        .is_err());
+    assert!(RecordingAnnouncementMode::OptOut.validate().is_ok());
+}
+
+#[tokio::test]
+async fn transcription_announcement_mode_round_trips_the_documented_path() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!({"mode": "none"})));
+    let client = account_client(transport.clone());
+
+    assert_eq!(
+        client
+            .transcription_announcement_mode()
+            .await
+            .expect("read"),
+        TranscriptionAnnouncementMode::Disabled
+    );
+    assert_eq!(
+        transport.only_call().url,
+        "https://api.sipgate.com/v3/account-settings/privacyAnnouncements/transcription"
+    );
+
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = account_client(transport.clone());
+    client
+        .set_transcription_announcement_mode(&TranscriptionAnnouncementMode::InformOnly)
+        .await
+        .expect("204");
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "PUT");
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({"mode": "INFORM_ONLY"}))
+    );
+}
+
+#[test]
+fn the_transcription_mode_distinguishes_none_from_unknown() {
+    assert_eq!(
+        TranscriptionAnnouncementMode::from_wire("NONE"),
+        TranscriptionAnnouncementMode::Disabled
+    );
+    assert_eq!(
+        TranscriptionAnnouncementMode::from_wire("SOMETHING_ELSE"),
+        TranscriptionAnnouncementMode::Other("SOMETHING_ELSE".into())
+    );
+    assert!(TranscriptionAnnouncementMode::from_json(&serde_json::json!({"mode": ""})).is_err());
+}
+
+#[tokio::test]
+async fn transfer_caller_id_reads_and_writes_the_documented_path() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(
+        &serde_json::json!({"source": "TRANSFERRED_PARTY"}),
+    ));
+    let client = account_client(transport.clone());
+    assert_eq!(
+        client.transfer_caller_id().await.expect("read"),
+        TransferCallerIdSource::TransferredParty
+    );
+    assert_eq!(
+        transport.only_call().url,
+        "https://api.sipgate.com/v3/account-settings/transferCallerId"
+    );
+
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = account_client(transport.clone());
+    client
+        .set_transfer_caller_id(&TransferCallerIdSource::TransferringParty)
+        .await
+        .expect("204");
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "PUT");
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({"source": "TRANSFERRING_PARTY"}))
+    );
+}
+
+#[test]
+fn transfer_caller_id_source_keeps_unknown_values_and_validates() {
+    assert_eq!(
+        TransferCallerIdSource::from_wire("transferring_party"),
+        TransferCallerIdSource::TransferringParty
+    );
+    assert_eq!(
+        TransferCallerIdSource::Other("FUTURE".into()).as_str(),
+        "FUTURE"
+    );
+    assert!(TransferCallerIdSource::from_json(&serde_json::json!({"source": ""})).is_err());
+    assert!(TransferCallerIdSource::Other(String::new())
+        .validate()
+        .is_err());
+    assert!(TransferCallerIdSource::TransferredParty.validate().is_ok());
+}
+
+#[tokio::test]
+async fn account_retention_reads_null_as_keep_indefinitely() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(
+        &serde_json::json!({"eventRetentionDays": null}),
+    ));
+    let client = account_client(transport.clone());
+
+    let settings = client.account_retention().await.expect("read");
+    assert_eq!(settings.event_retention_days(), None);
+    assert_eq!(
+        transport.only_call().url,
+        "https://api.sipgate.com/v3/analytics/call-events/settings/retention"
+    );
+}
+
+#[tokio::test]
+async fn account_retention_reads_a_number_and_tolerates_snake_case() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(
+        &serde_json::json!({"event_retention_days": 90, "future": true}),
+    ));
+    let client = account_client(transport);
+    assert_eq!(
+        client
+            .account_retention()
+            .await
+            .expect("read")
+            .event_retention_days(),
+        Some(90)
+    );
+}
+
+#[test]
+fn account_retention_tolerates_missing_and_out_of_range_values() {
+    assert_eq!(
+        AccountRetentionSettings::from_json(&serde_json::json!({})).event_retention_days(),
+        None
+    );
+    assert_eq!(
+        AccountRetentionSettings::from_json(&serde_json::json!({"eventRetentionDays": "90"}))
+            .event_retention_days(),
+        None,
+        "a non-number is not silently coerced"
+    );
+    assert_eq!(
+        AccountRetentionSettings::from_json(
+            &serde_json::json!({"eventRetentionDays": u64::from(u32::MAX) + 1}),
+        )
+        .event_retention_days(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn setting_account_retention_posts_the_documented_body() {
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = account_client(transport.clone());
+
+    let request = SetAccountRetentionSettings::new(90).expect("valid");
+    client.set_account_retention(&request).await.expect("204");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "PUT");
+    assert_eq!(
+        recorded.url,
+        "https://api.sipgate.com/v3/analytics/call-events/settings/retention"
+    );
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({"eventRetentionDays": 90}))
+    );
+}
+
+#[tokio::test]
+async fn clearing_account_retention_deletes_the_policy() {
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = account_client(transport.clone());
+    client.clear_account_retention().await.expect("204");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "DELETE");
+    assert_eq!(
+        recorded.url,
+        "https://api.sipgate.com/v3/analytics/call-events/settings/retention"
+    );
+    assert_eq!(recorded.body, Body::Empty);
+}
+
+#[test]
+fn retention_days_boundary_is_proven_on_both_ends() {
+    assert!(
+        SetAccountRetentionSettings::new(0).is_err(),
+        "exclusive min"
+    );
+    assert!(SetAccountRetentionSettings::new(1).is_ok(), "just inside");
+    assert!(SetAccountRetentionSettings::new(2).is_ok());
+    assert!(
+        SetAccountRetentionSettings::new(MAX_EVENT_RETENTION_DAYS).is_ok(),
+        "inclusive max"
+    );
+    assert!(
+        SetAccountRetentionSettings::new(MAX_EVENT_RETENTION_DAYS + 1).is_err(),
+        "just outside"
+    );
+    let error = SetAccountRetentionSettings::new(0).expect_err("min");
+    assert!(matches!(
+        error,
+        Error::Validation { field, .. } if field == "event_retention_days"
+    ));
+}
+
+#[tokio::test]
+async fn an_unrelated_failure_status_surfaces_as_api_error() {
+    let transport = MockTransport::new();
+    transport.push_response(response(403, &[], b"{\"error\":\"not allowed\"}"));
+    let client = account_client(transport);
+    let error = client
+        .set_recording_announcement_mode(&RecordingAnnouncementMode::OptOut)
+        .await
+        .expect_err("403");
+    assert_eq!(error.status(), Some(403));
+    assert!(!error.is_ambiguous());
+}
+
+#[test]
+fn account_setting_enums_expose_every_documented_token_and_arm() {
+    assert_eq!(TranscriptionAnnouncementMode::Disabled.as_str(), "NONE");
+    assert_eq!(
+        TranscriptionAnnouncementMode::Other("FUTURE_MODE".into()).as_str(),
+        "FUTURE_MODE"
+    );
+    assert!(TranscriptionAnnouncementMode::Other("FUTURE_MODE".into())
+        .validate()
+        .is_ok());
+    assert!(TranscriptionAnnouncementMode::Other("has space".into())
+        .validate()
+        .is_err());
+    assert_eq!(
+        RecordingAnnouncementMode::InformOnly.as_str(),
+        "INFORM_ONLY"
+    );
+    assert_eq!(
+        RecordingAnnouncementMode::Other("FUTURE_MODE".into()).as_str(),
+        "FUTURE_MODE"
+    );
+    for unknown in ["TRANSFERRED_PARTY", "UNKNOWN"] {
+        if unknown == "UNKNOWN" {
+            assert_eq!(
+                TransferCallerIdSource::from_wire(unknown),
+                TransferCallerIdSource::Other("UNKNOWN".into())
+            );
+        }
+    }
+    assert_eq!(
+        TransferCallerIdSource::TransferringParty.as_str(),
+        "TRANSFERRING_PARTY"
+    );
+    assert!(TransferCallerIdSource::Other("FUTURE".into())
+        .validate()
+        .is_ok());
+    let request = SetAccountRetentionSettings::new(45).expect("valid");
+    assert_eq!(request.event_retention_days(), 45);
+}
+
+#[test]
+fn tts_request_builders_expose_every_getter_and_debug_impl() {
+    let request = SynthesizeRequest::new("RACHEL", "hi")
+        .expect("valid")
+        .with_title("Greeting")
+        .expect("title")
+        .with_acd_id("e0e1e2e3-0000-0000-0000-000000000000")
+        .expect("acd")
+        .with_kind("ANNOUNCEMENT")
+        .expect("kind");
+    assert_eq!(request.voice(), "RACHEL");
+    assert_eq!(request.content(), "hi");
+    assert_eq!(request.title(), Some("Greeting"));
+    assert_eq!(
+        request.acd_id(),
+        Some("e0e1e2e3-0000-0000-0000-000000000000")
+    );
+    assert_eq!(request.kind(), Some("ANNOUNCEMENT"));
+    assert_eq!(request.to_json()["type"], "ANNOUNCEMENT");
+    assert_ne!(format!("{request:?}"), String::new());
+
+    let stream = SynthesizeStreamRequest::new("RACHEL", "hi").expect("valid");
+    assert_eq!(stream.voice(), "RACHEL");
+    assert_eq!(stream.content(), "hi");
+    assert_ne!(format!("{stream:?}"), String::new());
+
+    let voice = CurrentVoice::from_json(&serde_json::json!({"voiceId": "v1", "name": "Rachel"}))
+        .expect("valid");
+    assert_eq!(voice.name(), Some("Rachel"));
+    assert_ne!(format!("{voice:?}"), String::new());
 }
