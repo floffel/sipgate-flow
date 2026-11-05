@@ -166,6 +166,46 @@ Both names remain exported (`SECRET_HEADER`, `SECRET_HEADER_LEGACY`) and
 `WebhookVerifier::verify` compares the value, not the name, so a framework that
 normalises headers differently still works.
 
+### 3.2 The WebSocket channel — verified
+
+Source: <https://flow.sipgate.io/api/websocket> (and the same page as
+<https://flow.sipgate.io/api/websocket.md>, which the docs site offers for LLMs).
+
+* **Who connects**: "When a phone call starts, the Flow Service initiates a
+  WebSocket connection to your application." Flow is the client; the
+  application runs the server, and the URL is configured in the Flow dashboard
+  (`wss://your-domain.com/ai-flow/websocket`, `ws://localhost:8080/websocket`
+  for local development).
+* **Framing**: "Events are sent as JSON strings" — one event per message, the
+  same shape as the webhook body (the page's example is the
+  `user_speak` payload). Actions are sent back the same way; the page's example
+  is one flat object with `type`, `session_id` and the action's own fields.
+  `@sipgate/ai-flow-sdk` 2.1.0's `ws(ws)` handler does
+  `ws.send(JSON.stringify(actions))`, where `actions` is the handler's return
+  value — a single action object or an array — so a response with several
+  actions travels as one array message, which is why the crate reuses
+  `FlowResponse` unchanged.
+* **Addressing**: an action names its session with `session_id`, not with the
+  connection. The page describes "proactive event delivery" and "unsolicited
+  actions", so one connection is not one session from the protocol's point of
+  view; the crate treats one connection as one call because that is the
+  documented lifecycle ("When a call starts, it connects to your server. When
+  the call ends, it may close the connection").
+* **Heartbeat**: "The Flow Service may send ping frames to keep the connection
+  alive. Your server should respond with pong frames."
+* **Event coverage**: the event table marks every event `HTTP + WebSocket` except
+  `user_speech_started`, which is `WebSocket only` — hence the typed event set is
+  the same one §1 describes.
+* **Response contract**: the page names no status codes and no error envelope on
+  this transport. An action that arrives for an event with no action contract
+  (or none at all) has no documented acknowledgement, so the crate refuses to
+  write it locally (`Error::ActionNotAccepted`) instead of relying on the
+  service to discard it.
+
+### 3.3 What the channel does not document
+
+See §7.9: the handshake carries no documented authentication.
+
 ## 4. Outbound Flow calls — verified end to end
 
 Sources: <https://api.sipgate.com/v3/openapi.json> (the machine-readable v3
@@ -435,6 +475,22 @@ page and the SDK union). The equivalents live in REST v2 (`/sessions/fax`,
 `/sessions/voicemail/*`, `/calls/{id}/dtmf`, `/calls/{id}/recording`) and are
 implemented there.
 
+### 7.9 WebSocket handshake authentication — undocumented
+
+<https://flow.sipgate.io/api/websocket> describes the URL
+(`wss://your-domain.com/ai-flow/websocket`) and the JSON framing, and nothing
+else about trust: no header, token, query parameter, subprotocol or mTLS
+requirement appears on the page, in `llms-full.txt` (searched for "websocket",
+"auth", "token"), or in `@sipgate/ai-flow-sdk` 2.1.0, whose `ws(ws)` handler
+takes an already-established `ws` object and never inspects its handshake.
+
+Consequence for this crate: `flow::socket` implements the message protocol only.
+It invents no credential, and it does not claim that a connection is
+authentic — whoever accepts the socket owns that decision (a signed URL, a
+reverse proxy allow-list, whatever their infrastructure offers). A caller who
+finds the mechanism published should put it in front of `Connection`, not inside
+the protocol layer.
+
 ## 8. Surfaces not covered yet
 
 Every surface sipgate documents and this crate does not model is an **open issue**,
@@ -449,10 +505,6 @@ in this document — `tests/docs.rs` fails on it. Order of work is the order bel
   (form in, XML out, no JSON), so it lands as its own module; `WebhookVerifier`
   keeps rejecting it with `Error::UnsupportedContentType` rather than half-parsing
   it.
-* **WebSocket transport** — <https://flow.sipgate.io/api/websocket>. Tracked in
-  [#11](https://github.com/floffel/sipgate-flow/issues/11). Flow *connects to you*,
-  so the client side needs a server side; the event and action types are transport
-  agnostic and work there as-is.
 * **REST v2 account administration** (devices, contacts, history, phonelines,
   numbers, …) — <https://api.sipgate.com/v2/swagger.json>. Tracked in
   [#12](https://github.com/floffel/sipgate-flow/issues/12).
@@ -487,6 +539,7 @@ implement and no issue to track:
 | <https://flow.sipgate.io/api/actions> + one page per action | 2026-10-24 | action shapes and limits |
 | <https://flow.sipgate.io/api/tts-providers>, `/api/barge-in`, `/api/vad` | 2026-10-24 | providers, strategies, VAD bounds |
 | <https://flow.sipgate.io/api/authentication>, `/api/http-webhooks` | 2026-10-24 | the shared secret and `X-API-TOKEN` |
+| <https://flow.sipgate.io/api/websocket> (and `/api/websocket.md`) | 2026-11-05 | the WebSocket channel: framing, the documented ping/pong, the per-event transport table, the absent handshake authentication |
 | <https://flow.sipgate.io/api/guides/outbound-calls> | 2026-10-24 | the outbound call flow and its preconditions |
 | <https://flow.sipgate.io/sdk/api-reference>, `/sdk/integrations/express` | 2026-10-24 | `baseUrl` default, and the one place `X-API-Key` is written by hand |
 | `@sipgate/ai-flow-sdk` 2.1.0 (`registry.npmjs.org` tarball) | 2026-10-24 | event/action schemas, `user_barge_in`, `immediate`, TTS providers, outbound call code |
@@ -503,6 +556,7 @@ implement and no issue to track:
 | `flow/session_start.json` | <https://flow.sipgate.io/api/events/session-start> (Event Structure) |
 | `flow/session_start_transfer_failed.json` | same page (Returning Callers) |
 | `flow/user_speech_started.json` | <https://flow.sipgate.io/api/events/user-speech-started> |
+| `flow/websocket_message.json` | <https://flow.sipgate.io/api/websocket> (Receiving Events) |
 | `flow/user_speak.json`, `flow/user_speak_barged_in.json` | <https://flow.sipgate.io/api/events/user-speak> |
 | `flow/user_barge_in.json` | shape from `AiFlowEventUserBargeInSchema` (`@sipgate/ai-flow-sdk` 2.1.0); values synthetic |
 | `flow/dtmf_received.json` | <https://flow.sipgate.io/api/events/dtmf-received> |

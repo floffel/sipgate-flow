@@ -154,6 +154,19 @@ pub enum Error {
         message: String,
     },
 
+    /// An action was prepared for an event whose contract allows no action
+    /// response. `session_end` documents this explicitly, and
+    /// `user_speech_started`, `user_barge_in` and `sms_failed` are not in the
+    /// documented response table at all, so
+    /// [`Event::accepts_actions`](crate::Event::accepts_actions) reports
+    /// `false` for them and the `websocket` feature's `FlowSocket::send_response`
+    /// refuses to write the message.
+    #[error("event `{kind}` accepts no action response")]
+    ActionNotAccepted {
+        /// The event type the response was addressed to.
+        kind: String,
+    },
+
     /// A base64 payload could not be decoded.
     ///
     /// The top-level message stays input-free. The original decoder error is
@@ -314,6 +327,27 @@ pub enum Error {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
         /// `true` for transient failures (I/O, timeouts), `false` otherwise.
+        retryable: bool,
+    },
+
+    /// The WebSocket link failed: a frame could not be read or written.
+    ///
+    /// `retryable` is `true` for a dead connection — a *new* connection can
+    /// succeed — and `false` when the failure is terminal for the caller's
+    /// setup. It never means this crate re-sends a frame: when an action was
+    /// lost with the link, the decision stays with the caller.
+    ///
+    /// Build this variant with [`Error::socket`], [`Error::socket_terminal`] or
+    /// [`Error::socket_with_source`].
+    #[non_exhaustive]
+    #[error("websocket error: {message}")]
+    Socket {
+        /// Adapter-supplied description, without credentials.
+        message: String,
+        /// The underlying socket error, when one exists.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+        /// `true` when a new connection could succeed.
         retryable: bool,
     },
 
@@ -900,6 +934,71 @@ impl Error {
         }
     }
 
+    /// Builds a retryable WebSocket error: the link is gone, a new connection
+    /// can succeed.
+    ///
+    /// A dead link never makes this crate re-send a frame. If an action was
+    /// written into a connection that died, only the caller can tell whether
+    /// Flow received it, so the outcome is reported, not repaired.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::socket("recv: connection reset");
+    /// assert!(err.is_retryable());
+    /// assert!(!err.is_ambiguous());
+    /// assert_eq!(err.to_string(), "websocket error: recv: connection reset");
+    /// ```
+    #[must_use]
+    pub fn socket(message: impl Into<String>) -> Self {
+        Self::Socket {
+            message: message.into(),
+            source: None,
+            retryable: true,
+        }
+    }
+
+    /// Builds a terminal WebSocket error (not retryable), for example a frame
+    /// the adapter could not classify at all.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// assert!(!Error::socket_terminal("unsupported frame mask").is_retryable());
+    /// ```
+    #[must_use]
+    pub fn socket_terminal(message: impl Into<String>) -> Self {
+        Self::Socket {
+            message: message.into(),
+            source: None,
+            retryable: false,
+        }
+    }
+
+    /// Builds a WebSocket error that keeps the underlying failure on the cause
+    /// chain, so an adapter does not have to flatten its own error type.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let io = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "peer went away");
+    /// let err = Error::socket_with_source("send: broken pipe", true, io);
+    /// assert!(err.is_retryable());
+    /// assert!(std::error::Error::source(&err).is_some(), "the cause stays reachable");
+    /// ```
+    #[must_use]
+    pub fn socket_with_source(
+        message: impl Into<String>,
+        retryable: bool,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Socket {
+            message: message.into(),
+            source: Some(Box::new(source)),
+            retryable,
+        }
+    }
+
     /// Builds a transport error that keeps the underlying failure.
     ///
     /// This is the crate-internal constructor the `reqwest` adapter uses so the
@@ -1081,7 +1180,9 @@ impl Error {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Transport { retryable, .. } | Self::Api { retryable, .. } => *retryable,
+            Self::Transport { retryable, .. }
+            | Self::Api { retryable, .. }
+            | Self::Socket { retryable, .. } => *retryable,
             _ => false,
         }
     }

@@ -1,10 +1,12 @@
 //! sipgate flow: inbound events, outbound actions, and the webhook handshake.
 //!
 //! The protocol is documented at <https://flow.sipgate.io/api/>. Events arrive
-//! as JSON; actions are returned in the *response* to the webhook call, not
-//! posted to a separate endpoint. This crate supports only the webhook-response
-//! channel; the WebSocket channel is not implemented (see
-//! <https://github.com/floffel/sipgate-flow/issues/11>). See
+//! as JSON; in the webhook mode actions are returned in the *response* to the
+//! webhook call, not posted to a separate endpoint. In the WebSocket mode
+//! (<https://flow.sipgate.io/api/websocket>, behind the `websocket` feature)
+//! Flow opens a connection to your server and the same event arrives as one
+//! JSON message, answered with actions on the same connection — see the
+//! `websocket` module. See
 //! [docs/contracts.md](https://github.com/floffel/sipgate-flow/blob/main/docs/contracts.md)
 //! for the exact source of every shape this module models.
 //!
@@ -20,6 +22,8 @@ pub mod action;
 pub mod client;
 pub mod event;
 pub mod response;
+#[cfg(feature = "websocket")]
+pub mod socket;
 pub mod webhook;
 
 pub use crate::error::{Error, Result};
@@ -34,6 +38,10 @@ pub use event::{
     TransferFailedReason, MAX_EVENT_BODY_BYTES,
 };
 pub use response::FlowResponse;
+#[cfg(feature = "websocket")]
+pub use socket::{
+    AcceptBackoff, Connection, FlowSocket, Frame, MockConnection, MAX_SOCKET_MESSAGE_BYTES,
+};
 pub use webhook::{
     is_json_content_type, WebhookVerifier, DEFAULT_MAX_BODY_BYTES, SECRET_HEADER,
     SECRET_HEADER_LEGACY,

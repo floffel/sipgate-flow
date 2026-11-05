@@ -8,6 +8,31 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ## [Unreleased]
 
+### Added
+
+* The **Flow WebSocket transport** (<https://flow.sipgate.io/api/websocket>),
+  behind the new `websocket` feature. Flow connects *to* the application, so the
+  crate ships the server half and leaves the socket to the caller: implement
+  `Connection` for your framework's web socket, and `FlowSocket` turns incoming
+  frames into the same typed `Event`s the webhook path produces and writes
+  `Action`s back in the same flat JSON the webhook body uses. `run` drives one
+  connection (one call) until Flow closes it; `send_action` sends an unsolicited
+  action, which this transport allows. Pings are answered with pongs, an
+  inbound frame is bounded by `MAX_SOCKET_MESSAGE_BYTES` *before* the JSON parser
+  runs (the ceiling is configurable within `1..=MAX`, and `0` or more than the
+  parser ceiling is refused), and an action for an event that accepts none is
+  refused with the new `Error::ActionNotAccepted` instead of being written.
+  `MockConnection` is an in-memory transport, so handlers are testable without a
+  socket, and `AcceptBackoff` paces the accept loop that reconnects after a
+  dropped link (bounded, jittered, never giving up). The handshake carries no
+  documented authentication — `docs/contracts.md` §3.2 records what the page
+  documents and §7.9 the gap — so every security check stays where the socket is
+  accepted. The `WebSocket` entry left the "Where the rest lives" list.
+* `Error::Socket` (with `Error::socket`, `Error::socket_terminal` and
+  `Error::socket_with_source`) reports a failed link with its cause attached and
+  `is_retryable()` telling the caller whether a new connection is worth trying.
+  It never re-sends a frame: a lost action is reported, not repaired.
+
 ### Fixed
 
 * `RetryPolicy::delay(0, ...)` no longer schedules a full backoff step. The

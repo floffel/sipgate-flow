@@ -172,6 +172,47 @@
 //! # }
 //! ```
 //!
+//! # Receiving the same events over a WebSocket
+//!
+//! Flow can also connect *to you* and stream the events over a WebSocket
+//! (<https://flow.sipgate.io/api/websocket>, `websocket` feature). Because Flow
+//! is the connector, the server half stays yours: adapt your framework's
+//! connection to `Connection` and `FlowSocket` turns frames into the same
+//! [`Event`] and [`Action`] types the webhook path uses. `user_speech_started`
+//! only exists on this transport; every other event is `HTTP + WebSocket`.
+//!
+//! ```no_run
+//! # #[cfg(feature = "websocket")]
+//! # async fn demo() -> Result<(), sipgate_flow::Error> {
+//! use sipgate_flow::{Action, Connection, EventPayload, FlowResponse, FlowSocket, Frame};
+//!
+//! # struct MyConnection;
+//! # impl Connection for MyConnection {
+//! #     async fn recv(&self) -> sipgate_flow::Result<Option<Frame>> { Ok(None) }
+//! #     async fn send(&self, _frame: Frame) -> sipgate_flow::Result<()> { Ok(()) }
+//! # }
+//! let socket = FlowSocket::new(MyConnection);
+//!
+//! // One connection is one call: drive it until Flow closes the link.
+//! let handled = socket.run(|event| async move {
+//!     let Some(session) = event.session_id() else {
+//!         return Ok(FlowResponse::none());
+//!     };
+//!     match event.payload() {
+//!         EventPayload::UserSpeak { text, .. } if text.contains("Hilfe") => {
+//!             Ok(FlowResponse::one(Action::speak(session, "Ich verbinde.")?))
+//!         }
+//!         _ => Ok(FlowResponse::none()),
+//!     }
+//! }).await?;
+//! # let _ = handled;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A handler is also allowed to speak without being asked: the transport is
+//! bidirectional, so `FlowSocket::send_action` sends an action on its own.
+//!
 //! # Retries never sleep inside the library
 //!
 //! [`RestClient`] computes a bounded, jittered backoff (honouring
@@ -235,6 +276,10 @@ pub use flow::event::{
     TransferFailedReason, MAX_EVENT_BODY_BYTES,
 };
 pub use flow::response::FlowResponse;
+#[cfg(feature = "websocket")]
+pub use flow::socket::{
+    AcceptBackoff, Connection, FlowSocket, Frame, MockConnection, MAX_SOCKET_MESSAGE_BYTES,
+};
 pub use flow::webhook::{self, WebhookVerifier};
 pub use rest::RestClient;
 pub use retry::{

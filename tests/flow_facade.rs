@@ -124,6 +124,39 @@ const _: &str = sipgate_flow::flow::webhook::SECRET_HEADER_LEGACY;
 const _: usize = sipgate_flow::flow::DEFAULT_MAX_BODY_BYTES;
 const _: usize = sipgate_flow::flow::webhook::DEFAULT_MAX_BODY_BYTES;
 
+// --- `flow::socket` (the `websocket` feature) -----------------------------
+
+#[cfg(feature = "websocket")]
+const _: fn(sipgate_flow::flow::socket::FlowSocket<sipgate_flow::flow::socket::MockConnection>) =
+    |v| {
+        let _: sipgate_flow::flow::FlowSocket<sipgate_flow::flow::socket::MockConnection> = v;
+    };
+#[cfg(feature = "websocket")]
+const _: fn(sipgate_flow::flow::socket::Frame) = |v| {
+    let _: sipgate_flow::flow::Frame = v;
+};
+#[cfg(feature = "websocket")]
+const _: fn(sipgate_flow::flow::socket::AcceptBackoff) = |v| {
+    let _: sipgate_flow::flow::AcceptBackoff = v;
+};
+#[cfg(feature = "websocket")]
+const _: fn(sipgate_flow::flow::socket::MockConnection) = |v| {
+    let _: sipgate_flow::flow::MockConnection = v;
+};
+// The trait is pinned the way a caller uses it: a bound written against the
+// facade path must accept an impl written against `flow::socket::Connection`,
+// which is what proves both paths name one trait.
+#[cfg(feature = "websocket")]
+const _: () = {
+    fn requires<C: sipgate_flow::flow::Connection>(_connection: &C) {}
+    #[allow(dead_code)]
+    fn bridge(connection: &sipgate_flow::flow::socket::MockConnection) {
+        requires(connection);
+    }
+};
+#[cfg(feature = "websocket")]
+const _: usize = sipgate_flow::flow::socket::MAX_SOCKET_MESSAGE_BYTES;
+
 // --- the failure path a caller matches on --------------------------------
 
 // The parse/verification/action errors are `sipgate_flow::Error`; the facade
@@ -150,5 +183,9 @@ mod imports {
         Severity, SmsFailureReason, Speak, TranscriptionProvider, Transfer, TransferFailedReason,
         Tts, Vad, WebhookVerifier, DEFAULT_BASE_URL, DEFAULT_MAX_BODY_BYTES, MAX_EVENT_BODY_BYTES,
         SECRET_HEADER, SECRET_HEADER_LEGACY,
+    };
+    #[cfg(feature = "websocket")]
+    use sipgate_flow::flow::{
+        AcceptBackoff, Connection, FlowSocket, Frame, MockConnection, MAX_SOCKET_MESSAGE_BYTES,
     };
 }

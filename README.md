@@ -7,7 +7,7 @@ crate keeps them apart:
 
 | Half | What it does | Docs |
 | --- | --- | --- |
-| `flow` | Your webhook **receives** events (`session_start`, `user_speak`, `dtmf_received`, …) and **returns** actions (`speak`, `audio`, `transfer`, …) in the response. There is no separate endpoint to post an action to. | [flow.sipgate.io/api](https://flow.sipgate.io/api/) |
+| `flow` | Your webhook **receives** events (`session_start`, `user_speak`, `dtmf_received`, …) and **returns** actions (`speak`, `audio`, `transfer`, …) in the response. There is no separate endpoint to post an action to. Flow can also open a **WebSocket** to you and exchange the same events and actions as JSON messages. | [flow.sipgate.io/api](https://flow.sipgate.io/api/) |
 | `rest` | The imperative API at `api.sipgate.com/v2`: SMS, fax, outbound calls, and live call control (hangup, DTMF, announcement, recording, hold, mute, transfer). | [api.sipgate.com/v2/doc](https://api.sipgate.com/v2/doc) |
 
 Every shape was checked against public documentation and is cited in
@@ -57,6 +57,43 @@ let response = match event.payload() {
 `FlowResponse` refuses to build an empty array, so a handler cannot send `[]`
 where it meant `204`.
 
+## Answering over a WebSocket
+
+Flow can also open a WebSocket **to you** and stream the same events, one JSON
+message per event ([docs](https://flow.sipgate.io/api/websocket)). Because Flow
+is the connector, the server half stays yours — adapt your framework's
+connection to `Connection`, and `FlowSocket` (feature `websocket`) does the
+rest with the same `Event`, `Action` and `FlowResponse` types:
+
+```rust
+use sipgate_flow::{Action, EventPayload, FlowResponse, FlowSocket};
+
+async fn serve(connection: MyConnection) -> sipgate_flow::Result<()> {
+    let socket = FlowSocket::new(connection);
+    socket.run(|event| async move {
+        let Some(session) = event.session_id() else {
+            return Ok(FlowResponse::none());
+        };
+        match event.payload() {
+            EventPayload::UserSpeak { text, .. } if text.contains("Hilfe") => {
+                Ok(FlowResponse::one(Action::speak(session, "Ich verbinde.")?))
+            }
+            _ => Ok(FlowResponse::none()),
+        }
+    }).await?;
+    Ok(())
+}
+```
+
+`run` drives one connection (one call) until Flow closes it; a handler that
+returns `FlowResponse::none()` sends nothing, and an action for an event that
+accepts none (`session_end`, `user_speech_started`, …) is refused with
+`Error::ActionNotAccepted` instead of being written. The inbound ceiling is
+`MAX_SOCKET_MESSAGE_BYTES` and is checked before the JSON parser runs;
+`MockConnection` makes a handler testable without a socket, and
+`AcceptBackoff` paces the accept loop that keeps your endpoint reachable after a
+dropped link.
+
 ## Calling the REST API
 
 ```rust
@@ -102,6 +139,11 @@ in any `Debug` output.
   `eleven_labs`, plus `openai` from the SDK schema).
 * **The documented Flow webhook handshake**: shared secret in constant time,
   JSON-only content type, bounded event bodies, `200`/`204` response shapes.
+* **The WebSocket transport** (`websocket` feature): the same events and actions
+  as JSON messages over the connection Flow opens to your server, with ping/pong
+  handling, a bounded inbound frame ceiling checked before parsing, a per-event
+  action contract (`ActionNotAccepted`), and `AcceptBackoff` for the accept loop.
+  No socket is needed to test a handler: `MockConnection` is the transport.
 * **Outbound Flow calls** (`POST /v3/ai-flows/{id}/call`) with a typed
   `OutboundCallReceipt` for the documented `callSid` response.
 * **Sixteen REST v2 operations** covering SMS, fax (send + resend), outbound
@@ -182,9 +224,6 @@ an issue behind it:
   [#10](https://github.com/floffel/sipgate-flow/issues/10). Form-encoded in, XML
   out: its own module, with the same validation and webhook-verification
   discipline as Flow.
-* **The WebSocket transport** — [#11](https://github.com/floffel/sipgate-flow/issues/11).
-  Flow connects *to you*, so the client half needs a server half; the event and
-  action type trees are transport agnostic and work there unchanged.
 * **REST v2 account administration** (devices, contacts, history, phonelines,
   numbers, …) — [#12](https://github.com/floffel/sipgate-flow/issues/12).
   Documented endpoints, not modelled yet.
@@ -215,11 +254,12 @@ drift away from the API.
 ## Tests
 
 ```bash
-cargo test                        # 254 tests + 342 doctests
-cargo test --no-default-features  # same, without reqwest
+cargo test                        # 402 tests + 389 doctests (default features)
+cargo test --all-features         # 433 tests + 412 doctests (adds the websocket feature)
+cargo test --no-default-features  # 383 tests + 386 doctests (no reqwest, no websocket)
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-cargo +nightly fuzz run parse_event   # fuzz/ — three named targets
+cargo +nightly fuzz run parse_event   # fuzz/ — five named targets
 cargo llvm-cov --all-features --summary-only
 ```
 
@@ -229,6 +269,13 @@ cargo llvm-cov --all-features --summary-only
   never panic the event parser; documented events round-trip and render
   idempotently; base64 and WAV round-trip; backoff stays bounded and jittered;
   `Retry-After` never panics.
+* **The WebSocket transport** (`tests/websocket.rs`, `websocket` feature): every
+  documented event arrives from a text *and* a binary frame, pings are answered,
+  actions render exactly as the webhook body does, the frame ceiling is pinned
+  on both sides (`limit` / `limit - 1`, `MAX` / `MAX + 1`, `0` and `MAX + 1`
+  refused), an action for an actionless event is refused before the wire, and
+  arbitrary frames are proved panic-free with `proptest`. The peer is
+  `MockConnection`, not a socket.
 * **Documentation guards** (`tests/docs.rs`): the gap list in the README and
   `docs/contracts.md` must link a tracked issue, may never be described as an
   exclusion, and both documents have to list the same number of gaps.
@@ -238,17 +285,19 @@ cargo llvm-cov --all-features --summary-only
   formats, `Retry-After` clamping and budget exhaustion.
 * **Concurrency**: one client hammered from 32 tasks (`Send + Sync` enforced by
   the compiler at the call site).
-* **Fuzz targets** (`fuzz/`): `parse_event` (webhook bodies), `parse_token`
-  (token responses) and `parse_rest` (the `GET /calls` envelope and the outbound
-  `callSid` body), each asserting that whatever parses re-parses to the same
-  value.
+* **Fuzz targets** (`fuzz/`): `parse_event` (webhook bodies), `parse_socket`
+  (raw WebSocket frames through `FlowSocket`), `parse_token` (token responses)
+  and `parse_rest` (the `GET /calls` envelope and the outbound `callSid` body),
+  each asserting that whatever parses re-parses to the same value.
 * **Every test but one file runs against `MockTransport`** (`tests/common/`).
   `tests/http_transport.rs` is the exception: it binds a `TcpListener` on
   `127.0.0.1` to exercise the `reqwest` adapter itself (verbs, both auth
   schemes, JSON and form bodies, timeouts, truncated bodies). Nothing reaches
   the network.
-* **Coverage**: **98.1 % of lines, 99.5 % of regions, 99.1 % of functions**
-  (`cargo llvm-cov --all-features`). CI fails below 95 %.
+* **Coverage**: **96.6 % of lines, 96.3 % of regions, 97.0 % of functions**
+  (`cargo llvm-cov --all-features`; the figure moves by a few tenths between
+  toolchains, and the WebSocket module is at 100 % of its lines). CI fails below
+  95 %.
 
 ## Versioning
 
