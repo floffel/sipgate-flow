@@ -21,6 +21,14 @@ with the pre-1.0 reading described in the README section *Versioning*.
   executable proof. Runnable doctests on the crate root pin each claim, and a
   property test drives arbitrary unknown fields through a known event to prove
   they survive in `Event::extra` and round-trip unchanged.
+* `Response` no longer loses header data. The `reqwest` adapter turned a
+  non-UTF-8 header value into `""` (present but empty) and collapsed repeated
+  headers into one `BTreeMap` entry, so `header("retry-after")` could report
+  `Some("")` for a value that was dropped and only the last of several
+  `Set-Cookie` headers survived. Headers are now kept as raw byte pairs in wire
+  order: `header` returns `None` for a non-UTF-8 value instead of an empty
+  string, and `header_all` / `header_bytes` / `headers_bytes` expose every
+  value. `Response::new` and `header` stay source-compatible.
 * The flagship crate example no longer teaches failure-to-default. It used
   `event.session_id().unwrap_or_default()`, silently substituting an empty
   session id and returning `200` as if the action were valid. The example now

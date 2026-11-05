@@ -6,7 +6,6 @@
 //! decoding all live above it. Tests implement the trait with a recording mock;
 //! production uses the `http`-gated `ReqwestTransport` adapter.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -296,6 +295,11 @@ impl<'a> Request<'a> {
 ///
 /// Header names are normalised to lower case on construction, so
 /// [`Response::header`] works regardless of the casing the transport saw.
+/// Repeated headers are kept, not collapsed: [`Response::header_all`] returns
+/// every value for a name in wire order, and [`Response::headers`] lists the
+/// pairs. Header values are stored as the raw bytes the peer sent; a value
+/// that is not valid UTF-8 is never rewritten to the empty string, so
+/// [`Response::header`] answers `None` for it instead of `Some("")`.
 ///
 /// ```
 /// use sipgate_flow::transport::Response;
@@ -308,12 +312,12 @@ impl<'a> Request<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     status: u16,
-    headers: BTreeMap<String, String>,
+    headers: Vec<(String, Vec<u8>)>,
     body: Vec<u8>,
 }
 
 impl Response {
-    /// Builds a response, lower-casing header names.
+    /// Builds a response from UTF-8 header pairs, lower-casing header names.
     ///
     /// ```
     /// use sipgate_flow::transport::Response;
@@ -324,6 +328,36 @@ impl Response {
     pub fn new(
         status: u16,
         headers: impl IntoIterator<Item = (String, String)>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self::with_raw_headers(
+            status,
+            headers
+                .into_iter()
+                .map(|(name, value)| (name, value.into_bytes())),
+            body,
+        )
+    }
+
+    /// Builds a response from raw header bytes, lower-casing header names.
+    ///
+    /// Use this when a value may not be valid UTF-8, so the bytes survive and
+    /// [`Response::header`] reports the header as absent rather than empty.
+    /// Repeated names are kept in the order given.
+    ///
+    /// ```
+    /// use sipgate_flow::transport::Response;
+    ///
+    /// let response = Response::with_raw_headers(
+    ///     200,
+    ///     [("X-Trace".to_string(), b"abc".to_vec())],
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(response.header("x-trace"), Some("abc"));
+    /// ```
+    pub fn with_raw_headers(
+        status: u16,
+        headers: impl IntoIterator<Item = (String, Vec<u8>)>,
         body: Vec<u8>,
     ) -> Self {
         Self {
@@ -347,7 +381,11 @@ impl Response {
         self.status
     }
 
-    /// Case-insensitive header lookup.
+    /// Case-insensitive lookup of the first value for `name`.
+    ///
+    /// A header that is present with a non-UTF-8 value counts as absent here,
+    /// so a caller never reads a dropped value back as `Some("")`. Use
+    /// [`Response::header_bytes`] for the raw bytes.
     ///
     /// ```
     /// use sipgate_flow::transport::Response;
@@ -356,12 +394,63 @@ impl Response {
     /// ```
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
         self.headers
-            .get(&name.to_ascii_lowercase())
-            .map(String::as_str)
+            .iter()
+            .find(|(candidate, _)| candidate == &name)
+            .and_then(|(_, value)| std::str::from_utf8(value).ok())
     }
 
-    /// Every header, lower-cased names, in stable order.
+    /// Case-insensitive first value for `name` as raw bytes, valid UTF-8 or not.
+    ///
+    /// ```
+    /// use sipgate_flow::transport::Response;
+    /// let response = Response::with_raw_headers(
+    ///     200,
+    ///     [("X-Bin".to_string(), vec![0xff, 0x00])],
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(response.header_bytes("x-bin"), Some([0xff, 0x00].as_slice()));
+    /// assert_eq!(response.header("x-bin"), None);
+    /// ```
+    #[must_use]
+    pub fn header_bytes(&self, name: &str) -> Option<&[u8]> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate == &name)
+            .map(|(_, value)| value.as_slice())
+    }
+
+    /// Case-insensitive, every UTF-8 value for `name` in wire order.
+    ///
+    /// Values that are not valid UTF-8 are omitted; the raw bytes stay
+    /// available through [`Response::header_bytes`] (first value) and
+    /// [`Response::headers_bytes`] (every pair).
+    ///
+    /// ```
+    /// use sipgate_flow::transport::Response;
+    /// let response = Response::new(
+    ///     200,
+    ///     [("Set-Cookie".into(), "a=1".into()), ("set-cookie".into(), "b=2".into())],
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(response.header_all("Set-Cookie"), ["a=1", "b=2"]);
+    /// ```
+    #[must_use]
+    pub fn header_all(&self, name: &str) -> Vec<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .filter(|(candidate, _)| candidate == &name)
+            .filter_map(|(_, value)| std::str::from_utf8(value).ok())
+            .collect()
+    }
+
+    /// Every UTF-8 header, lower-cased names, in wire order.
+    ///
+    /// Repeated names appear once per value; values that are not valid UTF-8
+    /// are omitted (see [`Response::headers_bytes`]).
     ///
     /// ```
     /// use sipgate_flow::transport::Response;
@@ -372,7 +461,30 @@ impl Response {
     pub fn headers(&self) -> Vec<(&str, &str)> {
         self.headers
             .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .filter_map(|(name, value)| {
+                std::str::from_utf8(value)
+                    .ok()
+                    .map(|value| (name.as_str(), value))
+            })
+            .collect()
+    }
+
+    /// Every header as raw bytes, lower-cased names, in wire order.
+    ///
+    /// ```
+    /// use sipgate_flow::transport::Response;
+    /// let response = Response::with_raw_headers(
+    ///     200,
+    ///     [("X-Bin".to_string(), vec![0xff])],
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(response.headers_bytes()[0].1, [0xff]);
+    /// ```
+    #[must_use]
+    pub fn headers_bytes(&self) -> Vec<(&str, &[u8])> {
+        self.headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_slice()))
             .collect()
     }
 
@@ -594,12 +706,7 @@ impl Transport for ReqwestTransport {
         let headers = response
             .headers()
             .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_string(),
-                    value.to_str().unwrap_or_default().to_string(),
-                )
-            })
+            .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
             .collect::<Vec<_>>();
         let body = response
             .bytes()
@@ -607,7 +714,7 @@ impl Transport for ReqwestTransport {
             .map_err(|error| describe_reqwest_error(error, method))?
             .to_vec();
 
-        Ok(Response::new(status, headers, body))
+        Ok(Response::with_raw_headers(status, headers, body))
     }
 }
 
