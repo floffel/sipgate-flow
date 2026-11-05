@@ -377,10 +377,12 @@ async fn a_server_without_retry_after_falls_back_to_doubling_backoff() {
     transport.push_response(no_content());
 
     client.hangup("c1").await.expect("third attempt wins");
-    assert_eq!(
-        sleeper.delays(),
-        [Duration::from_millis(250), Duration::from_millis(500)]
-    );
+    let delays = sleeper.delays();
+    assert_eq!(delays.len(), 2);
+    assert!(delays[0] >= Duration::from_millis(125));
+    assert!(delays[0] <= Duration::from_millis(250));
+    assert!(delays[1] >= Duration::from_millis(250));
+    assert!(delays[1] <= Duration::from_millis(500));
     assert_eq!(transport.call_count(), 3);
 }
 
@@ -394,11 +396,14 @@ async fn a_persistent_5xx_spends_the_budget_and_surfaces_the_error() {
     let error = client.hangup("c1").await.expect_err("exhausted");
     assert!(matches!(error, Error::Api { status: 500, .. }));
     assert_eq!(transport.call_count(), 3, "max_attempts is 3");
-    assert_eq!(
-        sleeper.delays(),
-        [Duration::from_millis(250), Duration::from_millis(500)]
-    );
-    assert_eq!(sleeper.total(), Duration::from_millis(750));
+    let delays = sleeper.delays();
+    assert_eq!(delays.len(), 2);
+    assert!(delays[0] >= Duration::from_millis(125));
+    assert!(delays[0] <= Duration::from_millis(250));
+    assert!(delays[1] >= Duration::from_millis(250));
+    assert!(delays[1] <= Duration::from_millis(500));
+    assert!(sleeper.total() >= Duration::from_millis(375));
+    assert!(sleeper.total() <= Duration::from_millis(750));
 }
 
 #[tokio::test]
@@ -601,15 +606,14 @@ async fn a_custom_retry_policy_is_honoured() {
     let error = client.hangup("c1").await.expect_err("exhausted");
     assert!(matches!(error, Error::Api { status: 502, .. }));
     assert_eq!(transport.call_count(), 5);
-    assert_eq!(
-        sleeper.delays(),
-        [
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-            Duration::from_secs(4),
-            Duration::from_secs(8)
-        ]
-    );
+    let delays = sleeper.delays();
+    assert_eq!(delays.len(), 4);
+    for (index, delay) in delays.into_iter().enumerate() {
+        let exponent = u32::try_from(index).unwrap_or_default();
+        let high = Duration::from_secs(1_u64 << exponent);
+        assert!(delay >= high / 2);
+        assert!(delay <= high);
+    }
 }
 
 #[test]

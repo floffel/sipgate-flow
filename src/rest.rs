@@ -174,8 +174,8 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
         self
     }
 
-    /// Replaces the retry policy (default: three attempts, 250 ms doubling to
-    /// an 8 s ceiling, `Retry-After` honoured).
+    /// Replaces the retry policy (default: three attempts, 250 ms doubling
+    /// with equal jitter to an 8 s ceiling, `Retry-After` honoured).
     ///
     /// ```
     /// use sipgate_flow::{RestClient, RetryPolicy, StaticToken};

@@ -113,8 +113,8 @@ Flow, 8 kHz for REST announcements) rather than uploaded and silently dropped.
 ## Resilience
 
 * `429` and `5xx` on an **idempotent** request are retried with exponential
-  backoff (default 3 attempts, 250 ms doubling to an 8 s ceiling).
-  `Retry-After` is honoured and clamped to the ceiling.
+  backoff and equal jitter (default 3 attempts, 250 ms doubling to an 8 s
+  ceiling). `Retry-After` is honoured and clamped to the ceiling.
 * A `5xx`, timeout or reset after a `POST` is **not** retried: it is
   `Error::Ambiguous`. See the delivery contract below.
 * The library **never sleeps**. It awaits a caller-supplied `Sleeper`, so pacing
@@ -220,7 +220,7 @@ cargo llvm-cov --all-features --summary-only
   event tests fail if the model drifts from the published wire format.
 * **Property tests** (`tests/properties.rs`): arbitrary JSON and arbitrary bytes
   never panic the event parser; documented events round-trip and render
-  idempotently; base64 and WAV round-trip; backoff stays bounded and monotonic;
+  idempotently; base64 and WAV round-trip; backoff stays bounded and jittered;
   `Retry-After` never panics.
 * **Documentation guards** (`tests/docs.rs`): the gap list in the README and
   `docs/contracts.md` must link a tracked issue, may never be described as an

@@ -155,18 +155,36 @@ proptest! {
     }
 
     #[test]
-    fn backoff_never_shrinks_without_a_hint(
-        first in 1_u32..6,
-        second in 1_u32..6,
+    fn backoff_stays_in_the_equal_jitter_window(
+        attempts in 1_u32..6,
         base_ms in 1_u64..1_000,
     ) {
         let policy = RetryPolicy::new(10)
-            .with_base_delay(std::time::Duration::from_millis(base_ms))
-            .with_max_delay(std::time::Duration::from_secs(60));
-        let (a, b) = (first.min(second), first.max(second));
-        let low = policy.delay(a, None).expect("within budget");
-        let high = policy.delay(b, None).expect("within budget");
-        prop_assert!(low <= high);
+            .with_base_delay(Duration::from_millis(base_ms))
+            .with_max_delay(Duration::from_secs(60));
+        let uncapped = policy
+            .base_delay
+            .saturating_mul(1_u32 << attempts.saturating_sub(1));
+        let expected_high = uncapped.min(policy.max_delay);
+        let expected_low = expected_high / 2;
+        let delay = policy.delay(attempts, None).expect("within budget");
+        prop_assert!(delay >= expected_low);
+        prop_assert!(delay <= expected_high);
+    }
+
+    #[test]
+    fn identical_backoff_inputs_are_not_constant(
+        attempts in 1_u32..4,
+        base_ms in 1_u64..1_000,
+    ) {
+        let policy = RetryPolicy::new(10)
+            .with_base_delay(Duration::from_millis(base_ms))
+            .with_max_delay(Duration::from_secs(60));
+        let mut values = std::collections::HashSet::new();
+        for _ in 0..128 {
+            values.insert(policy.delay(attempts, None).expect("within budget"));
+        }
+        prop_assert!(values.len() > 1, "jitter produced only {values:?}");
     }
 
     #[test]
