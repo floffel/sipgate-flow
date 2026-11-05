@@ -14,6 +14,7 @@ use common::{no_content, response, static_auth, MockTransport, RecordingSleeper}
 use sipgate_flow::rest::Sms;
 use sipgate_flow::{
     base64, classify, Error, Method, RestClient, RetryOutcome, RetryPolicy, StaticToken,
+    MAX_RETRY_AFTER,
 };
 
 type TestClient = RestClient<MockTransport, StaticToken, RecordingSleeper>;
@@ -263,6 +264,55 @@ fn api_errors_derive_retryability_and_ambiguity_from_method_and_status() {
     let terminal = Error::api(Method::Post, 400, "bad request", None);
     assert!(!terminal.is_retryable(), "{terminal:?}");
     assert!(!terminal.is_ambiguous(), "{terminal:?}");
+}
+
+#[test]
+fn retry_after_is_bounded_before_it_reaches_the_caller() {
+    let normal = Error::api(Method::Get, 429, "slow down", Some(Duration::from_secs(30)));
+    assert_eq!(normal.retry_after(), Some(Duration::from_secs(30)));
+
+    let at_ceiling = Error::api(Method::Get, 429, "slow down", Some(MAX_RETRY_AFTER));
+    assert_eq!(at_ceiling.retry_after(), Some(MAX_RETRY_AFTER));
+
+    let absurd = Error::api(Method::Get, 429, "slow down", Some(Duration::MAX));
+    assert_eq!(
+        absurd.retry_after(),
+        Some(MAX_RETRY_AFTER),
+        "an attacker-supplied Retry-After must not reach the caller unbounded"
+    );
+    assert!(absurd.retry_after().expect("bounded hint") <= MAX_RETRY_AFTER);
+}
+
+#[test]
+fn api_status_outside_the_http_range_is_rejected() {
+    for status in [0_u16, 99, 600, 9_999, u16::MAX] {
+        let error = Error::api(Method::Get, status, "garbage", Some(Duration::from_secs(1)));
+        assert!(
+            matches!(
+                error,
+                Error::Validation {
+                    field: "status",
+                    ..
+                }
+            ),
+            "status {status} must be rejected, got {error:?}"
+        );
+        assert!(!error.is_retryable(), "invalid status {status} is terminal");
+        assert!(
+            !error.is_ambiguous(),
+            "invalid status {status} is not ambiguous"
+        );
+        assert_eq!(
+            error.status(),
+            None,
+            "invalid status {status} is not exposed"
+        );
+        assert_eq!(
+            error.retry_after(),
+            None,
+            "invalid status {status} carries no hint"
+        );
+    }
 }
 
 #[tokio::test]
