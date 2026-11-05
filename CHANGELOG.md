@@ -44,6 +44,12 @@ with the pre-1.0 reading described in the README section *Versioning*.
   construction instead of turning every non-empty webhook into a
   `BodyTooLarge` failure, and values above the default cannot make the bounded
   reader's limit unbounded.
+* The `flow` facade (`sipgate_flow::flow::*`) now re-exports the full public
+  surface of its submodules, including the `client` types, the `webhook`
+  constants and helper, and the shared `Error`/`Result` a failure path matches
+  on. `tests/flow_facade.rs` pins the promise at compile time so a type added
+  to a submodule and forgotten here fails the build instead of drifting out of
+  the facade unnoticed.
 
 ## [0.1.0] — not yet published
 
