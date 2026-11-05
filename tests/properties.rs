@@ -6,6 +6,7 @@ use std::time::Duration;
 use proptest::prelude::*;
 use serde_json::{json, Value};
 use sipgate_flow::auth::MAX_TOKEN_LIFETIME;
+use sipgate_flow::push::{Dial, PushEvent, PushEventKind};
 use sipgate_flow::{
     base64, classify, parse_retry_after, retry_after_from, wav, Action, Error, Event, EventPayload,
     Method, OutboundCall, RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
@@ -401,5 +402,26 @@ proptest! {
             });
         let accepted = OutboundCall::new("flow-1", &suffix, "4915112345678").is_ok();
         prop_assert_eq!(accepted, is_documented_shape, "suffix {:?}", suffix);
+    }
+
+    #[test]
+    fn arbitrary_push_form_bytes_never_panic_the_parser(
+        bytes in prop::collection::vec(any::<u8>(), 0..1024),
+    ) {
+        let _ = PushEvent::parse(&bytes);
+    }
+
+    #[test]
+    fn every_documented_push_event_name_round_trips(kind in "[A-Za-z_]{1,16}") {
+        let body = format!("event={kind}");
+        let event = PushEvent::parse(body.as_bytes()).expect("a form body with one parameter");
+        prop_assert_eq!(event.kind(), &PushEventKind::from_wire(&kind));
+        prop_assert_eq!(event.event_name(), kind.as_str());
+    }
+
+    #[test]
+    fn a_dial_renders_exactly_the_validated_e164_digits(digits in "[1-9][0-9]{6,14}") {
+        let dial = Dial::to_number(digits.clone()).expect("the documented E.164 shape");
+        prop_assert_eq!(dial.to_xml(), format!("<Dial><Number>{digits}</Number></Dial>"));
     }
 }

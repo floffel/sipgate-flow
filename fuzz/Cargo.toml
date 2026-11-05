@@ -49,3 +49,10 @@ path = "fuzz_targets/parse_socket.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_push"
+path = "fuzz_targets/parse_push.rs"
+test = false
+doc = false
+bench = false

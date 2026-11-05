@@ -1,12 +1,18 @@
-//! Typed, tolerant client for **sipgate flow** and the **sipgate REST API v2**.
+//! Typed, tolerant client for **sipgate flow**, the classic **sipgate.io Push
+//! API** and the **sipgate REST API v2**.
 //!
-//! sipgate ships two JSON APIs that are easy to confuse, and this crate keeps
-//! them apart:
+//! sipgate ships three webhook-shaped protocols that are easy to confuse, and
+//! this crate keeps them apart:
 //!
 //! * [`flow`] — the real-time voice product. Your webhook **receives** events
 //!   (`session_start`, `user_speak`, `dtmf_received`, …) and **returns** actions
 //!   (`speak`, `audio`, `transfer`, …) in the HTTP response. There is no
 //!   separate "post an action" endpoint. See <https://flow.sipgate.io/api/>.
+//! * [`push`] — the classic sipgate.io Push API: a
+//!   `application/x-www-form-urlencoded` event (`newCall`, `answer`, `hangup`,
+//!   `dtmf`) arrives and the handler answers with an XML `<Response>`
+//!   (`Dial`, `Play`, `Gather`, `Reject`, `Hangup`). See
+//!   <https://en.sipgate.io/push-api/api-references>.
 //! * [`rest`] — the imperative REST API v2 at `https://api.sipgate.com/v2`:
 //!   send SMS and fax, start calls, and control a live call (hangup, DTMF,
 //!   announcement, recording, hold, mute, transfer). See
@@ -150,6 +156,33 @@
 //! # Ok::<(), sipgate_flow::Error>(())
 //! ```
 //!
+//! # Answering a classic Push API call
+//!
+//! The classic Push API is a different protocol with its own module. The
+//! request is form-encoded and the answer is XML; [`push::PushVerifier`]
+//! enforces the content type and the body ceiling, and [`push::PushResponse`]
+//! renders the document:
+//!
+//! ```rust
+//! use sipgate_flow::push::{Dial, PushAction, PushResponse, PushVerifier};
+//!
+//! let event = PushVerifier::new().verify_and_parse(
+//!     Some("application/x-www-form-urlencoded"),
+//!     b"event=newCall&direction=in&from=492111234567&to=4915791234567&callId=123456",
+//! )?;
+//! assert_eq!(event.call_id(), Some("123456"));
+//!
+//! let response = PushResponse::new()
+//!     .with_on_hangup("https://example.com/hangup")?
+//!     .with_verb(PushAction::dial(Dial::to_number("4915799912345")?));
+//! assert_eq!(response.content_type(), "application/xml");
+//! # Ok::<(), sipgate_flow::Error>(())
+//! ```
+//!
+//! The reference documents no credential for this API, so `PushVerifier` does
+//! not pretend to authenticate a caller; the module documentation states what
+//! that means for a deployment.
+//!
 //! # Calling the REST API
 //!
 //! [`PersonalAccessToken`] maps to [`transport::Security::Basic`], whose
@@ -253,6 +286,7 @@ pub mod auth;
 pub mod base64;
 pub mod error;
 pub mod flow;
+pub mod push;
 pub mod rest;
 pub mod retry;
 pub mod transport;

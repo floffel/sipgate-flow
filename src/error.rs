@@ -144,6 +144,21 @@ pub enum Error {
     #[error("empty payload")]
     EmptyBody,
 
+    /// The body was not decodable `application/x-www-form-urlencoded` data: a
+    /// malformed percent escape, bytes that do not form UTF-8, a body without
+    /// the `event` parameter, or a scalar parameter the protocol sends once
+    /// but which arrived twice.
+    ///
+    /// Build this variant with [`Error::form`]. The message names the
+    /// parameter or the decoding step, never the value, so an error can be
+    /// logged as it stands.
+    #[non_exhaustive]
+    #[error("invalid Push API form body: {message}")]
+    Form {
+        /// What is wrong, without echoing the body.
+        message: String,
+    },
+
     /// A value would be rejected by the API, or is unsafe to interpolate into
     /// a URL or a log line. Nothing is sent.
     #[error("invalid {field}: {message}")]
@@ -675,6 +690,28 @@ impl Error {
         Self::BodyRead {
             message: safe_text(&source.to_string()),
             source,
+        }
+    }
+
+    /// Builds a malformed Push API form body error.
+    ///
+    /// The message names the parameter or the decoding step, never the value,
+    /// so the error can be logged as it stands. The `application/x-www-form-urlencoded`
+    /// bodies of the classic Push API are the only input this variant
+    /// describes.
+    ///
+    /// ```
+    /// use sipgate_flow::{push::PushEvent, Error};
+    ///
+    /// let err = PushEvent::parse(b"event=newCall&callId=%zz").unwrap_err();
+    /// assert!(matches!(err, Error::Form { .. }));
+    /// assert!(!err.is_retryable());
+    /// assert!(err.to_string().contains("percent escape"));
+    /// ```
+    #[must_use]
+    pub fn form(message: impl Into<String>) -> Self {
+        Self::Form {
+            message: safe_text(&message.into()),
         }
     }
 
