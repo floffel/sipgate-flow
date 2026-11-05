@@ -420,10 +420,11 @@ client's 429/5xx retry budgets and backoff numbers remain this crate's defaults:
 **No idempotency key exists.** Neither the v2 Swagger, the v3 `OpenAPI`
 document nor the SDKs declare an idempotency key, request id or
 `Idempotency-Key` header for any write endpoint, and no page promises that a
-repeated `POST` collapses into one. That is why a `5xx` or a timeout after a
-`POST` is surfaced as `Error::Ambiguous` instead of being retried: the
-classification is derived from the protocol itself (see the delivery contract
-in the README), not from a provider guarantee that does not exist.
+repeated `POST` collapses into one. That is why a retryable `5xx` or a timeout
+after a `POST` is surfaced as `Error::Ambiguous` instead of being retried; the
+protocol itself marks `408`/`425` as not processed and `501`/`505` as
+permanent. The classification comes from those semantics (see the delivery
+contract in the README), not from a provider guarantee that does not exist.
 
 ### 7.8 Flow fax / voicemail / recording / DTMF actions
 

@@ -178,12 +178,13 @@
 //!
 //! # A request is repeated only when a repeat is harmless
 //!
-//! sipgate documents no idempotency key, so the client retries `429`, `5xx` on
-//! an idempotent method and failures that happened before the write — nothing
-//! else. A `5xx` (or a timeout, or a reset) after a `POST` may have sent the
-//! SMS, started the call or spent the money already, so it surfaces as
-//! [`Error::Ambiguous`] with [`Error::is_retryable`] `false` and the decision
-//! stays with the caller. [`classify`] is the pure function behind that rule:
+//! sipgate documents no idempotency key, so the client retries `408`, `425`,
+//! `429`, retryable `5xx` on an idempotent method, and failures that happened
+//! before the write — nothing else. A retryable `5xx` (or a timeout, or a
+//! reset) after a `POST` may have sent the SMS, started the call or spent the
+//! money already, so it surfaces as [`Error::Ambiguous`] with
+//! [`Error::is_retryable`] `false` and the decision stays with the caller.
+//! [`classify`] is the pure function behind that rule:
 //!
 //! ```
 //! use sipgate_flow::{classify, Method, RetryOutcome};

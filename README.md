@@ -118,10 +118,11 @@ Flow, 8 kHz for REST announcements) rather than uploaded and silently dropped.
 
 ## Resilience
 
-* `429` and `5xx` on an **idempotent** request are retried with exponential
-  backoff and equal jitter (default 3 attempts, 250 ms doubling to an 8 s
-  ceiling). `Retry-After` is honoured and clamped to the ceiling.
-* A `5xx`, timeout or reset after a `POST` is **not** retried: it is
+* `408`, `425`, `429` and retryable `5xx` answers on an **idempotent** request
+  are retried with exponential backoff and equal jitter (default 3 attempts,
+  250 ms doubling to an 8 s ceiling). `Retry-After` is honoured and clamped to
+  the ceiling. Permanent `501` and `505` answers are terminal for every method.
+* A retryable `5xx`, timeout or reset after a `POST` is **not** retried: it is
   `Error::Ambiguous`. See the delivery contract below.
 * The library **never sleeps**. It awaits a caller-supplied `Sleeper`, so pacing
   and therefore cancellation stay with you:
@@ -147,9 +148,9 @@ free. Every request ends up in exactly one of three classes
 
 | Class | When | What the client does |
 | --- | --- | --- |
-| **at-least-once** | `GET`, `PUT`, `DELETE` failing with `5xx`; any method failing with `429`; a failure *before* the write (DNS, TCP, TLS) | retries, bounded by `RetryPolicy` |
-| **ambiguous** | `POST` answered with `5xx`, or a `POST` whose connection died after the request was written (timeout, reset) | returns `Error::Ambiguous` immediately, with `Error::status()` when a status arrived |
-| **terminal** | any other `4xx` | returns `Error::Api` |
+| **at-least-once** | `GET`, `PUT`, `DELETE` failing with retryable `5xx`; any method failing with `408`, `425` or `429`; a failure *before* the write (DNS, TCP, TLS) | retries, bounded by `RetryPolicy` |
+| **ambiguous** | `POST` answered with retryable `5xx`, or a `POST` whose connection died after the request was written (timeout, reset) | returns `Error::Ambiguous` immediately, with `Error::status()` when a status arrived |
+| **terminal** | permanent `501`/`505`, any other `4xx` | returns `Error::Api` |
 
 `Error::is_retryable()` is `false` for an ambiguous outcome on purpose: the SMS,
 fax, recording or call may already exist, and only you know how to check.
