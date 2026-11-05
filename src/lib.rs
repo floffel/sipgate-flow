@@ -152,12 +152,16 @@
 //!
 //! # Calling the REST API
 //!
+//! [`PersonalAccessToken`] maps to [`transport::Security::Basic`], whose
+//! documentation states the PAT wire form:
+//! `Authorization: Basic base64(<token id>:<token>)`.
+//!
 //! ```no_run
 //! # #[cfg(feature = "http")]
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! use sipgate_flow::{rest::Sms, PersonalAccessToken, ReqwestTransport, RestClient};
 //!
-//! // A PAT goes out as `Authorization: Basic base64(id:token)`, as documented.
+//! // A PAT goes out as `Authorization: Basic base64(<token id>:<token>)`, as documented.
 //! let auth = PersonalAccessToken::new(
 //!     std::env::var("SIPGATE_TOKEN_ID")?,
 //!     std::env::var("SIPGATE_TOKEN")?,
