@@ -220,11 +220,11 @@ fn each_decoder_failure_class_maps_to_its_kind_and_source() {
     }
 }
 
-/// `encoded_len` is the engine's own arithmetic, so it cannot drift from
-/// `encode`; an unrepresentable length reports that instead of saturating.
+/// `encoded_len` uses the engine's arithmetic with the padding setting pinned
+/// to `encode`; an unrepresentable length reports that instead of saturating.
 #[test]
 fn encoded_len_matches_encode() {
-    for len in [0, 1, 2, 3, 4, 5, 1_000, 1_000_001] {
+    for len in (0..=8).chain([1_000_001]) {
         assert_eq!(
             base64::encoded_len(len).expect("small length is representable"),
             base64::encode(&vec![0_u8; len]).len(),

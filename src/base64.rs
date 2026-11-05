@@ -50,11 +50,18 @@ pub const MAX_DECODED_BYTES: usize = 21_247_500;
 /// The largest accepted encoded input length, in characters.
 const MAX_ENCODED_LEN: usize = saturating_encoded_len(MAX_DECODED_BYTES);
 
+/// The padding setting used by the `STANDARD` engine.
+///
+/// `base64` 0.23 exposes the engine's padding flag only through the non-const
+/// `Engine::config` method, so the public const function keeps a named literal
+/// and tests pin it to both `STANDARD` and [`encode`].
+const STANDARD_ENCODE_PADDING: bool = true;
+
 /// The number of base64 characters `len` bytes encode to, padding included.
 ///
 /// Returns [`None`] for a length whose encoded size cannot be represented in
-/// [`usize`]. The engine's own capacity arithmetic is the source of truth, so
-/// this cannot drift from [`encode`].
+/// [`usize`]. The engine's own capacity arithmetic is the source of truth; the
+/// padding flag is pinned to [`encode`] by tests.
 ///
 /// ```
 /// assert_eq!(sipgate_flow::base64::encoded_len(0), Some(0));
@@ -65,7 +72,7 @@ const MAX_ENCODED_LEN: usize = saturating_encoded_len(MAX_DECODED_BYTES);
 /// ```
 #[must_use]
 pub const fn encoded_len(len: usize) -> Option<usize> {
-    base64::encoded_len(len, true)
+    base64::encoded_len(len, STANDARD_ENCODE_PADDING)
 }
 
 /// The encoded size for an in-crate ceiling, saturating only where the ceiling
@@ -214,11 +221,17 @@ const fn kind(err: &DecodeError) -> Base64Error {
 mod tests {
     use super::{
         check_encoded_len, decode, encode, encoded_len, is_valid, kind, reason, MAX_ENCODED_LEN,
-        VALIDATION_CHUNK_ENCODED_BYTES,
+        STANDARD, STANDARD_ENCODE_PADDING, VALIDATION_CHUNK_ENCODED_BYTES,
     };
     use crate::{Base64Error, Error};
+    use base64::engine::{Config as _, Engine as _};
     use base64::DecodeError;
     use proptest::prelude::*;
+
+    #[test]
+    fn encoded_len_uses_the_standard_engine_padding_setting() {
+        assert_eq!(STANDARD.config().encode_padding(), STANDARD_ENCODE_PADDING);
+    }
 
     #[test]
     fn every_decoder_error_maps_to_a_distinct_reason() {
