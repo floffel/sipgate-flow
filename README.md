@@ -87,15 +87,15 @@ in any `Debug` output.
 
 * **Every documented Flow event**, typed (`EventPayload`), plus `user_barge_in`
   (published by the official TypeScript SDK only). Unknown event types are
-  carried as `EventPayload::Unknown(serde_json::Value)` and unknown fields are
-  preserved in `Event::extra`.
+  carried as `EventPayload::Unknown(serde_json::value::RawValue)` and unknown
+  fields are preserved in `Event::extra`.
 * **All eight documented Flow actions** (`speak`, `audio`, `mix_audio`,
   `hangup`, `transfer`, `barge_in`, `configure_transcription`, `send_sms`), each
   with typed inputs and validated before the request exists — including all four
   barge-in strategies and every documented TTS provider (`kugelaudio`, `azure`,
   `eleven_labs`, plus `openai` from the SDK schema).
 * **The documented Flow webhook handshake**: shared secret in constant time,
-  JSON-only content type, 1 MiB body ceiling, `200`/`204` response shapes.
+  JSON-only content type, bounded event bodies, `200`/`204` response shapes.
 * **Outbound Flow calls** (`POST /v3/ai-flows/{id}/call`) with a typed
   `OutboundCallReceipt` for the documented `callSid` response.
 * **Sixteen REST v2 operations** covering SMS, fax (send + resend), outbound
@@ -226,7 +226,7 @@ cargo llvm-cov --all-features --summary-only
   `docs/contracts.md` must link a tracked issue, may never be described as an
   exclusion, and both documents have to list the same number of gaps.
 * **Edge cases**: empty and whitespace bodies, non-object JSON, truncated JSON,
-  duplicate known keys, wrong field types, unicode/NUL, 1 MiB payloads,
+  duplicate known keys, wrong field types, unicode/NUL, body-size boundaries,
   over-long phone numbers, path-escape attempts, `NaN` volumes, wrong WAV
   formats, `Retry-After` clamping and budget exhaustion.
 * **Concurrency**: one client hammered from 32 tasks (`Send + Sync` enforced by

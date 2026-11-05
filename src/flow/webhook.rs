@@ -30,9 +30,11 @@ pub const SECRET_HEADER: &str = "x-api-token";
 /// Header name used by the Webhooks page's request example.
 pub const SECRET_HEADER_LEGACY: &str = "x-api-key";
 
-/// Default body limit: 1 MiB. Real events are a few KiB; the ceiling keeps an
-/// unauthenticated caller from forcing a large allocation before the secret is
-/// checked.
+/// Default body limit for [`WebhookVerifier`], in bytes.
+///
+/// Real events are a few KiB. This webhook-level limit bounds work after the
+/// shared secret is checked; [`crate::Event::parse`] has its own smaller
+/// parser-level ceiling for code that calls it directly.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Verifies the shared secret and parses the event.
