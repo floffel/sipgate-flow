@@ -66,6 +66,64 @@ async fn a_404_means_the_flow_does_not_exist() {
 }
 
 #[tokio::test]
+async fn a_201_with_a_valid_body_is_the_only_placed_call_success() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        201,
+        &[("Content-Type", "application/json")],
+        br#"{"callSid":"pbx-c-created"}"#,
+    ));
+
+    let receipt = client(transport)
+        .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
+        .await
+        .expect("201 with a documented body is a placed call");
+
+    assert_eq!(receipt.call_sid(), Some("pbx-c-created"));
+}
+
+#[tokio::test]
+async fn a_201_with_an_unparseable_body_is_not_a_plain_json_error() {
+    let transport = MockTransport::new();
+    transport.push_response(response(201, &[], b"not json"));
+
+    let error = client(transport)
+        .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
+        .await
+        .expect_err("the call may have started, but the body is unusable");
+
+    assert!(matches!(
+        error,
+        Error::CallStartedUnknown { status: 201, ref body } if body == "not json"
+    ));
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert_eq!(error.status(), Some(201));
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
+async fn a_non_201_success_is_a_dedicated_ambiguous_call_started_error() {
+    for response in [response(202, &[], b"accepted"), response(204, &[], b"")] {
+        let transport = MockTransport::new();
+        let status = response.status();
+        transport.push_response(response);
+
+        let error = client(transport)
+            .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
+            .await
+            .expect_err("only 201 is a placed-call success");
+
+        assert!(matches!(
+            error,
+            Error::CallStartedUnknown { status: actual, .. } if actual == status
+        ));
+        assert!(error.is_ambiguous(), "{error:?}");
+        assert_eq!(error.status(), Some(status));
+        assert!(!error.is_retryable());
+    }
+}
+
+#[tokio::test]
 async fn a_400_means_the_flow_has_no_phone_number() {
     let transport = MockTransport::new();
     transport.push_response(response(400, &[], b""));
@@ -112,7 +170,7 @@ async fn a_rate_limited_call_keeps_its_wait_hint_for_the_caller() {
 async fn the_token_is_refreshed_once_on_401() {
     let transport = MockTransport::new();
     transport.push_response(response(401, &[], b"expired"));
-    transport.push_response(response(201, &[], b""));
+    transport.push_response(response(201, &[], br#"{"callSid":"pbx-c-retry"}"#));
     let client = FlowClient::new(transport.clone(), Rotating);
 
     client
@@ -136,10 +194,14 @@ async fn base_url_and_timeout_are_configurable() {
     assert_eq!(client.base_url(), "http://localhost:8080");
     assert_eq!(client.timeout(), Some(Duration::from_secs(2)));
 
-    client
+    let error = client
         .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
         .await
-        .expect("ok");
+        .expect_err("204 means the request was accepted but did not return an identifier");
+    assert!(matches!(
+        error,
+        Error::CallStartedUnknown { status: 204, .. }
+    ));
     let recorded = transport.only_call();
     assert_eq!(
         recorded.url,

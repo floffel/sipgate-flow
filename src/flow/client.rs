@@ -173,8 +173,11 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Api`] for a non-2xx answer, plus transport and auth errors.
-    /// There is no retry: starting a call twice would dial the number twice.
+    /// [`crate::Error::Api`] for a non-2xx answer, plus transport and auth
+    /// errors. A `201` response with an unparseable body, or any other `2xx`
+    /// response, becomes [`crate::Error::CallStartedUnknown`]: the call may
+    /// already be dialling, but no identifier is available. There is no retry:
+    /// starting a call twice would dial the number twice.
     pub async fn call(&self, request: &OutboundCall) -> Result<OutboundCallReceipt> {
         let path = format!("/v3/ai-flows/{}/call", request.ai_flow_id());
         let body = request.to_json();
@@ -188,8 +191,20 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
             Some(&body),
         )
         .await?;
+        if response.status() == 201 {
+            return match OutboundCallReceipt::parse(response.body()) {
+                Ok(receipt) => Ok(receipt),
+                Err(_) => Err(crate::Error::CallStartedUnknown {
+                    status: response.status(),
+                    body: crate::retry::truncate_body(&response.text()),
+                }),
+            };
+        }
         if response.is_success() {
-            return Ok(OutboundCallReceipt::from_json(response.json()?));
+            return Err(crate::Error::CallStartedUnknown {
+                status: response.status(),
+                body: crate::retry::truncate_body(&response.text()),
+            });
         }
         Err(crate::retry::api_error(
             Method::Post,

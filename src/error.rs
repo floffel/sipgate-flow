@@ -126,6 +126,31 @@ pub enum Error {
         retryable: bool,
     },
 
+    /// The outbound call request reached sipgate and the call may already be
+    /// dialling, but no usable call identifier came back. This happens when a
+    /// non-`201` 2xx response is returned, or when the documented `201` body
+    /// cannot be decoded.
+    ///
+    /// The operation is ambiguous: the call may already have been placed.
+    /// Retrying it would dial the recipient a second time, so
+    /// [`Error::is_retryable`] is `false` and [`Error::is_ambiguous`] is `true`.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::CallStartedUnknown { status: 204, body: String::new() };
+    /// assert!(err.is_ambiguous());
+    /// assert!(!err.is_retryable());
+    /// assert_eq!(err.status(), Some(204));
+    /// ```
+    #[error("call started but identifier is unknown (http {status}): {body}")]
+    CallStartedUnknown {
+        /// HTTP status returned for the accepted call request.
+        status: u16,
+        /// Response body, truncated to 512 characters.
+        body: String,
+    },
+
     /// The request reached the point where the server could act on it, but no
     /// usable response came back - a 5xx on a `POST`, or a timeout/reset while
     /// waiting. The operation **may** have happened.
@@ -270,11 +295,15 @@ impl Error {
     /// use sipgate_flow::Error;
     ///
     /// assert!(Error::ambiguous(Some(500), "5xx after a POST").is_ambiguous());
+    /// assert!(Error::CallStartedUnknown { status: 202, body: String::new() }.is_ambiguous());
     /// assert!(!Error::validation("text", "empty").is_ambiguous());
     /// ```
     #[must_use]
     pub fn is_ambiguous(&self) -> bool {
-        matches!(self, Self::Ambiguous { .. })
+        matches!(
+            self,
+            Self::Ambiguous { .. } | Self::CallStartedUnknown { .. }
+        )
     }
 
     /// The wait the server asked for in a `Retry-After` header.
@@ -307,11 +336,14 @@ impl Error {
     /// assert_eq!(Error::Unauthorized.status(), None);
     /// assert_eq!(Error::validation("x", "y").status(), None);
     /// assert_eq!(Error::ambiguous(Some(503), "after POST").status(), Some(503));
+    /// assert_eq!(Error::CallStartedUnknown { status: 202, body: String::new() }.status(), Some(202));
     /// ```
     #[must_use]
     pub fn status(&self) -> Option<u16> {
         match self {
-            Self::Api { status, .. } | Self::AuthRejected { status, .. } => Some(*status),
+            Self::Api { status, .. }
+            | Self::AuthRejected { status, .. }
+            | Self::CallStartedUnknown { status, .. } => Some(*status),
             Self::Ambiguous { status, .. } => *status,
             _ => None,
         }
