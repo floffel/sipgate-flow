@@ -125,6 +125,34 @@ proptest! {
         prop_assert_eq!(once, twice);
     }
 
+    /// The headline tolerance contract: an unknown field on a *known* event is
+    /// neither dropped nor rejected. It lands in `Event::extra` and survives a
+    /// render/parse round-trip.
+    #[test]
+    fn unknown_fields_on_known_events_survive(
+        key in "x_[a-zA-Z_]{0,12}",
+        value in json_value(),
+    ) {
+        let mut object = serde_json::Map::new();
+        object.insert("type".into(), json!("user_speak"));
+        object.insert("text".into(), json!("hi"));
+        object.insert("session".into(), json!({"id": "s1"}));
+        object.insert(key.clone(), value.clone());
+        let bytes = serde_json::to_vec(&Value::Object(object)).expect("serialise");
+
+        let parsed = Event::parse(&bytes).expect("a known type with an extra field parses");
+        prop_assert!(!parsed.is_unknown());
+        prop_assert_eq!(parsed.extra().get(&key), Some(&value));
+        let rendered = parsed.to_json();
+        prop_assert_eq!(rendered.get(key.as_str()), Some(&value));
+
+        let again = Event::parse(
+            &serde_json::to_vec(&parsed.to_json()).expect("render"),
+        )
+        .expect("re-parse");
+        prop_assert_eq!(again.extra().get(&key), Some(&value));
+    }
+
     #[test]
     fn base64_round_trips(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
         let encoded = base64::encode(&bytes);
