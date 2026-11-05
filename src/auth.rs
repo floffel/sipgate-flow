@@ -692,11 +692,33 @@ struct Cached {
     usable_until: Duration,
 }
 
+struct CacheState {
+    cached: Option<Cached>,
+    generation: u64,
+}
+
+impl CacheState {
+    fn new() -> Self {
+        Self {
+            cached: None,
+            generation: 0,
+        }
+    }
+
+    fn next_generation(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+}
+
 /// Fetches and caches a client-credentials token.
 ///
 /// Safe to share across tasks: the cache is a [`Mutex`], there is no global
 /// state, and concurrent misses each fetch their own token (the issuer grants
 /// several; a single-flight lock would serialise every call for no benefit).
+/// Each fetch reserves a cache generation, so an `invalidate` call or a fetch
+/// started later supersedes an in-flight response instead of letting the older
+/// response overwrite newer cache state.
 ///
 /// ```
 /// use sipgate_flow::{ClientCredentials, OAuth2Client, TokenSource};
@@ -723,7 +745,7 @@ pub struct OAuth2Client<T: Transport, C: Clock = SystemClock> {
     credentials: ClientCredentials,
     refresh_margin: Duration,
     timeout: Option<Duration>,
-    cache: Mutex<Option<Cached>>,
+    cache: Mutex<CacheState>,
 }
 
 impl<T: Transport> OAuth2Client<T, SystemClock> {
@@ -749,7 +771,7 @@ impl<T: Transport> OAuth2Client<T, SystemClock> {
             credentials,
             refresh_margin: DEFAULT_REFRESH_MARGIN,
             timeout: None,
-            cache: Mutex::new(None),
+            cache: Mutex::new(CacheState::new()),
         }
     }
 }
@@ -778,7 +800,7 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             credentials: self.credentials,
             refresh_margin: self.refresh_margin,
             timeout: self.timeout,
-            cache: Mutex::new(None),
+            cache: Mutex::new(CacheState::new()),
         }
     }
 
@@ -940,12 +962,21 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
+            .cached
             .as_ref()
             .filter(|cached| now < cached.usable_until)
             .map(|cached| cached.token.clone())
     }
 
-    fn store(&self, token: Token) -> Result<()> {
+    fn begin_fetch(&self) -> u64 {
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.next_generation()
+    }
+
+    fn store(&self, token: Token, generation: u64) -> Result<()> {
         let lifetime = token.expires_in().unwrap_or(DEFAULT_LIFETIME);
         let usable_for = lifetime.saturating_sub(self.refresh_margin);
         // `Duration` add panics on overflow (release builds included), so a clock
@@ -960,10 +991,12 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(Cached {
-            token,
-            usable_until,
-        });
+        if guard.generation == generation {
+            guard.cached = Some(Cached {
+                token,
+                usable_until,
+            });
+        }
         Ok(())
     }
 
@@ -989,8 +1022,9 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
                 return Ok(token);
             }
         }
+        let generation = self.begin_fetch();
         let token = self.fetch().await?;
-        self.store(token.clone())?;
+        self.store(token.clone(), generation)?;
         Ok(token)
     }
 
@@ -999,7 +1033,8 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = None;
+        guard.cached = None;
+        guard.next_generation();
     }
 }
 
