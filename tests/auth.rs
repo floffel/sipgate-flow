@@ -4,7 +4,7 @@
 mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{json_response, response, FakeClock, MockTransport, RecordingSleeper};
@@ -376,6 +376,155 @@ async fn a_rejected_credential_pair_is_a_terminal_error_with_the_status() {
     assert_eq!(error.status(), Some(401));
     assert!(!error.is_retryable());
     assert!(!auth.has_valid_token(), "a rejected token is not cached");
+}
+
+#[tokio::test]
+async fn a_transient_token_endpoint_status_is_retryable() {
+    for status in [429_u16, 500, 502, 503, 504] {
+        let transport = MockTransport::new();
+        transport.push_response(response(
+            status,
+            &[("Retry-After", "7")],
+            br#"{"error":"temporarily_unavailable"}"#,
+        ));
+        let auth = client(transport);
+
+        let error = auth
+            .access_token(false)
+            .await
+            .expect_err("transient token failure");
+        assert!(
+            matches!(error, Error::Api { status: s, retryable: true, .. } if s == status),
+            "expected a retryable Api error for {status}, got {error:?}"
+        );
+        assert!(error.is_retryable(), "status {status} must be retryable");
+        assert_eq!(error.status(), Some(status));
+        assert_eq!(
+            error.retry_after(),
+            Some(Duration::from_secs(7)),
+            "the Retry-After header must be carried for {status}"
+        );
+        assert!(!auth.has_valid_token(), "a failed fetch caches nothing");
+    }
+}
+
+#[tokio::test]
+async fn a_transient_token_endpoint_status_without_retry_after_is_still_retryable() {
+    let transport = MockTransport::new();
+    transport.push_response(response(503, &[], b"upstream down"));
+    let error = client(transport)
+        .access_token(false)
+        .await
+        .expect_err("transient");
+    assert!(error.is_retryable());
+    assert_eq!(error.retry_after(), None);
+}
+
+#[tokio::test]
+async fn a_credential_rejection_is_terminal_for_400_401_and_403() {
+    for status in [400_u16, 401, 403] {
+        let transport = MockTransport::new();
+        transport.push_response(response(
+            status,
+            &[("Retry-After", "7")],
+            br#"{"error":"invalid_client"}"#,
+        ));
+        let auth = client(transport);
+
+        let error = auth
+            .access_token(false)
+            .await
+            .expect_err("terminal token failure");
+        assert!(
+            matches!(error, Error::AuthRejected { status: s, .. } if s == status),
+            "expected AuthRejected for {status}, got {error:?}"
+        );
+        assert!(!error.is_retryable(), "status {status} must be terminal");
+        assert_eq!(error.status(), Some(status));
+        assert_eq!(error.retry_after(), None);
+        assert!(!auth.has_valid_token(), "a rejected token is not cached");
+    }
+}
+
+/// Answers the token endpoint with a scripted status the first time it is
+/// called, then serves a token; API calls succeed with `204`.
+#[derive(Clone)]
+struct FlakyTokenTransport {
+    token_status: u16,
+    token_headers: Vec<(String, String)>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl FlakyTokenTransport {
+    fn new(token_status: u16, token_headers: &[(&str, &str)]) -> Self {
+        Self {
+            token_status,
+            token_headers: token_headers
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn urls(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .expect("not poisoned while no test panics mid-lock")
+            .clone()
+    }
+}
+
+impl Transport for FlakyTokenTransport {
+    async fn execute(&self, request: Request<'_>) -> Result<Response> {
+        std::future::ready(()).await;
+        let url = request.url.to_string();
+        let token_call = {
+            let mut calls = self
+                .calls
+                .lock()
+                .expect("not poisoned while no test panics mid-lock");
+            calls.push(url.clone());
+            calls.iter().filter(|candidate| **candidate == url).count() == 1
+        };
+        if url == DEFAULT_TOKEN_URL {
+            if token_call {
+                return Ok(response(
+                    self.token_status,
+                    &self
+                        .token_headers
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str()))
+                        .collect::<Vec<_>>(),
+                    br#"{"error":"temporarily_unavailable"}"#,
+                ));
+            }
+            return Ok(json_response(&token_value("abc")));
+        }
+        Ok(common::no_content())
+    }
+}
+
+#[tokio::test]
+async fn a_transient_token_failure_is_retried_by_the_rest_client() {
+    let transport = FlakyTokenTransport::new(503, &[("Retry-After", "2")]);
+    let sleeper = RecordingSleeper::new();
+    let auth = OAuth2Client::new(transport.clone(), credentials());
+    let client = RestClient::new(transport.clone(), auth).with_sleeper(sleeper.clone());
+
+    client.calls().await.expect("retried token then succeeded");
+
+    let token_calls = transport
+        .urls()
+        .into_iter()
+        .filter(|url| url == DEFAULT_TOKEN_URL)
+        .count();
+    assert_eq!(token_calls, 2, "one failed fetch, one retried fetch");
+    assert_eq!(
+        sleeper.delays(),
+        vec![Duration::from_secs(2)],
+        "the Retry-After header paces the retry"
+    );
 }
 
 #[tokio::test]
