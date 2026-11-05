@@ -75,7 +75,20 @@ fn empty_text_and_ssml_are_refused() {
 
 #[test]
 fn an_unusable_session_id_never_reaches_an_action() {
-    for bad in ["", " ", "a/b", "a?b", "a#b", "a%b", "a\\b", "a\tb"] {
+    for bad in [
+        "",
+        ".",
+        "..",
+        " ",
+        "a/b",
+        "a?b",
+        "a#b",
+        "a%b",
+        "a\\b",
+        "a\tb",
+        "abc\u{202e}gnp.exe",
+        "abc\u{200b}def",
+    ] {
         assert!(
             Action::hangup(bad).is_err(),
             "session id {bad:?} should be refused"
@@ -84,8 +97,7 @@ fn an_unusable_session_id_never_reaches_an_action() {
     let long = "x".repeat(201);
     assert!(Action::hangup(long).is_err());
     assert!(Action::hangup("x".repeat(200)).is_ok());
-    // Non-ASCII is fine: the id only ever travels inside a JSON string.
-    assert!(Action::hangup("séance-1").is_ok());
+    assert!(Action::hangup("AZaz09._~:@-").is_ok());
 }
 
 #[test]
