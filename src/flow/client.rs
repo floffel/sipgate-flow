@@ -53,6 +53,7 @@ pub struct FlowClient<T: Transport, A: TokenSource = StaticToken> {
     transport: T,
     auth: A,
     base_url: String,
+    allow_http_base_url: bool,
     timeout: Option<Duration>,
 }
 
@@ -76,6 +77,7 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
             transport,
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
+            allow_http_base_url: false,
             timeout: None,
         }
     }
@@ -175,6 +177,7 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
             ));
         }
         self.base_url = url.trim_end_matches('/').to_string();
+        self.allow_http_base_url = allow_http;
         Ok(self)
     }
 
@@ -263,14 +266,17 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
         let response = exchange::authorized(
             &self.transport,
             &self.auth,
-            &self.base_url,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
             exchange::Pacing {
                 timeout: self.timeout,
                 retry: &RetryPolicy::none(),
                 sleeper: &NoSleep,
             },
             Method::Post,
-            &path,
             Some(&body),
         )
         .await?;

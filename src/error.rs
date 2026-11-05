@@ -68,6 +68,19 @@ pub enum Error {
         message: String,
     },
 
+    /// The request URL could not be built safely, so no request was sent and
+    /// no credential was attached.
+    ///
+    /// Build this variant with [`Error::invalid_request`].
+    #[non_exhaustive]
+    #[error("invalid request {field}: {message}")]
+    InvalidRequest {
+        /// Dotted path of the offending field, for example `path`.
+        field: &'static str,
+        /// What is wrong and which URL shape is accepted.
+        message: String,
+    },
+
     /// A client id or client secret was empty. A request with empty
     /// credentials would be rejected by the token endpoint anyway, so
     /// construction fails closed instead.
@@ -227,6 +240,26 @@ impl Error {
         Self::Validation {
             field,
             message: message.into(),
+        }
+    }
+
+    /// Builds a terminal request-construction error.
+    ///
+    /// The request is refused before it can carry an `Authorization` header;
+    /// callers should fix the base URL or path rather than retry it.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::invalid_request("path", "must start with /");
+    /// assert!(matches!(err, Error::InvalidRequest { field: "path", .. }));
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[must_use]
+    pub fn invalid_request(field: &'static str, message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            field,
+            message: safe_text(&message.into()),
         }
     }
 

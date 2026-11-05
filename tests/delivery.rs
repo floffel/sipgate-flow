@@ -204,6 +204,7 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
         Error::BodyTooLarge { size: 2, limit: 1 },
         Error::auth_rejected(401, "denied"),
         Error::TokenResponse("missing access token".to_string()),
+        Error::invalid_request("path", "must start with /"),
         Error::Unauthorized,
         Error::transport_before_write("connect: dns failure"),
         Error::transport("transport failure with unknown write phase"),

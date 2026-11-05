@@ -493,6 +493,7 @@ fn a_status_lookup_answers_none_for_every_error_without_one() {
         Error::MissingSecret,
         Error::SecretMismatch,
         Error::EmptyBody,
+        Error::invalid_request("path", "must start with /"),
         Error::Unauthorized,
         Error::ambiguous(None, "the connection died after the write"),
     ] {
