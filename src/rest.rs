@@ -3653,3 +3653,1863 @@ fn history_starred_query_value(starred: &HistoryStarred) -> String {
         _ => starred.as_str().to_ascii_uppercase(),
     }
 }
+
+// ===================================================================
+// Issue #164 — REST v2 `devices` resource: types.
+// ===================================================================
+
+wire_enum! {
+    /// Device-type filter for `GET /v2/{userId}/devices`.
+    pub enum DeviceFilter {
+        /// Every device kind, the documented `all` token.
+        All => "all",
+        /// App/toolkit devices.
+        App => "app",
+        /// Registered SIP devices.
+        Register => "register",
+        /// Mobile devices.
+        Mobile => "mobile",
+        /// External numbers or endpoints.
+        External => "external",
+    }
+}
+
+wire_enum! {
+    /// Incoming-call display for an external device.
+    pub enum IncomingCallDisplay {
+        /// Show the number that was called.
+        CalledNumber => "CALLED_NUMBER",
+        /// Show the caller's number.
+        CallerNumber => "CALLER_NUMBER",
+    }
+}
+
+wire_enum! {
+    /// SIM state of a mobile device, from `simState`.
+    pub enum SimState {
+        /// The SIM is not active.
+        Inactive => "INACTIVE",
+        /// Activation is in flight.
+        Pending => "PENDING",
+        /// The SIM is active.
+        Active => "ACTIVE",
+    }
+}
+
+/// `PUT /v2/devices/{deviceId}` body: change device settings.
+///
+/// Both fields are optional; a body with neither sends an empty object, which
+/// the endpoint documents as a no-op update.
+///
+/// ```
+/// use sipgate_flow::rest::ChangeDevice;
+///
+/// let change = ChangeDevice::new().with_dnd(true).with_emergency_address_id(42);
+/// assert_eq!(change.to_json(), serde_json::json!({
+///     "dnd": true,
+///     "emergencyAddressId": 42,
+/// }));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChangeDevice {
+    dnd: Option<bool>,
+    emergency_address_id: Option<u32>,
+}
+
+impl ChangeDevice {
+    /// An empty settings change.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChangeDevice;
+    ///
+    /// assert_eq!(ChangeDevice::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the do-not-disturb flag.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChangeDevice;
+    ///
+    /// assert_eq!(ChangeDevice::new().with_dnd(false).to_json()["dnd"], false);
+    /// ```
+    #[must_use]
+    pub fn with_dnd(mut self, dnd: bool) -> Self {
+        self.dnd = Some(dnd);
+        self
+    }
+
+    /// Sets the emergency address id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChangeDevice;
+    ///
+    /// assert_eq!(
+    ///     ChangeDevice::new().with_emergency_address_id(7).to_json()["emergencyAddressId"],
+    ///     7
+    /// );
+    /// ```
+    #[must_use]
+    pub fn with_emergency_address_id(mut self, id: u32) -> Self {
+        self.emergency_address_id = Some(id);
+        self
+    }
+
+    /// Renders the `ChangeDeviceRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChangeDevice;
+    ///
+    /// let body = ChangeDevice::new().with_dnd(true).to_json();
+    /// assert_eq!(body["dnd"], true);
+    /// assert!(body.get("emergencyAddressId").is_none());
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if let Some(dnd) = self.dnd {
+            body.insert("dnd".into(), json!(dnd));
+        }
+        if let Some(id) = self.emergency_address_id {
+            body.insert("emergencyAddressId".into(), json!(id));
+        }
+        Value::Object(body)
+    }
+}
+
+/// `POST /v2/{userId}/devices` body: create a device of the given kind.
+///
+/// The `type` field is required by the schema; a value this crate does not map
+/// is refused at construction instead of being sent verbatim.
+///
+/// ```
+/// use sipgate_flow::rest::{CreateDevice, DeviceKind};
+///
+/// let request = CreateDevice::new(DeviceKind::Register)?.with_alias("Desk phone")?;
+/// assert_eq!(request.to_json(), serde_json::json!({
+///     "type": "register",
+///     "alias": "Desk phone",
+/// }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDevice {
+    kind: DeviceKind,
+    alias: Option<String>,
+}
+
+impl CreateDevice {
+    /// Builds the request. The kind must be one of the three documented device
+    /// types; [`DeviceKind::Other`] has no wire meaning here.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{CreateDevice, DeviceKind};
+    ///
+    /// assert!(CreateDevice::new(DeviceKind::Mobile).is_ok());
+    /// assert!(CreateDevice::new(DeviceKind::Other("future".into())).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the kind is not one of `register`, `mobile` or
+    /// `external`.
+    pub fn new(kind: DeviceKind) -> Result<Self> {
+        if let DeviceKind::Other(raw) = &kind {
+            return Err(Error::validation(
+                "type",
+                format!("`{raw}` is not a documented device type"),
+            ));
+        }
+        Ok(Self { kind, alias: None })
+    }
+
+    /// Sets the human-readable alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{CreateDevice, DeviceKind};
+    ///
+    /// let request = CreateDevice::new(DeviceKind::External)?.with_alias("Front door")?;
+    /// assert_eq!(request.to_json()["alias"], "Front door");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the alias exceeds the shared REST field
+    /// ceiling.
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        validate::non_empty("alias", &alias, validate::MAX_REST_FIELD_BYTES)?;
+        self.alias = Some(alias);
+        Ok(self)
+    }
+
+    /// Renders the `CreateDeviceRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{CreateDevice, DeviceKind};
+    ///
+    /// let body = CreateDevice::new(DeviceKind::Register)?.to_json();
+    /// assert_eq!(body["type"], "register");
+    /// assert!(body.get("alias").is_none());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        body.insert("type".into(), json!(self.kind.as_str()));
+        if let Some(alias) = &self.alias {
+            body.insert("alias".into(), json!(alias));
+        }
+        Value::Object(body)
+    }
+}
+
+/// `POST /v2/{userId}/devices/external` body: create an external device.
+///
+/// ```
+/// use sipgate_flow::rest::CreateExternalDevice;
+///
+/// let request = CreateExternalDevice::new("4915112345678")?.with_alias("Home")?;
+/// assert_eq!(request.to_json(), serde_json::json!({
+///     "number": "+4915112345678",
+///     "alias": "Home",
+/// }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateExternalDevice {
+    number: String,
+    alias: Option<String>,
+}
+
+impl CreateExternalDevice {
+    /// Builds the request from the external number (E.164 digits).
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateExternalDevice;
+    ///
+    /// assert!(CreateExternalDevice::new("4915112345678").is_ok());
+    /// assert!(CreateExternalDevice::new("4915").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a number that is not E.164 digits.
+    pub fn new(number: impl Into<String>) -> Result<Self> {
+        let number = validate::phone("number", &number.into())?;
+        Ok(Self {
+            number: format!("+{number}"),
+            alias: None,
+        })
+    }
+
+    /// Sets the human-readable alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateExternalDevice;
+    ///
+    /// let request = CreateExternalDevice::new("4915112345678")?.with_alias("Home")?;
+    /// assert_eq!(request.to_json()["alias"], "Home");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the alias exceeds the shared REST field
+    /// ceiling.
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        validate::non_empty("alias", &alias, validate::MAX_REST_FIELD_BYTES)?;
+        self.alias = Some(alias);
+        Ok(self)
+    }
+
+    /// Renders the `CreateExternalDeviceRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateExternalDevice;
+    ///
+    /// let body = CreateExternalDevice::new("4915112345678")?.to_json();
+    /// assert_eq!(body["number"], "+4915112345678");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        body.insert("number".into(), json!(self.number));
+        if let Some(alias) = &self.alias {
+            body.insert("alias".into(), json!(alias));
+        }
+        Value::Object(body)
+    }
+}
+
+/// `POST /v2/{userId}/devices/mobile` body: create a mobile device.
+///
+/// ```
+/// use sipgate_flow::rest::CreateMobileDevice;
+///
+/// let request = CreateMobileDevice::new().with_alias("Mobile")?;
+/// assert_eq!(request.to_json(), serde_json::json!({ "alias": "Mobile" }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreateMobileDevice {
+    alias: Option<String>,
+}
+
+impl CreateMobileDevice {
+    /// An empty create request; the service picks a default alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateMobileDevice;
+    ///
+    /// assert_eq!(CreateMobileDevice::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the human-readable alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateMobileDevice;
+    ///
+    /// let request = CreateMobileDevice::new().with_alias("Mobile")?;
+    /// assert_eq!(request.to_json()["alias"], "Mobile");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the alias exceeds the shared REST field
+    /// ceiling.
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        validate::non_empty("alias", &alias, validate::MAX_REST_FIELD_BYTES)?;
+        self.alias = Some(alias);
+        Ok(self)
+    }
+
+    /// Renders the `CreateMobileDeviceRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateMobileDevice;
+    ///
+    /// assert_eq!(CreateMobileDevice::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if let Some(alias) = &self.alias {
+            body.insert("alias".into(), json!(alias));
+        }
+        Value::Object(body)
+    }
+}
+
+/// `POST /v2/{userId}/devices/register` body: create a registered device.
+///
+/// ```
+/// use sipgate_flow::rest::CreateRegisterDevice;
+///
+/// let request = CreateRegisterDevice::new().with_alias("Desk phone")?;
+/// assert_eq!(request.to_json(), serde_json::json!({ "alias": "Desk phone" }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreateRegisterDevice {
+    alias: Option<String>,
+}
+
+impl CreateRegisterDevice {
+    /// An empty create request; the service picks a default alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateRegisterDevice;
+    ///
+    /// assert_eq!(CreateRegisterDevice::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the human-readable alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateRegisterDevice;
+    ///
+    /// let request = CreateRegisterDevice::new().with_alias("Desk phone")?;
+    /// assert_eq!(request.to_json()["alias"], "Desk phone");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the alias exceeds the shared REST field
+    /// ceiling.
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        validate::non_empty("alias", &alias, validate::MAX_REST_FIELD_BYTES)?;
+        self.alias = Some(alias);
+        Ok(self)
+    }
+
+    /// Renders the `CreateRegisterDeviceRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CreateRegisterDevice;
+    ///
+    /// assert_eq!(CreateRegisterDevice::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if let Some(alias) = &self.alias {
+            body.insert("alias".into(), json!(alias));
+        }
+        Value::Object(body)
+    }
+}
+
+/// `PUT /v2/devices/{deviceId}/alias` body: rename a device.
+///
+/// ```
+/// use sipgate_flow::rest::DeviceAlias;
+///
+/// let alias = DeviceAlias::new("Desk phone")?;
+/// assert_eq!(alias.to_json(), serde_json::json!({ "value": "Desk phone" }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAlias {
+    value: String,
+}
+
+impl DeviceAlias {
+    /// Builds the request from the new alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DeviceAlias;
+    ///
+    /// assert!(DeviceAlias::new("Desk phone").is_ok());
+    /// assert!(DeviceAlias::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized alias.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate::non_empty("value", &value, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self { value })
+    }
+
+    /// Renders the `SetDeviceAliasRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DeviceAlias;
+    ///
+    /// assert_eq!(DeviceAlias::new("x")?.to_json()["value"], "x");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "value": self.value })
+    }
+}
+
+/// `GET`/`PUT /v2/devices/{deviceId}/callerid` body and response: the device's
+/// outbound caller ID.
+///
+/// ```
+/// use sipgate_flow::rest::DeviceCallerId;
+///
+/// let caller_id = DeviceCallerId::new("4915112345678")?;
+/// assert_eq!(caller_id.to_json(), serde_json::json!({ "value": "+4915112345678" }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DeviceCallerId {
+    /// The caller ID, `+`-prefixed E.164 digits.
+    #[serde(default)]
+    pub value: String,
+}
+
+impl DeviceCallerId {
+    /// Builds the request from an E.164 number (leading `+` optional).
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DeviceCallerId;
+    ///
+    /// assert_eq!(DeviceCallerId::new("4915112345678")?.value, "+4915112345678");
+    /// assert!(DeviceCallerId::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value that is not E.164 digits.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let digits = validate::phone("value", &value.into())?;
+        Ok(Self {
+            value: format!("+{digits}"),
+        })
+    }
+
+    /// Renders the `CallerIdRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DeviceCallerId;
+    ///
+    /// assert_eq!(DeviceCallerId::new("4915112345678")?.to_json()["value"], "+4915112345678");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "value": self.value })
+    }
+}
+
+/// `PUT /v2/devices/{deviceId}/external/targetnumber` body: the number an
+/// external device dials.
+///
+/// ```
+/// use sipgate_flow::rest::ExternalTargetNumber;
+///
+/// let target = ExternalTargetNumber::new("4915112345678")?;
+/// assert_eq!(target.to_json(), serde_json::json!({ "number": "+4915112345678" }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalTargetNumber {
+    number: String,
+}
+
+impl ExternalTargetNumber {
+    /// Builds the request from an E.164 number (leading `+` optional).
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ExternalTargetNumber;
+    ///
+    /// assert!(ExternalTargetNumber::new("4915112345678").is_ok());
+    /// assert!(ExternalTargetNumber::new("abc").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a number that is not E.164 digits.
+    pub fn new(number: impl Into<String>) -> Result<Self> {
+        let digits = validate::phone("number", &number.into())?;
+        Ok(Self {
+            number: format!("+{digits}"),
+        })
+    }
+
+    /// Renders the `ChangeExternalDeviceTargetNumberRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ExternalTargetNumber;
+    ///
+    /// assert_eq!(ExternalTargetNumber::new("4915112345678")?.to_json()["number"], "+4915112345678");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "number": self.number })
+    }
+}
+
+/// `GET`/`PUT /v2/devices/{deviceId}/localprefix` body and response: the local
+/// dialing prefix.
+///
+/// ```
+/// use sipgate_flow::rest::Localprefix;
+///
+/// let prefix = Localprefix::new(true, "030")?;
+/// assert_eq!(prefix.to_json(), serde_json::json!({
+///     "active": true,
+///     "value": "030",
+/// }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Localprefix {
+    /// Whether the local prefix is active.
+    #[serde(default)]
+    pub active: bool,
+    /// The prefix digits.
+    #[serde(default)]
+    pub value: String,
+}
+
+impl Localprefix {
+    /// Builds the request. The prefix is restricted to ASCII digits; the schema
+    /// example is `030`.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::Localprefix;
+    ///
+    /// assert!(Localprefix::new(false, "0221").is_ok());
+    /// assert!(Localprefix::new(false, "02 21").is_err());
+    /// assert!(Localprefix::new(false, "").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty, oversized or non-digit prefix.
+    pub fn new(active: bool, value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate::non_empty("value", &value, validate::MAX_REST_FIELD_BYTES)?;
+        if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Error::validation("value", "must contain only ASCII digits"));
+        }
+        Ok(Self { active, value })
+    }
+
+    /// Renders the `LocalprefixRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::Localprefix;
+    ///
+    /// assert_eq!(Localprefix::new(true, "030")?.to_json()["active"], true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "active": self.active, "value": self.value })
+    }
+}
+
+/// `GET`/`PUT /v2/devices/{deviceId}/singlerowdisplay` body and response.
+///
+/// ```
+/// use sipgate_flow::rest::SingleRowDisplay;
+///
+/// let setting = SingleRowDisplay::new(true);
+/// assert_eq!(setting.to_json(), serde_json::json!({ "enabled": true }));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SingleRowDisplay {
+    /// Whether the single-row display is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl SingleRowDisplay {
+    /// Builds the setting.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SingleRowDisplay;
+    ///
+    /// assert_eq!(SingleRowDisplay::new(false).to_json()["enabled"], false);
+    /// ```
+    #[must_use]
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
+    /// Renders the `SingleRowDisplayRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::SingleRowDisplay;
+    ///
+    /// assert_eq!(SingleRowDisplay::new(true).to_json(), serde_json::json!({ "enabled": true }));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "enabled": self.enabled })
+    }
+}
+
+/// `GET`/`PUT /v2/devices/{deviceId}/tariffannouncement` body and response.
+///
+/// ```
+/// use sipgate_flow::rest::TariffAnnouncement;
+///
+/// let setting = TariffAnnouncement::new(true);
+/// assert_eq!(setting.to_json(), serde_json::json!({ "enabled": true }));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct TariffAnnouncement {
+    /// Whether the tariff announcement is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl TariffAnnouncement {
+    /// Builds the setting.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::TariffAnnouncement;
+    ///
+    /// assert_eq!(TariffAnnouncement::new(false).to_json()["enabled"], false);
+    /// ```
+    #[must_use]
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
+    /// Renders the `TariffAnnouncementRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::TariffAnnouncement;
+    ///
+    /// assert_eq!(TariffAnnouncement::new(true).to_json(), serde_json::json!({ "enabled": true }));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "enabled": self.enabled })
+    }
+}
+
+/// `POST /v2/devices/{deviceId}/credentials/password` response: the new SIP
+/// password.
+///
+/// ```
+/// use sipgate_flow::rest::DevicePassword;
+///
+/// let rotated: DevicePassword = serde_json::from_value(serde_json::json!({
+///     "password": "s3cr3t"
+/// }))
+/// .unwrap();
+/// assert_eq!(rotated.password, "s3cr3t");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DevicePassword {
+    /// The freshly generated password.
+    #[serde(default)]
+    pub password: String,
+}
+
+/// `GET /v2/{userId}/devices/{deviceId}/contingents` response.
+///
+/// ```
+/// use sipgate_flow::rest::DeviceContingents;
+///
+/// let contingents: DeviceContingents = serde_json::from_value(serde_json::json!({
+///     "contingents": [{"type": "DATA_FAST", "amount": 2500, "used": 1000, "left": 1500, "unit": "KILOBYTE"}],
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(contingents.contingents[0].left, 1500);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DeviceContingents {
+    /// The reported contingents.
+    #[serde(default)]
+    pub contingents: Vec<Contingent>,
+}
+
+/// One contingent of a device.
+///
+/// ```
+/// use sipgate_flow::rest::Contingent;
+///
+/// let contingent: Contingent = serde_json::from_value(serde_json::json!({
+///     "type": "DATA_FAST",
+///     "amount": 2500,
+///     "used": 1000,
+///     "left": 1500,
+///     "unit": "KILOBYTE",
+///     "expires": "2016-02-10T14:19:39Z"
+/// }))
+/// .unwrap();
+/// assert_eq!(contingent.amount, 2500);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Contingent {
+    /// Contingent type, for example `DATA_FAST`.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    /// Total amount granted.
+    #[serde(default)]
+    pub amount: u32,
+    /// Amount already used.
+    #[serde(default)]
+    pub used: u32,
+    /// Amount still available.
+    #[serde(default)]
+    pub left: u32,
+    /// Unit of the amounts, for example `KILOBYTE`.
+    #[serde(default)]
+    pub unit: String,
+    /// Expiry timestamp, as sipgate sends it.
+    #[serde(default)]
+    pub expires: String,
+}
+
+/// `POST /v2/{userId}/devices/external` response.
+///
+/// ```
+/// use sipgate_flow::rest::{ExternalDevice, IncomingCallDisplay};
+///
+/// let device: ExternalDevice = serde_json::from_value(serde_json::json!({
+///     "id": "x0",
+///     "alias": "Home",
+///     "number": "+4915112345678",
+///     "incomingCallDisplayState": "CALLER_NUMBER",
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(device.number, "+4915112345678");
+/// assert_eq!(device.incoming_call_display, Some(IncomingCallDisplay::CallerNumber));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ExternalDevice {
+    /// Unique device identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable alias.
+    #[serde(default)]
+    pub alias: String,
+    /// The external number.
+    #[serde(default)]
+    pub number: String,
+    /// Device kind. A future value is carried as [`DeviceKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<DeviceKind>,
+    /// Whether do-not-disturb is active.
+    #[serde(default)]
+    pub dnd: bool,
+    /// Whether the device is currently online.
+    #[serde(default)]
+    pub online: bool,
+    /// What the device shows for an incoming call.
+    #[serde(
+        default,
+        rename = "incomingCallDisplayState",
+        alias = "incoming_call_display_state"
+    )]
+    pub incoming_call_display: Option<IncomingCallDisplay>,
+    /// Active routing groups.
+    #[serde(default, alias = "active_groups")]
+    pub active_groups: Vec<ActiveRouting>,
+    /// Active phone lines.
+    #[serde(default, alias = "active_phonelines")]
+    pub active_phonelines: Vec<ActiveRouting>,
+}
+
+/// `POST /v2/{userId}/devices/mobile` response.
+///
+/// ```
+/// use sipgate_flow::rest::{MobileDevice, SimState};
+///
+/// let device: MobileDevice = serde_json::from_value(serde_json::json!({
+///     "id": "m0",
+///     "alias": "Mobile",
+///     "esim": true,
+///     "simState": "ACTIVE",
+///     "credentials": {"simId": "1234567", "puk1": "1", "puk2": "2"},
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert!(device.esim);
+/// assert_eq!(device.sim_state, Some(SimState::Active));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)]
+pub struct MobileDevice {
+    /// Unique device identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable alias.
+    #[serde(default)]
+    pub alias: String,
+    /// Device kind. A future value is carried as [`DeviceKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<DeviceKind>,
+    /// Whether do-not-disturb is active.
+    #[serde(default)]
+    pub dnd: bool,
+    /// Whether the device is currently online.
+    #[serde(default)]
+    pub online: bool,
+    /// Whether the device uses an eSIM.
+    #[serde(default)]
+    pub esim: bool,
+    /// SIM state. A future value is carried as [`SimState::Other`].
+    #[serde(default, alias = "sim_state")]
+    pub sim_state: Option<SimState>,
+    /// SIM credentials, when the account returns them.
+    #[serde(default)]
+    pub credentials: Option<MobileCredentials>,
+    /// Active routing groups.
+    #[serde(default, alias = "active_groups")]
+    pub active_groups: Vec<ActiveRouting>,
+    /// Active phone lines.
+    #[serde(default, alias = "active_phonelines")]
+    pub active_phonelines: Vec<ActiveRouting>,
+}
+
+/// SIM credentials of a mobile device.
+///
+/// ```
+/// use sipgate_flow::rest::MobileCredentials;
+///
+/// let credentials: MobileCredentials = serde_json::from_value(serde_json::json!({
+///     "simId": "1234567",
+///     "puk1": "1",
+///     "puk2": "2"
+/// }))
+/// .unwrap();
+/// assert_eq!(credentials.sim_id, "1234567");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct MobileCredentials {
+    /// SIM identifier.
+    #[serde(default, alias = "sim_id")]
+    pub sim_id: String,
+    /// First PUK.
+    #[serde(default)]
+    pub puk1: String,
+    /// Second PUK.
+    #[serde(default)]
+    pub puk2: String,
+}
+
+/// `POST /v2/{userId}/devices/register` response.
+///
+/// ```
+/// use sipgate_flow::rest::RegisterDevice;
+///
+/// let device: RegisterDevice = serde_json::from_value(serde_json::json!({
+///     "id": "e0",
+///     "alias": "Desk phone",
+///     "addressUrl": "/addresses/1234",
+///     "emergencyAddressId": "1234",
+///     "registered": [{"ip": "10.0.0.1", "port": "5060", "userAgent": "phone/1.0"}],
+///     "credentials": {"username": "u", "password": "p", "sipServer": "sip.example", "outboundProxy": "proxy.example", "sipServerWebsocketUrl": "wss://example"},
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(device.registered[0].ip, "10.0.0.1");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct RegisterDevice {
+    /// Unique device identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable alias.
+    #[serde(default)]
+    pub alias: String,
+    /// Device kind. A future value is carried as [`DeviceKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<DeviceKind>,
+    /// Whether do-not-disturb is active.
+    #[serde(default)]
+    pub dnd: bool,
+    /// Whether the device is currently online.
+    #[serde(default)]
+    pub online: bool,
+    /// URL for the device's emergency address.
+    #[serde(default, alias = "address_url")]
+    pub address_url: String,
+    /// Emergency address identifier.
+    #[serde(default, alias = "emergency_address_id")]
+    pub emergency_address_id: String,
+    /// Current registrations of the device.
+    #[serde(default)]
+    pub registered: Vec<RegisteredEndpoint>,
+    /// SIP credentials, when the account returns them.
+    #[serde(default)]
+    pub credentials: Option<RegisterCredentials>,
+    /// Active routing groups.
+    #[serde(default, alias = "active_groups")]
+    pub active_groups: Vec<ActiveRouting>,
+    /// Active phone lines.
+    #[serde(default, alias = "active_phonelines")]
+    pub active_phonelines: Vec<ActiveRouting>,
+}
+
+/// One SIP registration of a registered device.
+///
+/// ```
+/// use sipgate_flow::rest::RegisteredEndpoint;
+///
+/// let endpoint: RegisteredEndpoint = serde_json::from_value(serde_json::json!({
+///     "ip": "10.0.0.1",
+///     "port": "5060",
+///     "userAgent": "phone/1.0"
+/// }))
+/// .unwrap();
+/// assert_eq!(endpoint.port, "5060");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct RegisteredEndpoint {
+    /// Source IP of the registration.
+    #[serde(default)]
+    pub ip: String,
+    /// Source port of the registration.
+    #[serde(default)]
+    pub port: String,
+    /// SIP user agent of the registration.
+    #[serde(default, alias = "user_agent")]
+    pub user_agent: String,
+}
+
+/// SIP credentials of a registered device.
+///
+/// ```
+/// use sipgate_flow::rest::RegisterCredentials;
+///
+/// let credentials: RegisterCredentials = serde_json::from_value(serde_json::json!({
+///     "username": "u",
+///     "password": "p",
+///     "sipServer": "sip.example",
+///     "outboundProxy": "proxy.example",
+///     "sipServerWebsocketUrl": "wss://example"
+/// }))
+/// .unwrap();
+/// assert_eq!(credentials.sip_server, "sip.example");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct RegisterCredentials {
+    /// SIP username.
+    #[serde(default)]
+    pub username: String,
+    /// SIP password.
+    #[serde(default)]
+    pub password: String,
+    /// SIP server host.
+    #[serde(default, alias = "sip_server")]
+    pub sip_server: String,
+    /// Outbound proxy host.
+    #[serde(default, alias = "outbound_proxy")]
+    pub outbound_proxy: String,
+    /// WebSocket URL for the SIP server.
+    #[serde(default, alias = "sip_server_websocket_url")]
+    pub sip_server_websocket_url: String,
+}
+
+/// `POST /v2/{userId}/devices/{deviceId}/sim` body: activate a SIM.
+///
+/// ```
+/// use sipgate_flow::rest::ActivateSim;
+///
+/// let request = ActivateSim::new("1234567")?;
+/// assert_eq!(request.to_json(), serde_json::json!({ "simId": "1234567" }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivateSim {
+    sim_id: String,
+}
+
+impl ActivateSim {
+    /// Builds the request from the SIM id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ActivateSim;
+    ///
+    /// assert!(ActivateSim::new("1234567").is_ok());
+    /// assert!(ActivateSim::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized SIM id.
+    pub fn new(sim_id: impl Into<String>) -> Result<Self> {
+        let sim_id = sim_id.into();
+        validate::non_empty("sim_id", &sim_id, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self { sim_id })
+    }
+
+    /// Renders the `ActivateSimRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ActivateSim;
+    ///
+    /// assert_eq!(ActivateSim::new("1234567")?.to_json()["simId"], "1234567");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "simId": self.sim_id })
+    }
+}
+
+/// `POST /v2/{userId}/devices/{deviceId}/sim/orders` body: order a SIM.
+///
+/// ```
+/// use sipgate_flow::rest::OrderSim;
+///
+/// let request = OrderSim::new("123456")?;
+/// assert_eq!(request.to_json(), serde_json::json!({ "addressId": "123456" }));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderSim {
+    address_id: String,
+}
+
+impl OrderSim {
+    /// Builds the request from the shipping address id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::OrderSim;
+    ///
+    /// assert!(OrderSim::new("123456").is_ok());
+    /// assert!(OrderSim::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized address id.
+    pub fn new(address_id: impl Into<String>) -> Result<Self> {
+        let address_id = address_id.into();
+        validate::non_empty("address_id", &address_id, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self { address_id })
+    }
+
+    /// Renders the `OrderSimRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::OrderSim;
+    ///
+    /// assert_eq!(OrderSim::new("123456")?.to_json()["addressId"], "123456");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "addressId": self.address_id })
+    }
+}
+
+// ===================================================================
+// End issue #164 block (types).
+// ===================================================================
+
+// ===================================================================
+// Issue #164 — REST v2 `devices` resource.
+//
+// One self-contained block so the sibling resources (#165 contacts,
+// #166 history, #167 phonelines) can add their own blocks without
+// colliding here. Every path below is a `/devices...` operation from
+// the v2 Swagger document, tagged `devices`.
+// ===================================================================
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `DELETE /v2/devices/{deviceId}` — remove a device.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_device("e0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 403
+    /// for an app extension, plus transport and auth errors.
+    pub async fn delete_device(&self, device_id: &str) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}");
+        self.send(Method::Delete, &path, None).await
+    }
+
+    /// `PUT /v2/devices/{deviceId}` — change the device's do-not-disturb flag
+    /// and/or emergency address.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::ChangeDevice, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_device("e0", &ChangeDevice::new().with_dnd(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 403
+    /// (DND not allowed) or 404 (unknown device or address), plus transport and
+    /// auth errors.
+    pub async fn update_device(&self, device_id: &str, change: &ChangeDevice) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}");
+        self.send(Method::Put, &path, Some(&change.to_json())).await
+    }
+
+    /// `PUT /v2/devices/{deviceId}/alias` — rename a device.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::DeviceAlias, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_device_alias("e0", &DeviceAlias::new("Desk phone")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id or alias, [`Error::Api`]
+    /// with 400 (device not found) or 403 (invalid user context), plus transport
+    /// and auth errors.
+    pub async fn update_device_alias(&self, device_id: &str, alias: &DeviceAlias) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/alias");
+        self.send(Method::Put, &path, Some(&alias.to_json())).await
+    }
+
+    /// `GET /v2/devices/{deviceId}/callerid` — the device's outbound caller ID.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let caller_id = client.device_caller_id("e0").await?;
+    /// println!("{}", caller_id.value);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 403
+    /// when the feature is not booked, [`Error::Json`] when the body is not the
+    /// documented object, plus transport and auth errors.
+    pub async fn device_caller_id(&self, device_id: &str) -> Result<DeviceCallerId> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/callerid");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/devices/{deviceId}/callerid` — set the device's outbound caller
+    /// ID.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::DeviceCallerId, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_device_caller_id("e0", &DeviceCallerId::new("4915112345678")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id or caller ID
+    /// (`+`-prefixed E.164 digits), [`Error::Api`] with 400 or 403, plus
+    /// transport and auth errors.
+    pub async fn update_device_caller_id(
+        &self,
+        device_id: &str,
+        caller_id: &DeviceCallerId,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/callerid");
+        self.send(Method::Put, &path, Some(&caller_id.to_json()))
+            .await
+    }
+
+    /// `POST /v2/devices/{deviceId}/credentials/password` — rotate the SIP
+    /// password and return the new one.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let rotated = client.reset_device_password("e0").await?;
+    /// println!("new password length: {}", rotated.password.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 400,
+    /// 403 or 500, [`Error::Json`] when the body is not the documented object,
+    /// plus transport and auth errors.
+    pub async fn reset_device_password(&self, device_id: &str) -> Result<DevicePassword> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/credentials/password");
+        let value = self.send(Method::Post, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/devices/{deviceId}/external/incomingcalldisplay` — choose what
+    /// an external device shows for an incoming call.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::IncomingCallDisplay;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_external_incoming_call_display("x0", IncomingCallDisplay::CallerNumber).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 400
+    /// or 500, plus transport and auth errors.
+    pub async fn update_external_incoming_call_display(
+        &self,
+        device_id: &str,
+        display: IncomingCallDisplay,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/external/incomingcalldisplay");
+        let body = json!({ "incomingCallDisplay": display.as_str() });
+        self.send(Method::Put, &path, Some(&body)).await
+    }
+
+    /// `PUT /v2/devices/{deviceId}/external/targetnumber` — set the number an
+    /// external device dials.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::ExternalTargetNumber, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_external_target_number("x0", &ExternalTargetNumber::new("4915112345678")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id or target number,
+    /// [`Error::Api`] with 400, plus transport and auth errors.
+    pub async fn update_external_target_number(
+        &self,
+        device_id: &str,
+        target: &ExternalTargetNumber,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/external/targetnumber");
+        self.send(Method::Put, &path, Some(&target.to_json())).await
+    }
+
+    /// `GET /v2/devices/{deviceId}/localprefix` — the device's local prefix.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let prefix = client.device_localprefix("e0").await?;
+    /// println!("active: {}, value: {}", prefix.active, prefix.value);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Json`] when the
+    /// body is not the documented object, plus transport and auth errors.
+    pub async fn device_localprefix(&self, device_id: &str) -> Result<Localprefix> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/localprefix");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/devices/{deviceId}/localprefix` — set the device's local prefix.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::Localprefix, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_device_localprefix("e0", &Localprefix::new(true, "030")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id or prefix, [`Error::Api`]
+    /// with 400, 403 or 503, plus transport and auth errors.
+    pub async fn update_device_localprefix(
+        &self,
+        device_id: &str,
+        prefix: &Localprefix,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/localprefix");
+        self.send(Method::Put, &path, Some(&prefix.to_json())).await
+    }
+
+    /// `GET /v2/devices/{deviceId}/singlerowdisplay` — the single-row display
+    /// setting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let setting = client.device_single_row_display("e0").await?;
+    /// println!("enabled: {}", setting.enabled);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Json`] when the
+    /// body is not the documented object, plus transport and auth errors.
+    pub async fn device_single_row_display(&self, device_id: &str) -> Result<SingleRowDisplay> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/singlerowdisplay");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/devices/{deviceId}/singlerowdisplay` — enable or disable the
+    /// single-row display.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::SingleRowDisplay, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_device_single_row_display("e0", &SingleRowDisplay::new(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 403,
+    /// plus transport and auth errors.
+    pub async fn update_device_single_row_display(
+        &self,
+        device_id: &str,
+        setting: &SingleRowDisplay,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/singlerowdisplay");
+        self.send(Method::Put, &path, Some(&setting.to_json()))
+            .await
+    }
+
+    /// `GET /v2/devices/{deviceId}/tariffannouncement` — the tariff announcement
+    /// setting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let setting = client.device_tariff_announcement("e0").await?;
+    /// println!("enabled: {}", setting.enabled);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 403,
+    /// [`Error::Json`] when the body is not the documented object, plus
+    /// transport and auth errors.
+    pub async fn device_tariff_announcement(&self, device_id: &str) -> Result<TariffAnnouncement> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/tariffannouncement");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/devices/{deviceId}/tariffannouncement` — enable or disable the
+    /// tariff announcement.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::TariffAnnouncement, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_device_tariff_announcement("e0", &TariffAnnouncement::new(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Api`] with 403,
+    /// 404 or 500, plus transport and auth errors.
+    pub async fn update_device_tariff_announcement(
+        &self,
+        device_id: &str,
+        setting: &TariffAnnouncement,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}/tariffannouncement");
+        self.send(Method::Put, &path, Some(&setting.to_json()))
+            .await
+    }
+
+    /// `GET /v2/{userId}/devices` — every device of a user, optionally filtered
+    /// by type.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::DeviceFilter;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let devices = client.user_devices("w0", &[DeviceFilter::Register, DeviceFilter::Mobile]).await?;
+    /// for device in devices {
+    ///     println!("{}", device.alias);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user id or an unknown filter token,
+    /// [`Error::Json`] when the body is not the documented `{"items": [...]}`
+    /// envelope, plus transport and auth errors.
+    pub async fn user_devices(
+        &self,
+        user_id: &str,
+        filter: &[DeviceFilter],
+    ) -> Result<Vec<Device>> {
+        validate::path_segment("user_id", user_id)?;
+        let mut path = format!("/v2/{user_id}/devices");
+        if let Some(query) = device_type_query(filter)? {
+            path.push('?');
+            path.push_str(&query);
+        }
+        self.get_items(&path).await
+    }
+
+    /// `POST /v2/{userId}/devices` — create a device of the given kind.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::CreateDevice, rest::DeviceKind, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = CreateDevice::new(DeviceKind::Register)?;
+    /// let device = client.create_device("w0", &request).await?;
+    /// println!("{}", device.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user id or alias, [`Error::Api`]
+    /// with 500, [`Error::Json`] when the body is not the documented object,
+    /// plus transport and auth errors.
+    pub async fn create_device(&self, user_id: &str, request: &CreateDevice) -> Result<Device> {
+        validate::path_segment("user_id", user_id)?;
+        let path = format!("/v2/{user_id}/devices");
+        let value = self
+            .send(Method::Post, &path, Some(&request.to_json()))
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `POST /v2/{userId}/devices/external` — create an external device.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::CreateExternalDevice, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = CreateExternalDevice::new("4915112345678")?;
+    /// let device = client.create_external_device("w0", &request).await?;
+    /// println!("{}", device.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user id, alias or number,
+    /// [`Error::Api`] with 400 or 500, [`Error::Json`] when the body is not the
+    /// documented object, plus transport and auth errors.
+    pub async fn create_external_device(
+        &self,
+        user_id: &str,
+        request: &CreateExternalDevice,
+    ) -> Result<ExternalDevice> {
+        validate::path_segment("user_id", user_id)?;
+        let path = format!("/v2/{user_id}/devices/external");
+        let value = self
+            .send(Method::Post, &path, Some(&request.to_json()))
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `POST /v2/{userId}/devices/mobile` — create a mobile device.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::CreateMobileDevice, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let device = client.create_mobile_device("w0", &CreateMobileDevice::new()).await?;
+    /// println!("{}", device.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user id or alias, [`Error::Api`]
+    /// with 500, [`Error::Json`] when the body is not the documented object,
+    /// plus transport and auth errors.
+    pub async fn create_mobile_device(
+        &self,
+        user_id: &str,
+        request: &CreateMobileDevice,
+    ) -> Result<MobileDevice> {
+        validate::path_segment("user_id", user_id)?;
+        let path = format!("/v2/{user_id}/devices/mobile");
+        let value = self
+            .send(Method::Post, &path, Some(&request.to_json()))
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `POST /v2/{userId}/devices/register` — create a registered device.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::CreateRegisterDevice, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let device = client.create_register_device("w0", &CreateRegisterDevice::new()).await?;
+    /// println!("{}", device.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user id or alias, [`Error::Api`]
+    /// with 500, [`Error::Json`] when the body is not the documented object,
+    /// plus transport and auth errors.
+    pub async fn create_register_device(
+        &self,
+        user_id: &str,
+        request: &CreateRegisterDevice,
+    ) -> Result<RegisterDevice> {
+        validate::path_segment("user_id", user_id)?;
+        let path = format!("/v2/{user_id}/devices/register");
+        let value = self
+            .send(Method::Post, &path, Some(&request.to_json()))
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/{userId}/devices/{deviceId}/contingents` — a device's remaining
+    /// SIM contingents.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let contingents = client.device_contingents("w0", "y0").await?;
+    /// for contingent in contingents.contingents {
+    ///     println!("{} left", contingent.left);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or device id, [`Error::Json`]
+    /// when the body is not the documented object, plus transport and auth
+    /// errors.
+    pub async fn device_contingents(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<DeviceContingents> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/{user_id}/devices/{device_id}/contingents");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/{userId}/devices/{deviceId}/sim` — deactivate a device's SIM.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.deactivate_sim("w0", "y0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or device id, [`Error::Api`]
+    /// with 400, plus transport and auth errors.
+    pub async fn deactivate_sim(&self, user_id: &str, device_id: &str) -> Result<Value> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/{user_id}/devices/{device_id}/sim");
+        self.send(Method::Delete, &path, None).await
+    }
+
+    /// `POST /v2/{userId}/devices/{deviceId}/sim` — activate a device's SIM.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::ActivateSim, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.activate_sim("w0", "y0", &ActivateSim::new("1234567")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or device id, or sim id,
+    /// [`Error::Api`] with 400, plus transport and auth errors.
+    pub async fn activate_sim(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        request: &ActivateSim,
+    ) -> Result<Value> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/{user_id}/devices/{device_id}/sim");
+        self.send(Method::Post, &path, Some(&request.to_json()))
+            .await
+    }
+
+    /// `POST /v2/{userId}/devices/{deviceId}/sim/orders` — order a replacement
+    /// SIM to a shipping address.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::OrderSim, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.order_sim("w0", "y0", &OrderSim::new("123456")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or device id, or address id,
+    /// [`Error::Api`] with 400, 403, 404 or 500, plus transport and auth errors.
+    pub async fn order_sim(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        request: &OrderSim,
+    ) -> Result<Value> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/{user_id}/devices/{device_id}/sim/orders");
+        self.send(Method::Post, &path, Some(&request.to_json()))
+            .await
+    }
+}
+
+/// Builds the `type=` query for `GET /v2/{userId}/devices`.
+///
+/// An empty filter means "no query"; an [`DeviceFilter::Other`] token has no
+/// documented wire meaning and is refused instead of being sent verbatim.
+fn device_type_query(filter: &[DeviceFilter]) -> Result<Option<String>> {
+    if filter.is_empty() {
+        return Ok(None);
+    }
+    let mut tokens = Vec::with_capacity(filter.len());
+    for value in filter {
+        match value {
+            DeviceFilter::Other(raw) => {
+                return Err(Error::validation(
+                    "type",
+                    format!("`{raw}` is not a documented device filter"),
+                ));
+            }
+            known => tokens.push(known.as_str()),
+        }
+    }
+    Ok(Some(format!("type={}", tokens.join(","))))
+}
+
+// ===================================================================
+// End issue #164 block (client methods). Types follow at the end.
+// ===================================================================
