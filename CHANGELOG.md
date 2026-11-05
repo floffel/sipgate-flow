@@ -241,6 +241,16 @@ with the pre-1.0 reading described in the README section *Versioning*.
   on. `tests/flow_facade.rs` pins the promise at compile time so a type added
   to a submodule and forgotten here fails the build instead of drifting out of
   the facade unnoticed.
+* The **v3 TTS catalogue and synthesis surface** (#169): `FlowClient` now models
+  `GET /v3/tts` (`tts_settings`) as typed `TtsSetting` entries, `POST /v3/tts`
+  (`synthesize`) with the validated `SynthesizeRequest`, `POST /v3/tts/stream`
+  (`synthesize_stream`) returning validated base64 `SynthesizedAudio`, and
+  `GET /v3/ai-agents/{agentId}/voices` (`agent_voices`) as `AgentVoices` with a
+  `CurrentVoice`. The request builders enforce the documented character and
+  id-shape limits before the wire, decoding stays permissive (unknown fields
+  ignored, unknown enum values carried, both `camelCase` and `snake_case`
+  accepted), and a `5xx` after the non-idempotent synthesis `POST` is reported as
+  `Error::Ambiguous` rather than retried.
 
 ## [0.1.0] — not yet published
 

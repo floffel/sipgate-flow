@@ -1186,3 +1186,1080 @@ impl std::io::Write for JsonByteCounter {
         Ok(())
     }
 }
+
+// ===========================================================================
+// v3 TTS catalogue and synthesis (#169)
+//
+// Delimited so concurrent work on the v3 account-administration surface (#170)
+// can be merged without touching this block. Everything here belongs to the
+// `text-to-speech-controller` resource of the v3 `OpenAPI` document:
+// `GET /v3/tts`, `POST /v3/tts`, `POST /v3/tts/stream` and
+// `GET /v3/ai-agents/{agentId}/voices`. `GET /v3/tts/voices` stays above,
+// modelled by [`TtsVoice`].
+// ===========================================================================
+
+/// Longest `voice` id accepted before it reaches the wire.
+///
+/// The documented voice ids are the `TtsVoice` enum names (`SIPGATE_VOICE`),
+/// the composite catalogue ids (`SIPGATE-0`, `NhQJUmAozCa7BWLiUXy`) and the
+/// agent-voice ids; the cap keeps an unbounded caller string out of the body.
+const MAX_TTS_VOICE_ID_BYTES: usize = 64;
+
+/// Longest announcement `title` accepted, matching the documented `maxLength`.
+const MAX_TTS_TITLE_CHARS: usize = 255;
+
+/// Longest synthesis `content` accepted, matching the documented `maxLength`.
+const MAX_TTS_CONTENT_CHARS: usize = 1024;
+
+/// Rejects a `voice` id outside the documented `[A-Za-z0-9_-]+` shape.
+fn validate_tts_voice(field: &'static str, value: &str) -> Result<()> {
+    validate::non_empty(field, value, MAX_TTS_VOICE_ID_BYTES)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(Error::validation(
+            field,
+            "must contain only ASCII letters, digits, _ or -",
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects an announcement id outside the documented UUID shape.
+///
+/// The identifier goes into a URL query, so the alphabet is narrowed to ASCII
+/// letters, digits and `-`: that admits a UUID while keeping the query free of
+/// characters [`crate::exchange`] refuses.
+fn validate_tts_id(field: &'static str, value: &str) -> Result<()> {
+    validate::non_empty(field, value, MAX_TTS_VOICE_ID_BYTES)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(Error::validation(
+            field,
+            "must contain only ASCII letters, digits or -",
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects empty synthesis text and text past the documented character cap.
+///
+/// `max_chars` is the JSON Schema `maxLength`, which counts Unicode scalar
+/// values, so the check is on `chars()` and not on the UTF-8 byte length.
+fn validate_tts_text(field: &'static str, value: &str, max_chars: usize) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::validation(field, "must not be empty"));
+    }
+    if value.chars().count() > max_chars {
+        return Err(Error::validation(
+            field,
+            format!("must be at most {max_chars} characters"),
+        ));
+    }
+    Ok(())
+}
+
+impl<T: Transport, A: TokenSource> FlowClient<T, A> {
+    /// Lists the account's stored TTS announcements for one queue:
+    /// `GET /v3/tts?acdId=…`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for setting in client.tts_settings("e0e1e2e3-0000-0000-0000-000000000000").await? {
+    ///     println!("{:?}", setting.announcement_id());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `acd_id` is empty or not the
+    /// documented UUID shape, [`crate::Error::Json`] when the success body is
+    /// not JSON or carries an entry that is not a TTS setting, plus the generic
+    /// transport, auth and API errors.
+    pub async fn tts_settings(&self, acd_id: impl Into<String>) -> Result<Vec<TtsSetting>> {
+        let acd_id = acd_id.into();
+        validate_tts_id("acd_id", &acd_id)?;
+        let path = format!("/v3/tts?acdId={acd_id}");
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return TtsSettingList::from_json(response.json()?).into_settings();
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Synthesizes text into a stored announcement: `POST /v3/tts`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, SynthesizeRequest};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = SynthesizeRequest::new("SIPGATE_VOICE", "Ihr Anliegen wird bearbeitet.")?;
+    /// let setting = client.synthesize(&request).await?;
+    /// println!("{:?}", setting.announcement_id());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when the request is built with an id,
+    /// voice or text outside the documented shape, [`crate::Error::Json`] when
+    /// the success body is not a JSON TTS setting, plus the generic transport,
+    /// auth and API errors. A `POST` is not idempotent, so a `5xx` that leaves
+    /// the outcome unknown is reported as [`crate::Error::Ambiguous`] rather
+    /// than retried.
+    pub async fn synthesize(&self, request: &SynthesizeRequest) -> Result<TtsSetting> {
+        let body = request.to_json();
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/tts",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Post,
+            Some(&body),
+        )
+        .await?;
+        if response.is_success() {
+            return TtsSetting::parse(response.body());
+        }
+        Err(crate::retry::api_error(
+            Method::Post,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Synthesizes text and streams the result as base64 audio:
+    /// `POST /v3/tts/stream`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, SynthesizeStreamRequest};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = SynthesizeStreamRequest::new("SIPGATE_VOICE", "Bitte warten.")?;
+    /// let audio = client.synthesize_stream(&request).await?;
+    /// println!("{} bytes", audio.decode()?.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when the request is invalid or the success
+    /// body is not base64, plus the generic transport, auth and API errors. As
+    /// with [`Self::synthesize`], a `5xx` after the `POST` is
+    /// [`crate::Error::Ambiguous`].
+    pub async fn synthesize_stream(
+        &self,
+        request: &SynthesizeStreamRequest,
+    ) -> Result<SynthesizedAudio> {
+        let body = request.to_json();
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/tts/stream",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Post,
+            Some(&body),
+        )
+        .await?;
+        if response.is_success() {
+            return SynthesizedAudio::new(response.text());
+        }
+        Err(crate::retry::api_error(
+            Method::Post,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Reads the voices an agent may select: `GET /v3/ai-agents/{agentId}/voices`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let voices = client.agent_voices("agent-1").await?;
+    /// for voice in voices.items() {
+    ///     println!("{}", voice.id());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `agent_id` is empty or path-unsafe,
+    /// [`crate::Error::Json`] when the success body is not JSON or carries an
+    /// undecodable voice entry, plus the generic transport, auth and API errors.
+    pub async fn agent_voices(&self, agent_id: impl Into<String>) -> Result<AgentVoices> {
+        let agent_id = agent_id.into();
+        validate::path_segment("agent_id", &agent_id)?;
+        let path = format!("/v3/ai-agents/{agent_id}/voices");
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return AgentVoices::from_json(response.json()?);
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+}
+
+/// `POST /v3/tts` body: synthesize `content` with `voice` into an announcement.
+///
+/// The current v3 document carries no separate `language` field on this
+/// request; the language is chosen through the `voice` (see
+/// [`TtsVoice::languages`] and [`AgentVoices`]). The documented `maxLength` is
+/// 1024 characters for `content` and 255 for `title`; both are enforced here
+/// before the request can reach the wire.
+///
+/// ```
+/// use sipgate_flow::SynthesizeRequest;
+///
+/// let request = SynthesizeRequest::new("SIPGATE_VOICE", "Guten Tag.")?
+///     .with_title("Begruessung")?;
+/// assert_eq!(request.to_json()["voice"], "SIPGATE_VOICE");
+/// assert_eq!(request.to_json()["content"], "Guten Tag.");
+/// assert_eq!(request.to_json()["title"], "Begruessung");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SynthesizeRequest {
+    voice: String,
+    content: String,
+    title: Option<String>,
+    acd_id: Option<String>,
+    kind: Option<String>,
+}
+
+impl std::fmt::Debug for SynthesizeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SynthesizeRequest")
+            .field("voice", &self.voice)
+            .field("content", &self.content)
+            .field("title", &self.title)
+            .field("acd_id", &self.acd_id)
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+impl SynthesizeRequest {
+    /// Builds the request from the two required fields.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    ///
+    /// assert!(SynthesizeRequest::new("SIPGATE_VOICE", "hi").is_ok());
+    /// assert!(SynthesizeRequest::new("", "hi").is_err());
+    /// assert!(SynthesizeRequest::new("SIPGATE_VOICE", "").is_err());
+    /// assert!(SynthesizeRequest::new("has space", "hi").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `voice` is empty or outside `[A-Za-z0-9_-]+`,
+    /// or when `content` is empty or longer than 1024 characters.
+    pub fn new(voice: impl Into<String>, content: impl Into<String>) -> Result<Self> {
+        let voice = voice.into();
+        validate_tts_voice("voice", &voice)?;
+        let content = content.into();
+        validate_tts_text("content", &content, MAX_TTS_CONTENT_CHARS)?;
+        Ok(Self {
+            voice,
+            content,
+            title: None,
+            acd_id: None,
+            kind: None,
+        })
+    }
+
+    /// Sets the announcement title (`maxLength` 255 characters).
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    ///
+    /// let request = SynthesizeRequest::new("SIPGATE_VOICE", "hi")?.with_title("T")?;
+    /// assert_eq!(request.title(), Some("T"));
+    /// assert!(SynthesizeRequest::new("SIPGATE_VOICE", "hi")?.with_title("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the title is empty or longer than 255
+    /// characters.
+    pub fn with_title(mut self, title: impl Into<String>) -> Result<Self> {
+        let title = title.into();
+        validate_tts_text("title", &title, MAX_TTS_TITLE_CHARS)?;
+        self.title = Some(title);
+        Ok(self)
+    }
+
+    /// Sets the queue the announcement belongs to (the `acdId` field).
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    ///
+    /// let request = SynthesizeRequest::new("SIPGATE_VOICE", "hi")?
+    ///     .with_acd_id("e0e1e2e3-0000-0000-0000-000000000000")?;
+    /// assert_eq!(request.to_json()["acdId"], "e0e1e2e3-0000-0000-0000-000000000000");
+    /// assert!(SynthesizeRequest::new("SIPGATE_VOICE", "hi")?.with_acd_id("a b").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the id is empty or not ASCII letters, digits
+    /// and `-`.
+    pub fn with_acd_id(mut self, acd_id: impl Into<String>) -> Result<Self> {
+        let acd_id = acd_id.into();
+        validate_tts_id("acd_id", &acd_id)?;
+        self.acd_id = Some(acd_id);
+        Ok(self)
+    }
+
+    /// Sets the announcement `type` token documented by the API.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    ///
+    /// let request = SynthesizeRequest::new("SIPGATE_VOICE", "hi")?.with_kind("ANNOUNCEMENT")?;
+    /// assert_eq!(request.to_json()["type"], "ANNOUNCEMENT");
+    /// assert!(SynthesizeRequest::new("SIPGATE_VOICE", "hi")?.with_kind("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the token is empty or longer than 64 bytes.
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Result<Self> {
+        let kind = kind.into();
+        validate::non_empty("type", &kind, MAX_TTS_VOICE_ID_BYTES)?;
+        self.kind = Some(kind);
+        Ok(self)
+    }
+
+    /// The selected voice id.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    /// assert_eq!(SynthesizeRequest::new("RACHEL", "hi")?.voice(), "RACHEL");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn voice(&self) -> &str {
+        &self.voice
+    }
+
+    /// The text to synthesize.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    /// assert_eq!(SynthesizeRequest::new("RACHEL", "hi")?.content(), "hi");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// The announcement title, when one was set.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    /// assert_eq!(SynthesizeRequest::new("RACHEL", "hi")?.title(), None);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// The queue id, when one was set.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    /// assert_eq!(SynthesizeRequest::new("RACHEL", "hi")?.acd_id(), None);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn acd_id(&self) -> Option<&str> {
+        self.acd_id.as_deref()
+    }
+
+    /// The announcement `type` token, when one was set.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    /// assert_eq!(SynthesizeRequest::new("RACHEL", "hi")?.kind(), None);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
+    }
+
+    /// Renders the request body under the documented `camelCase` names.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeRequest;
+    ///
+    /// let request = SynthesizeRequest::new("RACHEL", "hi")?;
+    /// assert_eq!(
+    ///     request.to_json(),
+    ///     serde_json::json!({"voice": "RACHEL", "content": "hi"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut object = Map::new();
+        object.insert("voice".into(), json!(self.voice));
+        object.insert("content".into(), json!(self.content));
+        if let Some(title) = &self.title {
+            object.insert("title".into(), json!(title));
+        }
+        if let Some(acd_id) = &self.acd_id {
+            object.insert("acdId".into(), json!(acd_id));
+        }
+        if let Some(kind) = &self.kind {
+            object.insert("type".into(), json!(kind));
+        }
+        Value::Object(object)
+    }
+}
+
+/// `POST /v3/tts/stream` body: synthesize `content` with `voice` as audio.
+///
+/// The endpoint answers with a base64-encoded audio body rather than a stored
+/// announcement; see [`SynthesizedAudio`]. The documented `maxLength` for
+/// `content` is 1024 characters.
+///
+/// ```
+/// use sipgate_flow::SynthesizeStreamRequest;
+///
+/// let request = SynthesizeStreamRequest::new("SIPGATE_VOICE", "Guten Tag.")?;
+/// assert_eq!(
+///     request.to_json(),
+///     serde_json::json!({"voice": "SIPGATE_VOICE", "content": "Guten Tag."})
+/// );
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SynthesizeStreamRequest {
+    voice: String,
+    content: String,
+}
+
+impl std::fmt::Debug for SynthesizeStreamRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SynthesizeStreamRequest")
+            .field("voice", &self.voice)
+            .field("content", &self.content)
+            .finish()
+    }
+}
+
+impl SynthesizeStreamRequest {
+    /// Builds the streaming request from its two required fields.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeStreamRequest;
+    ///
+    /// assert!(SynthesizeStreamRequest::new("SIPGATE_VOICE", "hi").is_ok());
+    /// assert!(SynthesizeStreamRequest::new("", "hi").is_err());
+    /// assert!(SynthesizeStreamRequest::new("SIPGATE_VOICE", "").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `voice` is empty or outside `[A-Za-z0-9_-]+`,
+    /// or when `content` is empty or longer than 1024 characters.
+    pub fn new(voice: impl Into<String>, content: impl Into<String>) -> Result<Self> {
+        let voice = voice.into();
+        validate_tts_voice("voice", &voice)?;
+        let content = content.into();
+        validate_tts_text("content", &content, MAX_TTS_CONTENT_CHARS)?;
+        Ok(Self { voice, content })
+    }
+
+    /// The selected voice id.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeStreamRequest;
+    /// assert_eq!(SynthesizeStreamRequest::new("RACHEL", "hi")?.voice(), "RACHEL");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn voice(&self) -> &str {
+        &self.voice
+    }
+
+    /// The text to synthesize.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeStreamRequest;
+    /// assert_eq!(SynthesizeStreamRequest::new("RACHEL", "hi")?.content(), "hi");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Renders the request body under the documented `camelCase` names.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeStreamRequest;
+    ///
+    /// let request = SynthesizeStreamRequest::new("RACHEL", "hi")?;
+    /// assert_eq!(
+    ///     request.to_json(),
+    ///     serde_json::json!({"voice": "RACHEL", "content": "hi"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "voice": self.voice, "content": self.content })
+    }
+}
+
+/// The `200 OK` body of `POST /v3/tts/stream`: base64-encoded audio.
+///
+/// The v3 document types this response as a bare string, so the payload is
+/// validated as canonical base64 on construction instead of being guessed. Use
+/// [`Self::decode`] to obtain the audio bytes.
+///
+/// ```
+/// use sipgate_flow::SynthesizedAudio;
+///
+/// let audio = SynthesizedAudio::new("aGk=")?;
+/// assert_eq!(audio.decode()?, b"hi");
+/// assert!(SynthesizedAudio::new("not base64!").is_err());
+/// assert!(SynthesizedAudio::new("").is_err());
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SynthesizedAudio {
+    base64_data: String,
+}
+
+impl std::fmt::Debug for SynthesizedAudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SynthesizedAudio")
+            .field("base64_bytes", &self.base64_data.len())
+            .finish()
+    }
+}
+
+impl SynthesizedAudio {
+    /// Validates and wraps the base64 audio body.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizedAudio;
+    ///
+    /// assert!(SynthesizedAudio::new("aGk=").is_ok());
+    /// assert!(SynthesizedAudio::new("aGk").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the body is empty or not canonical base64.
+    pub fn new(base64_data: impl Into<String>) -> Result<Self> {
+        let base64_data = base64_data.into();
+        if base64_data.is_empty() {
+            return Err(Error::validation(
+                "tts_audio",
+                "must carry a non-empty base64 body",
+            ));
+        }
+        if !crate::base64::is_valid(&base64_data) {
+            return Err(Error::validation(
+                "tts_audio",
+                "must be canonical base64 audio",
+            ));
+        }
+        Ok(Self { base64_data })
+    }
+
+    /// The base64 payload exactly as received.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizedAudio;
+    /// assert_eq!(SynthesizedAudio::new("aGk=")?.base64_data(), "aGk=");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn base64_data(&self) -> &str {
+        &self.base64_data
+    }
+
+    /// Decodes the audio bytes.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizedAudio;
+    /// assert_eq!(SynthesizedAudio::new("aGk=")?.decode()?, b"hi");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Base64`] is impossible after [`Self::new`] validated the body;
+    /// the signature still returns a [`Result`] so callers do not panic.
+    pub fn decode(&self) -> Result<Vec<u8>> {
+        crate::base64::decode(&self.base64_data)
+    }
+}
+
+/// One TTS announcement as modelled by `POST /v3/tts` and `GET /v3/tts`.
+///
+/// Decoding is permissive: unknown fields stay in [`Self::raw`], and both
+/// `announcementId` (documented) and `announcement_id` (tolerated) are read.
+///
+/// ```
+/// use sipgate_flow::TtsSetting;
+///
+/// let setting = TtsSetting::from_json(serde_json::json!({
+///     "announcementId": "a-1",
+///     "alias": "greeting",
+///     "content": "Guten Tag.",
+///     "voice": "SIPGATE_VOICE",
+///     "vendor": "future",
+/// }));
+/// assert_eq!(setting.announcement_id(), Some("a-1"));
+/// assert_eq!(setting.voice(), Some("SIPGATE_VOICE"));
+/// assert_eq!(setting.raw()["vendor"], "future");
+/// ```
+#[derive(Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct TtsSetting {
+    alias: Option<String>,
+    announcement_id: Option<String>,
+    content: Option<String>,
+    voice: Option<String>,
+    raw: Value,
+}
+
+impl std::fmt::Debug for TtsSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TtsSetting")
+            .field("alias", &self.alias)
+            .field("announcement_id", &self.announcement_id)
+            .field("content", &self.content)
+            .field("voice", &self.voice)
+            .field("raw", &RedactedRaw(&self.raw))
+            .finish()
+    }
+}
+
+impl TtsSetting {
+    /// Decodes the JSON body bytes.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsSetting;
+    ///
+    /// assert!(TtsSetting::parse(br#"{"announcementId":"a-1"}"#).is_ok());
+    /// assert!(TtsSetting::parse(b"not json").is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not JSON at all. A body that parses but
+    /// omits fields is tolerated; every accessor then stays `None`.
+    pub fn parse(body: &[u8]) -> Result<Self> {
+        Ok(Self::from_json(
+            serde_json::from_slice(body).map_err(Error::json_parse)?,
+        ))
+    }
+
+    /// Reads an already-decoded body.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsSetting;
+    ///
+    /// let setting = TtsSetting::from_json(serde_json::json!({"announcement_id": "a-2"}));
+    /// assert_eq!(setting.announcement_id(), Some("a-2"));
+    /// ```
+    #[must_use]
+    pub fn from_json(value: Value) -> Self {
+        let empty = Map::new();
+        let alias =
+            string_field(value.as_object().unwrap_or(&empty), &["alias"]).map(str::to_string);
+        let announcement_id = value
+            .get("announcementId")
+            .or_else(|| value.get("announcement_id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let content = value
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(str::to_string);
+        let voice = value
+            .get("voice")
+            .and_then(Value::as_str)
+            .filter(|voice| !voice.is_empty())
+            .map(str::to_string);
+        Self {
+            alias,
+            announcement_id,
+            content,
+            voice,
+            raw: value,
+        }
+    }
+
+    /// The announcement alias, when the body carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsSetting;
+    /// assert_eq!(TtsSetting::from_json(serde_json::json!({"alias":"greeting"})).alias(), Some("greeting"));
+    /// ```
+    #[must_use]
+    pub fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+
+    /// The announcement id, when the body carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsSetting;
+    /// assert_eq!(TtsSetting::from_json(serde_json::json!({})).announcement_id(), None);
+    /// ```
+    #[must_use]
+    pub fn announcement_id(&self) -> Option<&str> {
+        self.announcement_id.as_deref()
+    }
+
+    /// The announcement content, when the body carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsSetting;
+    /// assert_eq!(TtsSetting::from_json(serde_json::json!({"content":"hi"})).content(), Some("hi"));
+    /// ```
+    #[must_use]
+    pub fn content(&self) -> Option<&str> {
+        self.content.as_deref()
+    }
+
+    /// The voice id, when the body carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsSetting;
+    /// assert_eq!(TtsSetting::from_json(serde_json::json!({})).voice(), None);
+    /// ```
+    #[must_use]
+    pub fn voice(&self) -> Option<&str> {
+        self.voice.as_deref()
+    }
+
+    /// The body exactly as received, for fields this crate does not model.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsSetting;
+    /// assert_eq!(TtsSetting::from_json(serde_json::json!({"vendor":"x"})).raw()["vendor"], "x");
+    /// ```
+    #[must_use]
+    pub fn raw(&self) -> &Value {
+        &self.raw
+    }
+}
+
+/// Reads the `{"items": [...]}` envelope of `GET /v3/tts`.
+#[derive(Deserialize)]
+struct TtsSettingList {
+    #[serde(default)]
+    items: Vec<Value>,
+}
+
+impl TtsSettingList {
+    fn from_json(value: Value) -> Self {
+        serde_json::from_value(value).unwrap_or(Self { items: Vec::new() })
+    }
+
+    fn into_settings(self) -> Result<Vec<TtsSetting>> {
+        let mut settings = Vec::with_capacity(self.items.len());
+        for item in self.items {
+            if !item.is_object() {
+                return Err(Error::validation(
+                    "tts_settings",
+                    "each entry must be a TTS setting object",
+                ));
+            }
+            settings.push(TtsSetting::from_json(item));
+        }
+        Ok(settings)
+    }
+}
+
+/// The `200 OK` body of `GET /v3/ai-agents/{agentId}/voices`.
+///
+/// `items` are the catalogue voices the agent may select and are reused as
+/// [`TtsVoice`]; `currentVoice` is the voice the agent is configured with, even
+/// when it is no longer selectable. Unknown fields stay in [`Self::raw`].
+///
+/// ```
+/// use sipgate_flow::{AgentVoices, CurrentVoice};
+///
+/// let body = serde_json::json!({
+///     "items": [{"voiceId": "SIPGATE-0", "name": "Kai", "languages": ["de"], "recommended": true, "beta": false, "previewUrl": "https://example.com/a.mp3"}],
+///     "currentVoice": {"voiceId": "SIPGATE-0", "name": "Kai"},
+/// });
+/// let voices = AgentVoices::from_json(body)?;
+/// assert_eq!(voices.items()[0].id(), "SIPGATE-0");
+/// assert_eq!(voices.current_voice().map(CurrentVoice::voice_id), Some("SIPGATE-0"));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct AgentVoices {
+    items: Vec<TtsVoice>,
+    current_voice: Option<CurrentVoice>,
+    raw: Value,
+}
+
+impl std::fmt::Debug for AgentVoices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentVoices")
+            .field("items", &self.items)
+            .field("current_voice", &self.current_voice)
+            .field("raw", &RedactedRaw(&self.raw))
+            .finish()
+    }
+}
+
+impl AgentVoices {
+    /// Reads an already-decoded body.
+    ///
+    /// ```
+    /// use sipgate_flow::AgentVoices;
+    ///
+    /// let voices = AgentVoices::from_json(serde_json::json!({"items": [], "currentVoice": serde_json::Value::Null}))?;
+    /// assert!(voices.items().is_empty());
+    /// assert_eq!(voices.current_voice(), None);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when an `items` entry is not a voice entry or when
+    /// `currentVoice` is present but carries no voice id.
+    pub fn from_json(value: Value) -> Result<Self> {
+        let mut items = Vec::new();
+        if let Some(Value::Array(entries)) = value.get("items") {
+            items.reserve(entries.len());
+            for entry in entries {
+                items.push(TtsVoice::from_json(entry.clone())?);
+            }
+        }
+        let current_voice = match value
+            .get("currentVoice")
+            .or_else(|| value.get("current_voice"))
+        {
+            None | Some(Value::Null) => None,
+            Some(entry) => Some(CurrentVoice::from_json(entry)?),
+        };
+        Ok(Self {
+            items,
+            current_voice,
+            raw: value,
+        })
+    }
+
+    /// The catalogue voices the agent may select.
+    ///
+    /// ```
+    /// use sipgate_flow::AgentVoices;
+    /// assert!(AgentVoices::from_json(serde_json::json!({"items":[]}))?.items().is_empty());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn items(&self) -> &[TtsVoice] {
+        &self.items
+    }
+
+    /// The voice the agent is configured with, when the API reported one.
+    ///
+    /// ```
+    /// use sipgate_flow::AgentVoices;
+    /// assert_eq!(AgentVoices::from_json(serde_json::json!({"items":[]}))?.current_voice(), None);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn current_voice(&self) -> Option<&CurrentVoice> {
+        self.current_voice.as_ref()
+    }
+
+    /// The body exactly as received, for fields this crate does not model.
+    ///
+    /// ```
+    /// use sipgate_flow::AgentVoices;
+    /// assert_eq!(AgentVoices::from_json(serde_json::json!({"items":[], "x": 1}))?.raw()["x"], 1);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn raw(&self) -> &Value {
+        &self.raw
+    }
+}
+
+/// The `currentVoice` entry of [`AgentVoices`].
+///
+/// ```
+/// use sipgate_flow::CurrentVoice;
+///
+/// let voice = CurrentVoice::from_json(&serde_json::json!({"voiceId": "SIPGATE-0", "name": "Kai"}))?;
+/// assert_eq!(voice.voice_id(), "SIPGATE-0");
+/// assert_eq!(voice.name(), Some("Kai"));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CurrentVoice {
+    voice_id: String,
+    name: Option<String>,
+}
+
+impl std::fmt::Debug for CurrentVoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CurrentVoice")
+            .field("voice_id", &self.voice_id)
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+impl CurrentVoice {
+    /// Reads an already-decoded body.
+    ///
+    /// ```
+    /// use sipgate_flow::CurrentVoice;
+    ///
+    /// assert!(CurrentVoice::from_json(&serde_json::json!({"voiceId": "v1"})).is_ok());
+    /// assert!(CurrentVoice::from_json(&serde_json::json!({})).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the entry carries no non-empty `voiceId`.
+    pub fn from_json(value: &Value) -> Result<Self> {
+        let empty = Map::new();
+        let object = value.as_object().unwrap_or(&empty);
+        let voice_id = string_field(object, &["voiceId", "voice_id"])
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Error::validation("current_voice", "must carry a non-empty voiceId"))?
+            .to_string();
+        let name = string_field(object, &["name"])
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+        Ok(Self { voice_id, name })
+    }
+
+    /// The configured voice id.
+    ///
+    /// ```
+    /// use sipgate_flow::CurrentVoice;
+    /// assert_eq!(CurrentVoice::from_json(&serde_json::json!({"voiceId":"v1"}))?.voice_id(), "v1");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn voice_id(&self) -> &str {
+        &self.voice_id
+    }
+
+    /// The display name, when the entry carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::CurrentVoice;
+    /// assert_eq!(CurrentVoice::from_json(&serde_json::json!({"voiceId":"v1"}))?.name(), None);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}

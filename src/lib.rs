@@ -368,7 +368,8 @@ pub use flow::action::{
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
 };
 pub use flow::client::{
-    AiWebhookSettings, FlowClient, OutboundCall, OutboundCallReceipt, TtsVoice,
+    AgentVoices, AiWebhookSettings, CurrentVoice, FlowClient, OutboundCall, OutboundCallReceipt,
+    SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio, TtsSetting, TtsVoice,
 };
 pub use flow::event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,

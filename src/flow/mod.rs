@@ -33,7 +33,9 @@ pub use action::{
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
 };
 pub use client::{
-    AiWebhookSettings, FlowClient, OutboundCall, OutboundCallReceipt, TtsVoice, DEFAULT_BASE_URL,
+    AgentVoices, AiWebhookSettings, CurrentVoice, FlowClient, OutboundCall, OutboundCallReceipt,
+    SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio, TtsSetting, TtsVoice,
+    DEFAULT_BASE_URL,
 };
 pub use event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
