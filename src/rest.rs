@@ -155,6 +155,12 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
 
     /// Sets a per-request timeout. `None` leaves the transport's default.
     ///
+    /// The value is a total budget for the two attempts of a logical request:
+    /// a 401 refresh derives each leg's timeout from the same deadline instead
+    /// of granting a fresh one, and the pause before the resend counts against
+    /// the budget as well. A caller who sets 10 s to fit a Lambda's remaining
+    /// time is therefore not handed 10 s + 10 s for the retried request.
+    ///
     /// ```
     /// use std::time::Duration;
     /// use sipgate_flow::{RestClient, StaticToken};
@@ -290,7 +296,11 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
             &self.transport,
             &self.auth,
             &self.base_url,
-            self.timeout,
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &self.retry,
+                sleeper: &self.sleeper,
+            },
             method,
             path,
             body,

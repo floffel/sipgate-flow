@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use crate::auth::{StaticToken, TokenSource};
 use crate::error::{Error, Result};
 use crate::exchange;
+use crate::retry::{NoSleep, RetryPolicy};
 use crate::transport::{Method, Transport};
 use crate::validate;
 
@@ -263,7 +264,11 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
             &self.transport,
             &self.auth,
             &self.base_url,
-            self.timeout,
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
             Method::Post,
             &path,
             Some(&body),

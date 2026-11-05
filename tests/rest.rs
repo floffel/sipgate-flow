@@ -357,7 +357,17 @@ async fn the_base_url_and_timeout_are_configurable() {
     client.hangup("c1").await.expect("hung up");
     let call = transport.only_call();
     assert_eq!(call.url, "http://localhost:8080/v2/calls/c1");
-    assert_eq!(call.timeout, Some(Duration::from_millis(1500)));
+    // The per-request timeout is now a budget: the attempt is handed what is
+    // left of it, which is at most the configured value.
+    let timeout = call.timeout.expect("timeout applied");
+    assert!(
+        timeout <= Duration::from_millis(1500),
+        "attempt exceeded the configured timeout: {timeout:?}"
+    );
+    assert!(
+        timeout > Duration::from_millis(1400),
+        "attempt was handed a drastically short budget: {timeout:?}"
+    );
 }
 
 #[tokio::test]
@@ -526,7 +536,66 @@ async fn a_401_refreshes_once_and_then_succeeds() {
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].auth.bearer(), Some("t1"));
     assert_eq!(calls[1].auth.bearer(), Some("t2"), "second token used");
-    assert!(sleeper.delays().is_empty(), "a refresh is not a backoff");
+    // The resend is paced through the same policy as any other retry, so a
+    // burst of 401s cannot hammer the API or the token endpoint.
+    let delays = sleeper.delays();
+    assert_eq!(delays.len(), 1, "the single resend is paced exactly once");
+    assert!(delays[0] >= Duration::from_millis(125));
+    assert!(delays[0] <= Duration::from_millis(250));
+}
+
+#[tokio::test]
+async fn the_401_resend_obeys_the_retry_policy_ceiling() {
+    let transport = MockTransport::new();
+    transport.push_response(response(401, &[("Retry-After", "600")], b"expired"));
+    transport.push_response(no_content());
+    let sleeper = RecordingSleeper::new();
+    let client = RestClient::new(transport.clone(), RotatingToken::new())
+        .with_sleeper(sleeper.clone())
+        .with_retry(RetryPolicy::default().with_max_delay(Duration::from_secs(2)));
+
+    client.hangup("c1").await.expect("refresh worked");
+    assert_eq!(transport.call_count(), 2);
+    // A hostile `Retry-After` is clamped to the policy ceiling, exactly as it
+    // is on every other retry path.
+    assert_eq!(sleeper.delays(), [Duration::from_secs(2)]);
+}
+
+#[tokio::test]
+async fn the_two_401_attempts_share_the_caller_timeout_budget() {
+    let transport = MockTransport::new();
+    transport.push_response(response(401, &[], b"expired"));
+    transport.push_response(no_content());
+    let budget = Duration::from_secs(10);
+    let client = RestClient::new(transport.clone(), RotatingToken::new())
+        .with_sleeper(RecordingSleeper::new())
+        .with_timeout(Some(budget));
+
+    client.hangup("c1").await.expect("refresh worked");
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    // Each attempt is handed only what is left of the one deadline, never a
+    // fresh full timeout, so the two attempts together stay inside the budget.
+    let first = calls[0]
+        .timeout
+        .expect("budget applied to the first attempt");
+    let second = calls[1]
+        .timeout
+        .expect("budget applied to the second attempt");
+    assert!(
+        first <= budget,
+        "first attempt exceeded the budget: {first:?}"
+    );
+    assert!(
+        second <= budget,
+        "second attempt got a fresh budget: {second:?}"
+    );
+    // The deadline only ever drains, so the resend can never be handed more
+    // time than the attempt that went before it.
+    assert!(
+        second <= first,
+        "the budget grew between attempts: {first:?} -> {second:?}"
+    );
 }
 
 #[tokio::test]
