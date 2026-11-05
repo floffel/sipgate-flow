@@ -993,15 +993,15 @@ struct RawEvent {
     digit: Option<String>,
     #[serde(default)]
     digits: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "bargedIn")]
     barged_in: Option<bool>,
     #[serde(default)]
     language: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "durationMs")]
     duration_ms: Option<u64>,
-    #[serde(default)]
+    #[serde(default, alias = "speechStartedAt")]
     speech_started_at: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "transferFailedReason")]
     transfer_failed_reason: Option<String>,
     #[serde(default)]
     recipient: Option<String>,
@@ -1013,7 +1013,7 @@ struct RawEvent {
     severity: Option<String>,
     #[serde(default)]
     message: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "actionType")]
     action_type: Option<String>,
     #[serde(default, flatten)]
     extra: BTreeMap<String, Value>,

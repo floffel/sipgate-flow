@@ -262,6 +262,71 @@ fn camel_case_and_snake_case_are_both_accepted() {
 }
 
 #[test]
+fn camel_case_event_fields_are_aliased_not_extra() {
+    let snake =
+        parse(r#"{"type":"session_start","transfer_failed_reason":"busy","session":{"id":"s"}}"#);
+    let camel =
+        parse(r#"{"type":"session_start","transferFailedReason":"busy","session":{"id":"s"}}"#);
+    assert_eq!(camel, snake);
+    assert!(!camel.extra().contains_key("transferFailedReason"));
+    assert!(matches!(
+        camel.payload(),
+        EventPayload::SessionStart {
+            transfer_failed_reason: Some(TransferFailedReason::Busy)
+        }
+    ));
+
+    let snake =
+        parse(r#"{"type":"user_speak","text":"Wait","barged_in":true,"session":{"id":"s"}}"#);
+    let camel =
+        parse(r#"{"type":"user_speak","text":"Wait","bargedIn":true,"session":{"id":"s"}}"#);
+    assert_eq!(camel, snake);
+    assert!(!camel.extra().contains_key("bargedIn"));
+    assert!(matches!(
+        camel.payload(),
+        EventPayload::UserSpeak {
+            text,
+            barged_in: true,
+            ..
+        } if text == "Wait"
+    ));
+
+    let snake = parse(
+        r#"{"type":"assistant_speak","duration_ms":2000,"speech_started_at":1234567890,"session":{"id":"s"}}"#,
+    );
+    let camel = parse(
+        r#"{"type":"assistant_speak","durationMs":2000,"speechStartedAt":1234567890,"session":{"id":"s"}}"#,
+    );
+    assert_eq!(camel, snake);
+    assert!(!camel.extra().contains_key("durationMs"));
+    assert!(!camel.extra().contains_key("speechStartedAt"));
+    assert!(matches!(
+        camel.payload(),
+        EventPayload::AssistantSpeak {
+            duration_ms: Some(2000),
+            speech_started_at: Some(1_234_567_890),
+            ..
+        }
+    ));
+
+    let snake = parse(
+        r#"{"type":"error","code":"synthesis_unavailable","severity":"error","message":"m","action_type":"speak","session":{"id":"s"}}"#,
+    );
+    let camel = parse(
+        r#"{"type":"error","code":"synthesis_unavailable","severity":"error","message":"m","actionType":"speak","session":{"id":"s"}}"#,
+    );
+    assert_eq!(camel, snake);
+    assert!(!camel.extra().contains_key("actionType"));
+    assert!(matches!(
+        camel.payload(),
+        EventPayload::Error {
+            action_type: Some(action_type),
+            ..
+        } if action_type == "speak"
+    ));
+}
+
+#[test]
 fn a_top_level_call_id_fills_a_missing_session_id() {
     // The 0.1 release accepted this shape, and the Push API uses the same name,
     // so it stays accepted without ever overriding a real session id.
