@@ -23,6 +23,12 @@ with the pre-1.0 reading described in the README section *Versioning*.
   passed; delta-seconds above `u64` and present-but-unparseable values fail
   closed to the caller's ceiling instead of silently falling back to the
   shortest backoff step.
+* Webhook content-type and body-boundary behavior now has explicit proof:
+  `is_json_content_type` is covered by property tests (ASCII-case idempotence,
+  arbitrary `application/json` parameters, and no-slash rejection), the
+  buffered body limit is pinned at exactly `max` / `max + 1`, and the
+  verification order is pinned so a wrong secret is refused before content-type
+  and size checks.
 * Retry pacing now has a hard `MIN_RETRY_DELAY` floor. `with_base_delay`,
   `with_max_delay`, local backoff and `Retry-After` values can no longer produce
   a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer
