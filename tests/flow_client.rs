@@ -611,3 +611,255 @@ fn ai_webhook_settings_reads_the_documented_json_body() {
         ""
     );
 }
+
+// ---------------------------------------------------------------------------
+// v3 TTS catalogue and synthesis (#169)
+// ---------------------------------------------------------------------------
+
+use sipgate_flow::{
+    AgentVoices, CurrentVoice, SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio,
+    TtsSetting,
+};
+
+#[tokio::test]
+async fn synthesizing_posts_the_documented_body_and_parses_the_setting() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/json")],
+        br#"{"announcementId":"a-1","alias":"greeting","content":"Guten Tag.","voice":"SIPGATE_VOICE","vendor":"future"}"#,
+    ));
+    let client = client(transport.clone());
+
+    let request = SynthesizeRequest::new("SIPGATE_VOICE", "Guten Tag.")
+        .expect("valid")
+        .with_title("Begruessung")
+        .expect("valid title")
+        .with_acd_id("e0e1e2e3-0000-0000-0000-000000000000")
+        .expect("valid id");
+    let setting = client.synthesize(&request).await.expect("synthesized");
+
+    assert_eq!(setting.announcement_id(), Some("a-1"));
+    assert_eq!(setting.voice(), Some("SIPGATE_VOICE"));
+    assert_eq!(setting.alias(), Some("greeting"));
+    assert_eq!(setting.content(), Some("Guten Tag."));
+    assert_eq!(setting.raw()["vendor"], "future");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "POST");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/tts");
+    assert_eq!(recorded.auth.bearer(), Some("access-token"));
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({
+            "voice": "SIPGATE_VOICE",
+            "content": "Guten Tag.",
+            "title": "Begruessung",
+            "acdId": "e0e1e2e3-0000-0000-0000-000000000000",
+        }))
+    );
+}
+
+#[tokio::test]
+async fn a_5xx_after_synthesize_is_ambiguous_not_retried() {
+    let transport = MockTransport::new();
+    transport.push_response(response(500, &[], b"boom"));
+    let error = client(transport)
+        .synthesize(&SynthesizeRequest::new("SIPGATE_VOICE", "hi").expect("valid"))
+        .await
+        .expect_err("5xx after a POST");
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(!error.is_retryable());
+    assert_eq!(error.status(), Some(500));
+}
+
+#[tokio::test]
+async fn listing_tts_settings_queries_the_acd_id_and_parses_the_envelope() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/json")],
+        br#"{"items":[{"announcementId":"a-1"},{"announcement_id":"a-2"}]}"#,
+    ));
+    let client = client(transport.clone());
+
+    let settings = client
+        .tts_settings("e0e1e2e3-0000-0000-0000-000000000000")
+        .await
+        .expect("settings");
+    assert_eq!(
+        settings
+            .iter()
+            .map(TtsSetting::announcement_id)
+            .collect::<Vec<_>>(),
+        [Some("a-1"), Some("a-2")]
+    );
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "GET");
+    assert_eq!(
+        recorded.url,
+        "https://api.sipgate.com/v3/tts?acdId=e0e1e2e3-0000-0000-0000-000000000000"
+    );
+    assert_eq!(recorded.body, Body::Empty);
+}
+
+#[tokio::test]
+async fn listing_tts_settings_rejects_an_id_that_is_not_a_uuid_shape() {
+    let transport = MockTransport::new();
+    let error = client(transport.clone())
+        .tts_settings("not a uuid")
+        .await
+        .expect_err("invalid id");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "acd_id",
+            ..
+        }
+    ));
+    assert_eq!(transport.call_count(), 0, "no request reaches the wire");
+}
+
+#[tokio::test]
+async fn an_empty_tts_setting_envelope_is_an_empty_list() {
+    let transport = MockTransport::new();
+    transport.push_response(response(200, &[], br#"{"items":[]}"#));
+    let settings = client(transport)
+        .tts_settings("e0e1e2e3-0000-0000-0000-000000000000")
+        .await
+        .expect("settings");
+    assert_eq!(settings.len(), 0);
+}
+
+#[tokio::test]
+async fn streaming_posts_the_documented_body_and_validates_the_audio() {
+    let transport = MockTransport::new();
+    transport.push_response(response(200, &[], b"aGVsbG8="));
+    let client = client(transport.clone());
+
+    let request = SynthesizeStreamRequest::new("SIPGATE_VOICE", "hi").expect("valid");
+    let audio = client.synthesize_stream(&request).await.expect("streamed");
+    assert_eq!(audio.base64_data(), "aGVsbG8=");
+    assert_eq!(audio.decode().expect("canonical"), b"hello");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "POST");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/tts/stream");
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({"voice": "SIPGATE_VOICE", "content": "hi"}))
+    );
+}
+
+#[tokio::test]
+async fn a_non_base64_stream_body_is_a_validation_error() {
+    let transport = MockTransport::new();
+    transport.push_response(response(200, &[], b"not base64!"));
+    let error = client(transport)
+        .synthesize_stream(&SynthesizeStreamRequest::new("SIPGATE_VOICE", "hi").expect("valid"))
+        .await
+        .expect_err("not base64");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "tts_audio",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn reading_agent_voices_gets_the_documented_path_and_decodes_the_catalogue() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/json")],
+        br#"{"items":[{"voiceId":"SIPGATE-0","name":"Kai","languages":["de"],"recommended":true,"beta":false,"previewUrl":"https://example.com/a.mp3"}],"currentVoice":{"voiceId":"SIPGATE-0","name":"Kai"}}"#,
+    ));
+    let client = client(transport.clone());
+
+    let voices = client.agent_voices("agent-1").await.expect("voices");
+    assert_eq!(voices.items()[0].id(), "SIPGATE-0");
+    assert_eq!(
+        voices.current_voice().map(CurrentVoice::voice_id),
+        Some("SIPGATE-0")
+    );
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "GET");
+    assert_eq!(
+        recorded.url,
+        "https://api.sipgate.com/v3/ai-agents/agent-1/voices"
+    );
+}
+
+#[tokio::test]
+async fn agent_voices_rejects_a_path_unsafe_agent_id_without_a_request() {
+    let transport = MockTransport::new();
+    let error = client(transport.clone())
+        .agent_voices("../etc")
+        .await
+        .expect_err("path unsafe");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "agent_id",
+            ..
+        }
+    ));
+    assert_eq!(transport.call_count(), 0);
+}
+
+#[test]
+fn synthesize_request_holds_the_documented_character_boundaries() {
+    let voice = "V".repeat(64);
+    assert!(SynthesizeRequest::new(&voice, "hi").is_ok());
+    assert!(SynthesizeRequest::new("V".repeat(65), "hi").is_err());
+
+    let content_at = "a".repeat(1024);
+    let content_over = "a".repeat(1025);
+    assert!(SynthesizeRequest::new("RACHEL", &content_at).is_ok());
+    assert!(SynthesizeRequest::new("RACHEL", &content_over).is_err());
+
+    // The limit is characters, not bytes: 255 multibyte characters still pass.
+    let title_at = "ä".repeat(255);
+    let title_over = "ä".repeat(256);
+    assert!(SynthesizeRequest::new("RACHEL", "hi")
+        .expect("valid")
+        .with_title(&title_at)
+        .is_ok());
+    assert!(SynthesizeRequest::new("RACHEL", "hi")
+        .expect("valid")
+        .with_title(&title_over)
+        .is_err());
+}
+
+#[test]
+fn stream_request_holds_the_content_boundary() {
+    assert!(SynthesizeStreamRequest::new("RACHEL", "a".repeat(1024)).is_ok());
+    assert!(SynthesizeStreamRequest::new("RACHEL", "a".repeat(1025)).is_err());
+}
+
+#[test]
+fn synthesized_audio_holds_the_base64_boundary() {
+    assert!(SynthesizedAudio::new("aGk=").is_ok());
+    assert!(SynthesizedAudio::new("aGk").is_err());
+    assert!(SynthesizedAudio::new("").is_err());
+}
+
+#[test]
+fn agent_voices_tolerates_missing_and_unknown_fields() {
+    let voices = AgentVoices::from_json(serde_json::json!({"items": [], "vendor": "future"}))
+        .expect("tolerant");
+    assert_eq!(voices.items(), []);
+    assert_eq!(voices.current_voice(), None);
+    assert_eq!(voices.raw()["vendor"], "future");
+
+    let empty_object = AgentVoices::from_json(serde_json::json!({})).expect("tolerant");
+    assert_eq!(empty_object.items(), []);
+
+    let current = CurrentVoice::from_json(&serde_json::json!({"voice_id": "v1"})).expect("camel");
+    assert_eq!(current.voice_id(), "v1");
+    assert!(CurrentVoice::from_json(&serde_json::json!({})).is_err());
+}

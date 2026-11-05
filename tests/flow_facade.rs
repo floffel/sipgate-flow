@@ -71,6 +71,24 @@ const _: fn(sipgate_flow::flow::client::AiWebhookSettings) = |v| {
 const _: fn(sipgate_flow::flow::client::TtsVoice) = |v| {
     let _: sipgate_flow::flow::TtsVoice = v;
 };
+const _: fn(sipgate_flow::flow::client::SynthesizeRequest) = |v| {
+    let _: sipgate_flow::flow::SynthesizeRequest = v;
+};
+const _: fn(sipgate_flow::flow::client::SynthesizeStreamRequest) = |v| {
+    let _: sipgate_flow::flow::SynthesizeStreamRequest = v;
+};
+const _: fn(sipgate_flow::flow::client::SynthesizedAudio) = |v| {
+    let _: sipgate_flow::flow::SynthesizedAudio = v;
+};
+const _: fn(sipgate_flow::flow::client::TtsSetting) = |v| {
+    let _: sipgate_flow::flow::TtsSetting = v;
+};
+const _: fn(sipgate_flow::flow::client::AgentVoices) = |v| {
+    let _: sipgate_flow::flow::AgentVoices = v;
+};
+const _: fn(sipgate_flow::flow::client::CurrentVoice) = |v| {
+    let _: sipgate_flow::flow::CurrentVoice = v;
+};
 // `FlowClient` is generic over its transport; a bound-checked helper proves the
 // facade path is the same type without naming a concrete transport.
 #[allow(dead_code)]
