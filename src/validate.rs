@@ -155,6 +155,14 @@ pub(crate) fn ai_flow_id(field: &'static str, value: &str) -> Result<()> {
 /// 7..=15 digits whose first digit is 1-9. Returns the digits, because
 /// sipgate's Flow actions expect E.164 *without* the `+` (it strips one if
 /// sent).
+///
+/// ```
+/// use sipgate_flow::SendSms;
+///
+/// let sms = SendSms::new("+4915112345678", "hi")?;
+/// assert_eq!(sms.phone_number(), "4915112345678");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
 pub(crate) fn phone(field: &'static str, value: &str) -> Result<String> {
     let digits = value.strip_prefix('+').unwrap_or(value);
     if digits.is_empty() {
@@ -188,6 +196,13 @@ pub(crate) fn phone(field: &'static str, value: &str) -> Result<String> {
 }
 
 /// Validates an absolute `http(s)` URL with a host and no credentials.
+///
+/// ```
+/// use sipgate_flow::rest::Announcement;
+///
+/// assert!(Announcement::new("https://example.com/a.wav").is_ok());
+/// assert!(Announcement::new("https:///a.wav").is_err());
+/// ```
 pub(crate) fn http_url(field: &'static str, value: &str) -> Result<()> {
     non_empty(field, value, MAX_REST_FIELD_BYTES)?;
 
@@ -480,6 +495,130 @@ mod tests {
     }
 
     #[test]
+    fn non_empty_counts_a_200_byte_multi_character_value_as_inside_the_bound() {
+        let at_limit = format!("{}é", "€".repeat(66));
+        assert_eq!(at_limit.chars().count(), 67);
+        assert_eq!(at_limit.len(), MAX_SESSION_ID);
+        assert!(non_empty("field", &at_limit, MAX_SESSION_ID).is_ok());
+
+        let over_limit = "€".repeat(67);
+        assert_eq!(over_limit.chars().count(), 67);
+        assert_eq!(over_limit.len(), MAX_SESSION_ID + 1);
+        assert!(non_empty("field", &over_limit, MAX_SESSION_ID).is_err());
+    }
+
+    #[test]
+    fn phone_accepts_the_documented_digit_bounds() {
+        assert_eq!(
+            phone("number", "1234567").expect("valid").as_str(),
+            "1234567"
+        );
+        assert_eq!(
+            phone("number", "123456789012345").expect("valid").as_str(),
+            "123456789012345"
+        );
+        assert_eq!(
+            phone("number", "+1234567").expect("valid").as_str(),
+            "1234567"
+        );
+        assert_eq!(
+            phone("number", "+123456789012345").expect("valid").as_str(),
+            "123456789012345"
+        );
+    }
+
+    #[test]
+    fn phone_rejects_values_outside_the_documented_digit_bounds() {
+        for value in [
+            "",
+            "+",
+            "++1",
+            "123456",
+            "1234567890123456",
+            "0123456",
+            "+0123456",
+            "123 4567",
+            "123-4567",
+            "1234567\u{e9}",
+        ] {
+            assert!(phone("number", value).is_err(), "{value:?}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn phone_is_idempotent_on_accepted_input(value in r"\+?[0-9]{0,20}") {
+            if let Ok(digits) = phone("number", &value) {
+                prop_assert!(digits.bytes().all(|byte| byte.is_ascii_digit()));
+                prop_assert!((MIN_PHONE_DIGITS..=MAX_PHONE_DIGITS).contains(&digits.len()));
+                prop_assert!(!digits.starts_with('0'));
+
+                let again = phone("number", &digits).expect("normalised output remains valid");
+                prop_assert_eq!(again, digits);
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn path_segment_output_never_contains_a_slash_or_whitespace(value in ".{0,256}") {
+            if path_segment("id", &value).is_ok() {
+                prop_assert!(!value.contains('/'));
+                prop_assert!(!value.chars().any(char::is_whitespace));
+            }
+        }
+    }
+
+    #[test]
+    fn http_url_accepts_absolute_http_urls_with_hosts() {
+        for value in [
+            "https://example.com",
+            "https://example.com/",
+            "http://example.com/a.wav",
+            "HTTPS://example.com/a.wav",
+            "https://localhost:8080/a.wav",
+            "https://example.com/a.wav?cache=1#fragment",
+            "https://xn--bcher-kva.example/a.wav",
+        ] {
+            assert!(http_url("url", value).is_ok(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn http_url_rejects_hostless_relative_and_credentialled_urls() {
+        for value in [
+            "",
+            "example.com/a.wav",
+            "/a.wav",
+            "https://",
+            "https:///x",
+            "https://?x=1",
+            "https://#fragment",
+            "file:///etc/passwd",
+            "ftp://example.com/a.wav",
+            "https://@example.com/a.wav",
+            "https://user@example.com/a.wav",
+            "https://user:password@example.com/a.wav",
+            "https://example.com/a b.wav",
+            "https://example.com/a\t.wav",
+            "https://example.com/a\n.wav",
+            "https://example.com/a\u{0}.wav",
+            "https://example.com/a\u{7f}.wav",
+        ] {
+            assert!(http_url("url", value).is_err(), "{value:?}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn http_url_rejects_any_value_containing_whitespace(value in ".{0,128}") {
+            if value.chars().any(char::is_whitespace) {
+                prop_assert!(http_url("url", &value).is_err(), "{value:?}");
+            }
+        }
+    }
+
+    #[test]
     fn language_tag_accepts_well_shaped_tags() {
         for value in ["en", "en-US", "zh-Hant-TW", "de", "en-x", "en-abcdefgh"] {
             assert!(language_tag("languages", value).is_ok(), "{value:?}");
@@ -571,6 +710,17 @@ mod tests {
                 && primary_ok
                 && rest_ok;
             prop_assert_eq!(language_tag("languages", &value).is_ok(), expected);
+        }
+
+        #[test]
+        fn accepted_language_tags_round_trip_through_the_documented_separators(
+            value in "[A-Za-z0-9-]{0,40}",
+        ) {
+            if language_tag("languages", &value).is_ok() {
+                let rendered = value.split('-').collect::<Vec<_>>().join("-");
+                prop_assert_eq!(&rendered, &value);
+                prop_assert!(language_tag("languages", &rendered).is_ok());
+            }
         }
     }
 }
