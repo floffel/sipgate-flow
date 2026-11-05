@@ -188,9 +188,7 @@ impl WebhookVerifier {
         self.verify(provided)?;
         if let Some(content_type) = content_type.map(str::trim).filter(|ct| !ct.is_empty()) {
             if !is_json_content_type(content_type) {
-                return Err(Error::UnsupportedContentType {
-                    content_type: content_type.to_string(),
-                });
+                return Err(Error::unsupported_content_type(content_type));
             }
         }
         if body.len() > self.max_body_bytes {

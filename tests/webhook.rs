@@ -74,7 +74,7 @@ fn a_form_encoded_request_is_recognised_as_the_wrong_api() {
         .expect_err("Push API payload");
     assert!(matches!(
         error,
-        Error::UnsupportedContentType { ref content_type } if content_type.contains("form-urlencoded")
+        Error::UnsupportedContentType { ref content_type, .. } if content_type.contains("form-urlencoded")
     ));
 }
 
@@ -112,7 +112,7 @@ fn empty_or_whitespace_content_type_is_treated_as_absent() {
         .expect_err("non-JSON content type must be rejected");
     assert!(matches!(
         error,
-        Error::UnsupportedContentType { ref content_type } if content_type == "text/plain"
+        Error::UnsupportedContentType { ref content_type, .. } if content_type == "text/plain"
     ));
 }
 
