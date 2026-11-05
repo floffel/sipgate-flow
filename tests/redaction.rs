@@ -157,6 +157,20 @@ fn every_credential_shaped_field_name_is_redacted() {
         "api_key",
         "apikey",
         "hotkey",
+        "signature",
+        "X-Signature",
+        "api_signature",
+        "credential",
+        "credential_id",
+        "authorization",
+        "auth",
+        "oauth",
+        "sas_verifier",
+        "verifier",
+        "code",
+        "verification_code",
+        "cert",
+        "client_certificate",
     ] {
         let body = [(name.to_string(), SECRET.to_string())];
         let rendered = format!("{:?}", RequestBody::Form(&body));
@@ -181,12 +195,26 @@ fn every_credential_shaped_field_name_is_redacted() {
         "text",
         "username",
         "sessionId",
+        "account_id",
+        "message",
     ] {
         let body = [(name.to_string(), SECRET.to_string())];
         let rendered = format!("{:?}", RequestBody::Form(&body));
         assert!(
             rendered.contains(SECRET),
             "field {name} should stay visible: {rendered}"
+        );
+    }
+
+    // Fail closed for the ambiguous spellings: `code` and `cert` also appear in
+    // innocuous names, but the value could be a secret, so it is hidden. These
+    // assertions pin the deliberate over-redaction rather than an accident.
+    for name in ["error_code", "country_code", "certificate_name"] {
+        let body = [(name.to_string(), SECRET.to_string())];
+        let rendered = format!("{:?}", RequestBody::Form(&body));
+        assert!(
+            !rendered.contains(SECRET),
+            "field {name} must fail closed: {rendered}"
         );
     }
 }
@@ -328,5 +356,36 @@ proptest! {
         let request = Request::form(Method::Post, "https://login.test/token", Security::None, &body);
         let rendered = format!("{request:?}");
         prop_assert!(!rendered.contains(&secret), "{}", rendered);
+    }
+
+    /// A generated credential-shaped field never lets its value survive either
+    /// the form or the JSON `Debug` rendering.
+    #[test]
+    fn generated_credential_field_names_never_leak(
+        prefix in "[A-Za-z0-9_-]{0,12}",
+        needle in prop_oneof![
+            Just("password"),
+            Just("secret"),
+            Just("token"),
+            Just("assertion"),
+            Just("key"),
+            Just("signature"),
+            Just("credential"),
+            Just("auth"),
+            Just("verifier"),
+            Just("code"),
+            Just("cert"),
+        ],
+        suffix in "[A-Za-z0-9_-]{0,12}",
+        secret in "[A-Za-z0-9_.~+/-]{8,96}",
+    ) {
+        let name = format!("{prefix}{needle}{suffix}");
+        let body = vec![(name.clone(), secret.clone())];
+        let rendered = format!("{:?}", RequestBody::Form(&body));
+        prop_assert!(!rendered.contains(&secret), "form field {} leaked: {}", name, rendered);
+
+        let json_body = json!({name.clone(): secret});
+        let rendered = format!("{:?}", RequestBody::Json(&json_body));
+        prop_assert!(!rendered.contains(&secret), "json field {} leaked: {}", name, rendered);
     }
 }

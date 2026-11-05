@@ -138,6 +138,7 @@ impl<'a> Security<'a> {
 ///
 /// [`fmt::Debug`] renders a `Form` or `Json` body with every field whose name
 /// looks like a credential (`password`, `secret`, `token`, `assertion`, `key`,
+/// `signature`, `credential`, `auth`, `verifier`, `code`, `cert`,
 /// case-insensitive) replaced by `<redacted>`.
 ///
 /// ```
@@ -778,12 +779,28 @@ const fn rendered_secret(secret: &str) -> &str {
 /// Whether a form or JSON field name carries a credential, matched
 /// case-insensitively as a substring because providers spell them
 /// `client_secret`, `X-API-TOKEN`, `refresh_token`, `client_assertion` and
-/// `api_key`.
+/// `api_key`, or use webhook/HMAC spellings such as `X-Signature`,
+/// `authorization`, `sas_verifier`, `client_certificate` and `code`.
 ///
 /// Over-redaction is deliberate: a field called `hotkey` loses its value in
-/// `Debug`, a field called `client_secret` must never keep it.
+/// `Debug`, a field called `error_code` also loses it, and a field called
+/// `client_secret` must never keep it. Unknown names stay visible so ordinary
+/// request bodies remain useful in logs; a name that matches a credential
+/// needle is redacted even if the caller meant something harmless by it.
 fn is_credential_field(name: &str) -> bool {
-    const NEEDLES: [&str; 5] = ["password", "secret", "token", "assertion", "key"];
+    const NEEDLES: [&str; 11] = [
+        "password",
+        "secret",
+        "token",
+        "assertion",
+        "key",
+        "signature",
+        "credential",
+        "auth",
+        "verifier",
+        "code",
+        "cert",
+    ];
     let lowered = name.to_ascii_lowercase();
     NEEDLES.iter().any(|needle| lowered.contains(needle))
 }
