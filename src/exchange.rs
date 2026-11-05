@@ -300,11 +300,14 @@ mod tests {
     use super::{
         authorized, exchange_deadline, remaining_budget, request_url, retry_pause, Pacing, Target,
     };
-    use crate::auth::{Token, TokenSource};
+    use crate::auth::{PersonalAccessToken, Token, TokenSource};
     use crate::error::Error;
     use crate::retry::RetryPolicy;
-    use crate::transport::{Method, Request, Response, Transport};
+    use crate::transport::{Method, Request, Response, Security, Transport};
+    use proptest::prelude::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     #[derive(Default)]
@@ -324,46 +327,167 @@ mod tests {
         fn invalidate(&self) {}
     }
 
-    struct RefreshAuth {
-        calls: AtomicUsize,
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum SeenSecurity {
+        None,
+        Bearer(String),
+        Basic { username: String },
     }
 
-    impl TokenSource for RefreshAuth {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SeenRequest {
+        method: Method,
+        security: SeenSecurity,
+    }
+
+    struct ScriptedTransport {
+        statuses: Mutex<VecDeque<u16>>,
+        requests: Mutex<Vec<SeenRequest>>,
+    }
+
+    impl ScriptedTransport {
+        fn with_statuses(statuses: impl IntoIterator<Item = u16>) -> Self {
+            Self {
+                statuses: Mutex::new(statuses.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<SeenRequest> {
+            self.requests
+                .lock()
+                .expect("scripted transport request lock")
+                .clone()
+        }
+    }
+
+    impl Transport for ScriptedTransport {
+        fn execute(
+            &self,
+            request: Request<'_>,
+        ) -> impl std::future::Future<Output = crate::Result<Response>> {
+            let security = match request.security {
+                Security::None => SeenSecurity::None,
+                Security::Bearer(token) => SeenSecurity::Bearer(token.to_string()),
+                Security::Basic { username, .. } => SeenSecurity::Basic {
+                    username: username.to_string(),
+                },
+            };
+            self.requests
+                .lock()
+                .expect("scripted transport request lock")
+                .push(SeenRequest {
+                    method: request.method,
+                    security,
+                });
+            let status = self
+                .statuses
+                .lock()
+                .expect("scripted transport status lock")
+                .pop_front()
+                .unwrap_or(200);
+            std::future::ready(Ok(Response::new(status, std::iter::empty(), Vec::new())))
+        }
+    }
+
+    struct CountingTokenSource {
+        refreshable: bool,
+        force_refresh: Mutex<Vec<bool>>,
+        invalidations: AtomicUsize,
+    }
+
+    impl CountingTokenSource {
+        fn new(refreshable: bool) -> Self {
+            Self {
+                refreshable,
+                force_refresh: Mutex::new(Vec::new()),
+                invalidations: AtomicUsize::new(0),
+            }
+        }
+
+        fn force_refresh(&self) -> Vec<bool> {
+            self.force_refresh
+                .lock()
+                .expect("force-refresh lock")
+                .clone()
+        }
+
+        fn calls(&self) -> usize {
+            self.force_refresh.lock().expect("force-refresh lock").len()
+        }
+
+        fn invalidations(&self) -> usize {
+            self.invalidations.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TokenSource for CountingTokenSource {
         fn refreshable(&self) -> bool {
-            true
+            self.refreshable
         }
 
         fn access_token(
             &self,
             force_refresh: bool,
         ) -> impl std::future::Future<Output = crate::Result<Token>> + Send {
+            self.force_refresh
+                .lock()
+                .expect("force-refresh lock")
+                .push(force_refresh);
             let token = if force_refresh { "fresh" } else { "stale" };
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(Token::from_json(
-                &serde_json::json!({ "access_token": token }),
-            ))
+            std::future::ready(Token::from_json(&serde_json::json!({
+                "access_token": token,
+            })))
         }
 
-        fn invalidate(&self) {}
+        fn invalidate(&self) {
+            self.invalidations.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
-    #[derive(Default)]
-    struct RecordingTransport {
-        calls: AtomicUsize,
+    #[derive(Debug)]
+    struct ObservedExchange {
+        status: Result<u16, String>,
+        requests: Vec<SeenRequest>,
+        auth_calls: usize,
+        invalidations: usize,
+        force_refresh: Vec<bool>,
     }
 
-    impl Transport for RecordingTransport {
-        fn execute(
-            &self,
-            _: Request<'_>,
-        ) -> impl std::future::Future<Output = crate::Result<Response>> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            let response = if call == 0 {
-                Response::new(401, std::iter::empty(), b"expired".to_vec())
-            } else {
-                Response::new(200, std::iter::empty(), b"{}".to_vec())
-            };
-            std::future::ready(Ok(response))
+    async fn observe_exchange(
+        statuses: &[u16],
+        method: Method,
+        refreshable: bool,
+    ) -> ObservedExchange {
+        let auth = CountingTokenSource::new(refreshable);
+        let transport = ScriptedTransport::with_statuses(statuses.iter().copied());
+        let outcome = authorized(
+            &transport,
+            &auth,
+            Target {
+                base_url: "https://api.sipgate.com",
+                allow_http_base_url: false,
+                path: "/v2/calls",
+            },
+            Pacing {
+                timeout: None,
+                retry: &RetryPolicy::none(),
+                sleeper: &crate::retry::NoSleep,
+            },
+            method,
+            None,
+        )
+        .await;
+        let status = outcome
+            .as_ref()
+            .map(Response::status)
+            .map_err(ToString::to_string);
+        ObservedExchange {
+            status,
+            requests: transport.requests(),
+            auth_calls: auth.calls(),
+            invalidations: auth.invalidations(),
+            force_refresh: auth.force_refresh(),
         }
     }
 
@@ -475,38 +599,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_refreshable_source_does_not_resend_a_401() {
-        let auth = CountingAuth::default();
-        let transport = RecordingTransport::default();
-        let error = authorized(
-            &transport,
-            &auth,
-            Target {
-                base_url: "https://api.sipgate.com",
-                allow_http_base_url: false,
-                path: "/v2/calls",
-            },
-            Pacing {
-                timeout: None,
-                retry: &RetryPolicy::none(),
-                sleeper: &crate::retry::NoSleep,
-            },
-            Method::Get,
-            None,
-        )
-        .await
-        .expect_err("401 from a non-refreshable source is terminal");
+        let observed = observe_exchange(&[401, 200], Method::Get, false).await;
 
-        assert!(matches!(
-            error,
-            Error::Unauthorized {
-                status: 401,
-                ref body,
-                retry_after: None,
-                request_id: None,
-            } if body == b"expired"
-        ));
-        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+        assert!(observed.status.is_err());
+        assert_eq!(observed.requests.len(), 1);
+        assert_eq!(observed.auth_calls, 1);
+        assert_eq!(observed.invalidations, 0);
+        assert_eq!(observed.force_refresh, vec![false]);
     }
 
     #[tokio::test]
@@ -575,11 +674,79 @@ mod tests {
 
     #[tokio::test]
     async fn a_refreshable_source_resends_an_idempotent_request_once() {
-        let auth = RefreshAuth {
-            calls: AtomicUsize::new(0),
-        };
-        let transport = RecordingTransport::default();
-        let response = authorized(
+        let observed = observe_exchange(&[401, 200], Method::Get, true).await;
+
+        assert_eq!(observed.status, Ok(200));
+        assert_eq!(observed.requests.len(), 2, "401-then-200 resends once");
+        assert_eq!(observed.requests[0].method, Method::Get);
+        assert_eq!(observed.requests[1].method, Method::Get);
+        assert_eq!(
+            observed.requests[0].security,
+            SeenSecurity::Bearer("stale".to_string())
+        );
+        assert_eq!(
+            observed.requests[1].security,
+            SeenSecurity::Bearer("fresh".to_string()),
+            "the second request must carry the token minted after the 401"
+        );
+        assert_eq!(observed.auth_calls, 2, "initial token plus refresh");
+        assert_eq!(observed.invalidations, 1);
+        assert_eq!(observed.force_refresh, vec![false, true]);
+    }
+
+    #[tokio::test]
+    async fn a_second_401_is_terminal_without_a_third_request() {
+        let observed = observe_exchange(&[401, 401, 200], Method::Get, true).await;
+
+        assert!(observed.status.is_err());
+        assert_eq!(
+            observed.requests.len(),
+            2,
+            "the second 401 is terminal; a third scripted 200 must stay unused"
+        );
+        assert_eq!(observed.auth_calls, 2, "refresh once, never loop");
+        assert_eq!(observed.invalidations, 1);
+        assert_eq!(observed.force_refresh, vec![false, true]);
+    }
+
+    #[tokio::test]
+    async fn a_plain_200_does_not_refresh_or_invalidate() {
+        let observed = observe_exchange(&[200], Method::Get, true).await;
+
+        assert_eq!(observed.status, Ok(200));
+        assert_eq!(observed.requests.len(), 1);
+        assert_eq!(
+            observed.requests[0].security,
+            SeenSecurity::Bearer("stale".to_string())
+        );
+        assert_eq!(observed.auth_calls, 1);
+        assert_eq!(observed.invalidations, 0);
+        assert_eq!(observed.force_refresh, vec![false]);
+    }
+
+    #[tokio::test]
+    async fn statuses_other_than_401_do_not_refresh_or_invalidate() {
+        for status in [500, 429, 402] {
+            let observed = observe_exchange(&[status, 200], Method::Get, true).await;
+
+            assert_eq!(
+                observed.status,
+                Ok(status),
+                "status {status} must be returned as-is"
+            );
+            assert_eq!(observed.requests.len(), 1, "status {status}");
+            assert_eq!(observed.auth_calls, 1, "status {status}");
+            assert_eq!(observed.invalidations, 0, "status {status}");
+            assert_eq!(observed.force_refresh, vec![false], "status {status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_personal_access_token_does_not_resend_a_401() {
+        let auth = PersonalAccessToken::new("token-FQ1V12", "secret")
+            .expect("the test PAT has non-empty halves");
+        let transport = ScriptedTransport::with_statuses([401, 200]);
+        let error = authorized(
             &transport,
             &auth,
             Target {
@@ -596,88 +763,83 @@ mod tests {
             None,
         )
         .await
-        .expect("refreshed");
+        .expect_err("a non-refreshable PAT cannot fix a 401 by resending");
 
-        assert_eq!(response.status(), 200);
-        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(error, Error::Unauthorized { status: 401, .. }));
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1, "PAT requests must not be replayed");
+        assert_eq!(
+            requests[0].security,
+            SeenSecurity::Basic {
+                username: "token-FQ1V12".to_string()
+            }
+        );
     }
 
     #[tokio::test]
     async fn a_non_idempotent_request_is_not_resent_even_with_a_refreshable_source() {
-        let auth = RefreshAuth {
-            calls: AtomicUsize::new(0),
-        };
-        let transport = RecordingTransport::default();
-        let error = authorized(
-            &transport,
-            &auth,
-            Target {
-                base_url: "https://api.sipgate.com",
-                allow_http_base_url: false,
-                path: "/v2/sessions/sms",
-            },
-            Pacing {
-                timeout: None,
-                retry: &RetryPolicy::none(),
-                sleeper: &crate::retry::NoSleep,
-            },
-            Method::Post,
-            None,
-        )
-        .await
-        .expect_err("post must not be resent");
+        let observed = observe_exchange(&[401, 200], Method::Post, true).await;
 
-        assert!(matches!(error, Error::Unauthorized { status: 401, .. }));
-        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+        assert!(observed.status.is_err());
+        assert_eq!(observed.requests.len(), 1);
+        assert_eq!(observed.auth_calls, 1);
+        assert_eq!(observed.invalidations, 0);
+        assert_eq!(observed.force_refresh, vec![false]);
     }
 
     #[tokio::test]
-    async fn a_second_401_is_terminal() {
-        struct AlwaysUnauthorized;
+    async fn only_401_invalidates_at_the_status_boundaries() {
+        for status in [400, 401, 402] {
+            let observed = observe_exchange(&[status, 200], Method::Get, true).await;
+            let expected = usize::from(status == 401);
 
-        impl Transport for AlwaysUnauthorized {
-            fn execute(
-                &self,
-                _: Request<'_>,
-            ) -> impl std::future::Future<Output = crate::Result<Response>> {
-                std::future::ready(Ok(Response::new(
-                    401,
-                    std::iter::empty(),
-                    b"still no".to_vec(),
-                )))
-            }
+            assert_eq!(observed.requests.len(), 1 + expected, "status {status}");
+            assert_eq!(observed.invalidations, expected, "status {status}");
+            assert_eq!(
+                observed.force_refresh,
+                if status == 401 {
+                    vec![false, true]
+                } else {
+                    vec![false]
+                },
+                "status {status}"
+            );
         }
+    }
 
-        let auth = RefreshAuth {
-            calls: AtomicUsize::new(0),
-        };
-        let error = authorized(
-            &AlwaysUnauthorized,
-            &auth,
-            Target {
-                base_url: "https://api.sipgate.com",
-                allow_http_base_url: false,
-                path: "/v2/calls",
-            },
-            Pacing {
-                timeout: None,
-                retry: &RetryPolicy::none(),
-                sleeper: &crate::retry::NoSleep,
-            },
-            Method::Get,
-            None,
-        )
-        .await
-        .expect_err("second 401 is terminal");
+    proptest! {
+        /// The resend path is bounded for every status, verb and token source:
+        /// one request, except a refreshable idempotent source answering 401,
+        /// which gets exactly one more.
+        #[test]
+        fn exchange_never_exceeds_two_requests(
+            status in 100_u16..=599,
+            method in prop_oneof![
+                Just(Method::Get),
+                Just(Method::Post),
+                Just(Method::Put),
+                Just(Method::Delete),
+            ],
+            refreshable in any::<bool>(),
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let observed = runtime.block_on(observe_exchange(&[status, 200], method, refreshable));
 
-        assert!(matches!(error, Error::Unauthorized { status: 401, .. }));
-        assert_eq!(
-            auth.calls.load(Ordering::SeqCst),
-            2,
-            "refresh once, never loop"
-        );
+            let expected = if status == 401 && refreshable && method.is_idempotent() {
+                2
+            } else {
+                1
+            };
+            prop_assert!(observed.requests.len() <= 2, "{:?}", observed);
+            prop_assert_eq!(observed.requests.len(), expected, "{:?}", observed);
+            prop_assert!(
+                observed.requests.len() != 2 || refreshable,
+                "a non-refreshable source must not resend: {observed:?}"
+            );
+        }
     }
 
     #[test]
