@@ -16,7 +16,7 @@ use sipgate_flow::{
     wav, Action, Audio, BargeInConfig, BargeInStrategy, ClientCredentials, ConfigureTranscription,
     Direction, Error, Event, EventPayload, FnSleeper, MixAudio, NoSleep, OAuth2Client, RestClient,
     RetryPolicy, SendSms, Severity, Sleeper, SmsFailureReason, Speak, StaticToken, Token, Transfer,
-    TransferFailedReason, Tts, Vad,
+    TransferFailedReason, Tts, Vad, MIN_RETRY_DELAY,
 };
 
 #[test]
@@ -236,6 +236,45 @@ fn a_retry_after_hint_is_ignored_when_the_policy_says_so() {
     // An exhausted budget stays exhausted whatever the hint says.
     let exhausted = RetryPolicy::new(1);
     assert_eq!(exhausted.delay(1, Some(Duration::from_secs(1))), None);
+}
+
+#[test]
+fn retry_delay_has_a_hard_floor_even_for_degenerate_inputs() {
+    let zero_ceiling = RetryPolicy::new(2).with_max_delay(Duration::ZERO);
+    assert_eq!(zero_ceiling.max_delay, MIN_RETRY_DELAY);
+    assert_eq!(
+        zero_ceiling.delay(1, Some(Duration::ZERO)),
+        Some(MIN_RETRY_DELAY)
+    );
+
+    let zero_base = RetryPolicy::new(2).with_base_delay(Duration::ZERO);
+    assert_eq!(zero_base.base_delay, MIN_RETRY_DELAY);
+    assert_eq!(zero_base.delay(1, None), Some(MIN_RETRY_DELAY));
+
+    let one_nanosecond = RetryPolicy::new(2).with_max_delay(Duration::from_nanos(1));
+    assert_eq!(one_nanosecond.max_delay, MIN_RETRY_DELAY);
+
+    let just_inside = RetryPolicy::new(2)
+        .with_base_delay(MIN_RETRY_DELAY)
+        .with_max_delay(MIN_RETRY_DELAY);
+    assert_eq!(just_inside.delay(1, None), Some(MIN_RETRY_DELAY));
+
+    let just_outside = RetryPolicy::new(2)
+        .with_base_delay(MIN_RETRY_DELAY + Duration::from_nanos(1))
+        .with_max_delay(MIN_RETRY_DELAY + Duration::from_nanos(1));
+    let delay = just_outside.delay(1, None).expect("first retry");
+    assert!(delay >= MIN_RETRY_DELAY);
+    assert!(delay <= just_outside.max_delay);
+}
+
+#[test]
+fn zero_max_attempts_still_has_no_retry_after_the_first_failure() {
+    let policy = RetryPolicy::new(0);
+    assert_eq!(
+        policy.max_attempts, 0,
+        "the builder keeps the caller's value"
+    );
+    assert_eq!(policy.delay(1, None), None);
 }
 
 #[test]

@@ -9,6 +9,7 @@ use sipgate_flow::auth::MAX_TOKEN_LIFETIME;
 use sipgate_flow::{
     base64, classify, parse_retry_after, wav, Action, Error, Event, EventPayload, Method,
     OutboundCall, RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
+    MIN_RETRY_DELAY,
 };
 
 /// A recursive JSON value, bounded in depth and width.
@@ -177,6 +178,22 @@ proptest! {
     }
 
     #[test]
+    fn retry_delays_never_fall_below_the_floor(
+        attempts in 0_u32..64,
+        base_ms in 0_u64..5_000,
+        cap_ms in 0_u64..30_000,
+        hint_secs in proptest::option::of(0_u64..3_600),
+    ) {
+        let policy = RetryPolicy::new(8)
+            .with_base_delay(Duration::from_millis(base_ms))
+            .with_max_delay(Duration::from_millis(cap_ms));
+        let hint = hint_secs.map(Duration::from_secs);
+        if let Some(delay) = policy.delay(attempts, hint) {
+            prop_assert!(delay >= MIN_RETRY_DELAY, "delay {delay:?} below floor");
+        }
+    }
+
+    #[test]
     fn backoff_stays_in_the_equal_jitter_window(
         attempts in 1_u32..6,
         base_ms in 1_u64..1_000,
@@ -190,14 +207,14 @@ proptest! {
         let expected_high = uncapped.min(policy.max_delay);
         let expected_low = expected_high / 2;
         let delay = policy.delay(attempts, None).expect("within budget");
-        prop_assert!(delay >= expected_low);
+        prop_assert!(delay >= expected_low.max(MIN_RETRY_DELAY));
         prop_assert!(delay <= expected_high);
     }
 
     #[test]
     fn identical_backoff_inputs_are_not_constant(
         attempts in 1_u32..4,
-        base_ms in 1_u64..1_000,
+        base_ms in 2_u64..1_000,
     ) {
         let policy = RetryPolicy::new(10)
             .with_base_delay(Duration::from_millis(base_ms))

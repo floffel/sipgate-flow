@@ -10,6 +10,10 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* Retry pacing now has a hard `MIN_RETRY_DELAY` floor. `with_base_delay`,
+  `with_max_delay`, local backoff and `Retry-After` values can no longer produce
+  a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer
+  that is already rate-limiting the caller.
 * Event parsing now rejects bodies above `MAX_EVENT_BODY_BYTES` before
   deserialising, and unknown event types keep their raw JSON without building
   the duplicate `Value` trees that the old parser materialised.

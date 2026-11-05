@@ -9,6 +9,10 @@
 //! This crate never sleeps: the loop awaits a caller-supplied [`Sleeper`], so
 //! pacing (and therefore cancellation) stays under the caller's control.
 //!
+//! Every retry wait is clamped to at least [`MIN_RETRY_DELAY`], so a zero
+//! `base_delay`, zero `max_delay` or zero `Retry-After` hint cannot turn the
+//! loop into an unthrottled hammer.
+//!
 //! A maintained backoff crate is not used here because [`RetryPolicy`] and
 //! [`Sleeper`] must stay runtime-free and source-compatible; the jitter uses
 //! the standard library's cheap randomized hasher seed instead.
@@ -32,22 +36,43 @@ use std::time::Duration;
 use crate::error::Error;
 use crate::transport::Method;
 
+/// The smallest wait a [`RetryPolicy`] will produce.
+///
+/// A zero base delay, zero ceiling or zero `Retry-After` hint is clamped up to
+/// this floor, so accepted retries are never back-to-back.
+///
+/// ```
+/// use std::time::Duration;
+/// use sipgate_flow::{RetryPolicy, MIN_RETRY_DELAY};
+///
+/// let policy = RetryPolicy::default().with_max_delay(Duration::ZERO);
+/// assert_eq!(policy.delay(1, Some(Duration::ZERO)), Some(MIN_RETRY_DELAY));
+/// ```
+pub const MIN_RETRY_DELAY: Duration = Duration::from_millis(1);
+
 /// How often, and how long, the client retries transient failures.
 ///
 /// The default is three attempts (two retries) with 250 ms doubling to an
 /// 8 s ceiling, honouring `Retry-After`. Backoff steps are jittered uniformly
 /// in `[d/2, d]`, where `d` is the uncapped step clamped to
 /// [`RetryPolicy::max_delay`], so independent callers do not retry in lockstep.
-/// Every wait is capped by [`RetryPolicy::max_delay`], so a hostile or broken
-/// proxy cannot park the caller for an unbounded time.
+/// Every wait is clamped to `MIN_RETRY_DELAY..=RetryPolicy::max_delay`, so a
+/// hostile or broken proxy cannot park the caller for an unbounded time and a
+/// zero delay cannot hammer the peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetryPolicy {
     /// Total attempts, including the first one. `0` behaves like `1`.
     pub max_attempts: u32,
     /// Delay after the first failed attempt; doubles per further attempt.
+    ///
+    /// Values below [`MIN_RETRY_DELAY`] are clamped up to the floor by
+    /// [`RetryPolicy::with_base_delay`].
     pub base_delay: Duration,
     /// Upper bound for a single wait, applied to backoff and `Retry-After`.
+    ///
+    /// Values below [`MIN_RETRY_DELAY`] are clamped up to the floor by
+    /// [`RetryPolicy::with_max_delay`].
     pub max_delay: Duration,
     /// Use the server's `Retry-After` when present instead of the backoff.
     pub use_retry_after: bool,
@@ -81,6 +106,9 @@ impl RetryPolicy {
 
     /// A policy with `max_attempts` total attempts and the default delays.
     ///
+    /// `0` behaves like `1`: the first attempt still happens and no retry is
+    /// scheduled after it.
+    ///
     /// ```
     /// use sipgate_flow::RetryPolicy;
     /// assert_eq!(RetryPolicy::new(5).max_attempts, 5);
@@ -95,6 +123,9 @@ impl RetryPolicy {
 
     /// Overrides the first backoff step before jitter.
     ///
+    /// Values below [`MIN_RETRY_DELAY`] are clamped up to the floor, so a
+    /// zero base delay cannot produce a back-to-back retry.
+    ///
     /// ```
     /// use std::time::Duration;
     /// use sipgate_flow::RetryPolicy;
@@ -106,11 +137,14 @@ impl RetryPolicy {
     /// ```
     #[must_use]
     pub fn with_base_delay(mut self, delay: Duration) -> Self {
-        self.base_delay = delay;
+        self.base_delay = delay.max(MIN_RETRY_DELAY);
         self
     }
 
     /// Overrides the ceiling for a single wait.
+    ///
+    /// Values below [`MIN_RETRY_DELAY`] are clamped up to the floor, so a zero
+    /// ceiling cannot produce a back-to-back retry.
     ///
     /// ```
     /// use std::time::Duration;
@@ -123,7 +157,7 @@ impl RetryPolicy {
     /// ```
     #[must_use]
     pub fn with_max_delay(mut self, delay: Duration) -> Self {
-        self.max_delay = delay;
+        self.max_delay = delay.max(MIN_RETRY_DELAY);
         self
     }
 
@@ -150,7 +184,9 @@ impl RetryPolicy {
     /// `attempts_failed` counts completed attempts: `1` means the first try
     /// just failed. Local exponential backoff is jittered uniformly in
     /// `[d/2, d]` after applying the ceiling; `Retry-After` is returned exactly
-    /// after applying the ceiling.
+    /// after applying the ceiling. Every returned wait is clamped to
+    /// [`MIN_RETRY_DELAY`]..=effective ceiling, where the effective ceiling is
+    /// `max_delay.max(MIN_RETRY_DELAY)`.
     ///
     /// ```
     /// use std::time::Duration;
@@ -172,7 +208,7 @@ impl RetryPolicy {
 
         if self.use_retry_after {
             if let Some(hint) = retry_after {
-                return Some(hint.min(self.max_delay));
+                return Some(clamp_delay(hint, self.max_delay));
             }
         }
 
@@ -181,8 +217,15 @@ impl RetryPolicy {
         let exponent = attempts_failed.saturating_sub(1).min(30);
         let factor = 1_u32 << exponent;
         let backoff = self.base_delay.saturating_mul(factor);
-        Some(equal_jitter(backoff, self.max_delay))
+        Some(clamp_delay(
+            equal_jitter(backoff, self.max_delay),
+            self.max_delay,
+        ))
     }
+}
+
+fn clamp_delay(delay: Duration, max_delay: Duration) -> Duration {
+    delay.clamp(MIN_RETRY_DELAY, max_delay.max(MIN_RETRY_DELAY))
 }
 
 fn equal_jitter(backoff: Duration, max_delay: Duration) -> Duration {
