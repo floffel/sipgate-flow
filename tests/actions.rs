@@ -101,6 +101,24 @@ fn an_unusable_session_id_never_reaches_an_action() {
 }
 
 #[test]
+fn an_empty_session_id_is_reported_as_validation_on_the_session_id_field() {
+    // A missing session id must fail loudly, not default to "".
+    for result in [
+        Action::speak("", "Hallo!"),
+        Action::hangup(""),
+        Action::barge_in(""),
+        Action::transfer("", Transfer::new("4915112345678").expect("valid")),
+    ] {
+        assert!(
+            matches!(result, Err(Error::Validation { field, .. }) if field == "session_id"),
+            "an empty session id must be a session_id validation error: {result:?}"
+        );
+    }
+    // The boundary: one character is accepted, the empty string is not.
+    assert!(Action::hangup("s").is_ok());
+}
+
+#[test]
 fn audio_requires_valid_base64() {
     assert!(Action::audio_base64(SESSION, "UklGRiQAAABXQVZF").is_ok());
     for bad in ["", "not base64!", "A", "A==="] {

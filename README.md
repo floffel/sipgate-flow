@@ -26,6 +26,12 @@ let verifier = WebhookVerifier::new(std::env::var("AI_FLOW_SHARED_SECRET")?)?;
 // (Push API) request, before anything is parsed.
 let event = verifier.verify_and_parse(secret, content_type, body)?;
 
+// No session id means the event cannot be addressed: answer `204` instead of
+// inventing a default the service would reject.
+let Some(session) = event.session_id() else {
+    return Ok(FlowResponse::none());
+};
+
 let response = match event.payload() {
     EventPayload::SessionStart { transfer_failed_reason: Some(reason), .. } => {
         let text = if reason.is_worth_retrying() {
@@ -33,12 +39,12 @@ let response = match event.payload() {
         } else {
             "Das hat leider nicht geklappt. Ich notiere Ihre Nachricht."
         };
-        FlowResponse::one(Action::speak(event.session_id().unwrap_or_default(), text)?)
+        FlowResponse::one(Action::speak(session, text)?)
     }
     EventPayload::UserSpeak { text, .. } if text.contains("Tschüss") => {
         FlowResponse::many([
-            Action::speak(event.session_id().unwrap_or_default(), "Auf Wiederhören!")?,
-            Action::hangup(event.session_id().unwrap_or_default())?,
+            Action::speak(session, "Auf Wiederhören!")?,
+            Action::hangup(session)?,
         ])
     }
     _ => FlowResponse::none(), // 204 No Content
