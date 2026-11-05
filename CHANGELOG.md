@@ -10,6 +10,12 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* The minimal configuration (`--no-default-features`) now builds clean under
+  `-D warnings`: the crate-internal transport-error constructor is `http`-gated
+  (nothing outside the `reqwest` adapter calls it), and the two intra-doc links
+  to `ReqwestTransport` are plain code spans, so `cargo doc` no longer fails on
+  an unresolvable link when the feature is off. Both defects were invisible to
+  CI, which only ran clippy and rustdoc for the full feature set.
 * The flagship crate example no longer teaches failure-to-default. It used
   `event.session_id().unwrap_or_default()`, silently substituting an empty
   session id and returning `200` as if the action were valid. The example now

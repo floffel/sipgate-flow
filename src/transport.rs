@@ -4,7 +4,7 @@
 //! [`Transport::execute`] takes one [`Request`] and returns one [`Response`]
 //! regardless of status; classification, authentication, `Retry-After` and JSON
 //! decoding all live above it. Tests implement the trait with a recording mock;
-//! production uses [`ReqwestTransport`] behind the default `http` feature.
+//! production uses the `http`-gated `ReqwestTransport` adapter.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -431,8 +431,8 @@ impl Response {
     }
 }
 
-/// Performs one HTTP request. Implement it for your own stack, or use
-/// [`ReqwestTransport`].
+/// Performs one HTTP request. Implement it for your own stack, or enable the
+/// `http` feature and use `ReqwestTransport`.
 ///
 /// Implementations must:
 ///
