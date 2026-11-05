@@ -7,7 +7,7 @@
 
 use sipgate_flow::{
     Action, Direction, Error, ErrorCode, Event, EventPayload, Severity, SmsFailureReason,
-    TransferFailedReason,
+    TransferFailedReason, MAX_EVENT_BODY_BYTES,
 };
 
 const SESSION_START: &str = include_str!("fixtures/flow/session_start.json");
@@ -292,10 +292,11 @@ fn unknown_events_keep_their_whole_payload() {
     let EventPayload::Unknown(raw) = event.payload() else {
         panic!("expected unknown");
     };
+    let raw: serde_json::Value = serde_json::from_str(raw.get()).expect("unknown JSON");
     assert_eq!(raw["type"], "call_transferred");
     assert_eq!(raw["detail"]["to"], "4915112345678");
     // Round-tripping an unknown event returns the original document.
-    assert_eq!(event.to_json(), *raw);
+    assert_eq!(event.to_json(), raw);
 }
 
 #[test]
@@ -540,10 +541,14 @@ fn control_flow_fields_remain_strict() {
 
 #[test]
 fn duplicate_known_keys_are_rejected_rather_than_guessed() {
-    let error =
-        Event::parse(br#"{"type":"session_end","type":"session_start","session":{"id":"s"}}"#)
-            .expect_err("duplicate `type`");
-    assert!(matches!(error, Error::Json { .. }), "{error:?}");
+    for body in [
+        br#"{"type":"session_end","type":"session_start","session":{"id":"s"}}"#.as_slice(),
+        br#"{"type":"future","session":{"id":"s"},"session":{"id":"t"}}"#.as_slice(),
+        br#"{"type":"future","callId":"a","call_id":"b"}"#.as_slice(),
+    ] {
+        let error = Event::parse(body).expect_err("duplicate known key");
+        assert!(matches!(error, Error::Json { .. }), "{error:?}");
+    }
 }
 
 #[test]
@@ -566,11 +571,58 @@ fn unicode_nul_and_long_text_survive() {
     assert!(text.contains('🎉'));
     assert!(text.contains('\u{0}'));
 
-    let long = "x".repeat(1024 * 1024);
+    let long = "x".repeat(MAX_EVENT_BODY_BYTES);
     let body = format!(r#"{{"type":"user_speak","text":"{long}","session":{{"id":"s"}}}}"#);
-    let event = parse(&body);
-    assert!(
-        matches!(event.payload(), EventPayload::UserSpeak { text, .. } if text.len() == 1024 * 1024)
+    let error = Event::parse(body.as_bytes()).expect_err("body exceeds the ceiling");
+    assert!(matches!(
+        error,
+        Error::BodyTooLarge {
+            size,
+            limit: MAX_EVENT_BODY_BYTES,
+        } if size == body.len()
+    ));
+}
+
+#[test]
+fn event_body_size_ceiling_is_checked_before_json_parsing() {
+    let exact = format!(
+        r#"{{"type":"session_end","padding":"{}"}}"#,
+        "x".repeat(MAX_EVENT_BODY_BYTES - r#"{"type":"session_end","padding":""}"#.len())
+    );
+    assert_eq!(exact.len(), MAX_EVENT_BODY_BYTES);
+    let event = parse(&exact);
+    assert_eq!(event.kind(), "session_end");
+
+    let over = format!("{exact} ");
+    let error = Event::parse(over.as_bytes()).expect_err("one byte over the ceiling");
+    assert!(matches!(
+        error,
+        Error::BodyTooLarge {
+            size,
+            limit: MAX_EVENT_BODY_BYTES,
+        } if size == MAX_EVENT_BODY_BYTES + 1
+    ));
+
+    let invalid = vec![b'{'; MAX_EVENT_BODY_BYTES + 1];
+    let error = Event::parse(&invalid).expect_err("size wins over JSON validity");
+    assert!(matches!(
+        error,
+        Error::BodyTooLarge {
+            size,
+            limit: MAX_EVENT_BODY_BYTES,
+        } if size == MAX_EVENT_BODY_BYTES + 1
+    ));
+}
+
+#[test]
+fn unknown_events_do_not_materialise_extra_fields() {
+    let body = br#"{"type":"not_yet","session":{"id":"s"},"payload":{"a":1},"large":[1,2,3]}"#;
+    let event = Event::parse(body).expect("unknown event parses");
+    assert!(event.is_unknown());
+    assert!(event.extra().is_empty());
+    assert_eq!(
+        event.to_json(),
+        serde_json::from_slice::<serde_json::Value>(body).expect("json")
     );
 }
 

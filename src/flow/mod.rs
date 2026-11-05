@@ -17,7 +17,7 @@ pub use action::{
 };
 pub use event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
-    TransferFailedReason,
+    TransferFailedReason, MAX_EVENT_BODY_BYTES,
 };
 pub use response::FlowResponse;
 pub use webhook::WebhookVerifier;

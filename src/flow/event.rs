@@ -5,7 +5,8 @@
 //! schema publishes; anything else lands in [`EventPayload::Unknown`] with the
 //! raw JSON intact. Unknown *fields* on known events are preserved in [`Event::extra`],
 //! so a field sipgate adds tomorrow still reaches a caller that inspects the
-//! remainder.
+//! remainder. [`Event::parse`] refuses bodies above [`MAX_EVENT_BODY_BYTES`]
+//! before JSON deserialisation starts.
 //!
 //! ```
 //! use sipgate_flow::{Event, EventPayload};
@@ -19,10 +20,22 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::{json, value::RawValue, Map, Value};
 
 use crate::error::{Error, Result};
+
+/// Largest event body [`Event::parse`] accepts, in bytes.
+///
+/// Real Flow events are a few KiB. This ceiling is checked before any JSON
+/// deserialisation, so an attacker-reachable webhook or WebSocket handler
+/// cannot force large parser allocations.
+///
+/// ```
+/// assert_eq!(sipgate_flow::MAX_EVENT_BODY_BYTES, 64 * 1024);
+/// ```
+pub const MAX_EVENT_BODY_BYTES: usize = 64 * 1024;
 
 /// Call direction, as reported in `session.direction`.
 ///
@@ -430,7 +443,7 @@ pub struct Session {
 /// assert!(matches!(event.payload(), EventPayload::DtmfReceived { digit } if digit == "1"));
 /// # Ok::<(), sipgate_flow::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum EventPayload {
     /// The call session begins, or a failed transfer returns the caller.
@@ -508,8 +521,108 @@ pub enum EventPayload {
         action_type: Option<String>,
     },
     /// An event this crate does not model, with its raw JSON preserved.
-    Unknown(Value),
+    ///
+    /// The boxed raw value borrows no caller memory after parsing; it owns a
+    /// single copy of the original JSON document.
+    Unknown(Box<RawValue>),
 }
+
+impl PartialEq for EventPayload {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::SessionStart {
+                    transfer_failed_reason: left,
+                },
+                Self::SessionStart {
+                    transfer_failed_reason: right,
+                },
+            ) => left == right,
+            (Self::UserSpeechStarted, Self::UserSpeechStarted)
+            | (Self::AssistantSpeechEnded, Self::AssistantSpeechEnded)
+            | (Self::UserInputTimeout, Self::UserInputTimeout)
+            | (Self::SessionEnd, Self::SessionEnd) => true,
+            (
+                Self::UserSpeak {
+                    text: left_text,
+                    barged_in: left_barged_in,
+                    language: left_language,
+                },
+                Self::UserSpeak {
+                    text: right_text,
+                    barged_in: right_barged_in,
+                    language: right_language,
+                },
+            ) => {
+                left_text == right_text
+                    && left_barged_in == right_barged_in
+                    && left_language == right_language
+            }
+            (Self::UserBargeIn { text: left }, Self::UserBargeIn { text: right }) => left == right,
+            (Self::DtmfReceived { digit: left }, Self::DtmfReceived { digit: right }) => {
+                left == right
+            }
+            (
+                Self::AssistantSpeak {
+                    text: left_text,
+                    ssml: left_ssml,
+                    duration_ms: left_duration_ms,
+                    speech_started_at: left_speech_started_at,
+                },
+                Self::AssistantSpeak {
+                    text: right_text,
+                    ssml: right_ssml,
+                    duration_ms: right_duration_ms,
+                    speech_started_at: right_speech_started_at,
+                },
+            ) => {
+                left_text == right_text
+                    && left_ssml == right_ssml
+                    && left_duration_ms == right_duration_ms
+                    && left_speech_started_at == right_speech_started_at
+            }
+            (
+                Self::SmsFailed {
+                    recipient: left_recipient,
+                    reason: left_reason,
+                    message: left_message,
+                },
+                Self::SmsFailed {
+                    recipient: right_recipient,
+                    reason: right_reason,
+                    message: right_message,
+                },
+            ) => {
+                left_recipient == right_recipient
+                    && left_reason == right_reason
+                    && left_message == right_message
+            }
+            (
+                Self::Error {
+                    code: left_code,
+                    severity: left_severity,
+                    message: left_message,
+                    action_type: left_action_type,
+                },
+                Self::Error {
+                    code: right_code,
+                    severity: right_severity,
+                    message: right_message,
+                    action_type: right_action_type,
+                },
+            ) => {
+                left_code == right_code
+                    && left_severity == right_severity
+                    && left_message == right_message
+                    && left_action_type == right_action_type
+            }
+            (Self::Unknown(left), Self::Unknown(right)) => raw_values_equal(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for EventPayload {}
 
 impl EventPayload {
     /// The wire name of this payload, or `None` for an unknown event.
@@ -603,24 +716,29 @@ impl Event {
     ///
     /// # Errors
     ///
+    /// * [`Error::BodyTooLarge`] when the body is larger than
+    ///   [`MAX_EVENT_BODY_BYTES`].
     /// * [`Error::EmptyBody`] when the body is empty or only whitespace.
     /// * [`Error::Json`] when the body is not JSON, is not an object, has a
     ///   strict field of the wrong type, or repeats a known key.
     /// * [`Error::Validation`] when a `dtmf_received` event does not carry
     ///   exactly one key from `0`-`9`, `*` or `#`.
     pub fn parse(body: &[u8]) -> Result<Self> {
+        if body.len() > MAX_EVENT_BODY_BYTES {
+            return Err(Error::BodyTooLarge {
+                size: body.len(),
+                limit: MAX_EVENT_BODY_BYTES,
+            });
+        }
         if body.iter().all(u8::is_ascii_whitespace) {
             return Err(Error::EmptyBody);
         }
-        let raw: RawEvent = serde_json::from_slice(body)?;
-        let mut event = Self::from_raw(raw)?;
-        if event.is_unknown() {
-            // Only unknown shapes need the whole document; keeping the second
-            // parse off the hot path preserves serde's line/column errors for
-            // every documented event.
-            event.payload = EventPayload::Unknown(serde_json::from_slice(body)?);
+        let header: RawEventHeader = serde_json::from_slice(body)?;
+        if header.kind.as_deref().is_some_and(is_known_kind) {
+            Self::from_raw(serde_json::from_slice(body)?)
+        } else {
+            Ok(Self::from_unknown(header, serde_json::from_slice(body)?))
         }
-        Ok(event)
     }
 
     fn from_raw(raw: RawEvent) -> Result<Self> {
@@ -684,7 +802,7 @@ impl Event {
                 message: raw.message.unwrap_or_default(),
                 action_type: raw.action_type,
             },
-            _ => EventPayload::Unknown(Value::Null),
+            _ => EventPayload::Unknown(null_raw_value()),
         };
 
         Ok(Self {
@@ -693,6 +811,29 @@ impl Event {
             payload,
             extra: raw.extra,
         })
+    }
+
+    fn from_unknown(header: RawEventHeader, raw: Box<RawValue>) -> Self {
+        let session = header.session.as_ref().map(RawSessionHeader::to_session);
+        let session = match (session, header.call_id) {
+            (Some(mut session), Some(call_id)) if session.id.is_empty() => {
+                session.id = call_id;
+                Some(session)
+            }
+            (Some(session), _) => Some(session),
+            (None, Some(call_id)) => Some(Session {
+                id: call_id,
+                ..Session::default()
+            }),
+            (None, None) => None,
+        };
+
+        Self {
+            kind: header.kind.unwrap_or_default(),
+            session,
+            payload: EventPayload::Unknown(raw),
+            extra: BTreeMap::new(),
+        }
     }
 
     /// The wire `type` value, empty when the payload carried none.
@@ -831,7 +972,7 @@ impl Event {
     #[must_use]
     pub fn to_json(&self) -> Value {
         if let EventPayload::Unknown(raw) = &self.payload {
-            return raw.clone();
+            return serde_json::from_str(raw.get()).unwrap_or(Value::Null);
         }
 
         let mut object = Map::new();
@@ -938,6 +1079,32 @@ fn dtmf_digit(digit: Option<String>, digits: Option<String>) -> Result<String> {
     }
 }
 
+fn is_known_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "session_start"
+            | "user_speech_started"
+            | "user_speak"
+            | "user_barge_in"
+            | "dtmf_received"
+            | "assistant_speak"
+            | "assistant_speech_ended"
+            | "user_input_timeout"
+            | "session_end"
+            | "sms_failed"
+            | "error"
+    )
+}
+
+fn null_raw_value() -> Box<RawValue> {
+    RawValue::NULL.to_owned()
+}
+
+fn raw_values_equal(left: &RawValue, right: &RawValue) -> bool {
+    serde_json::from_str::<Value>(left.get()).ok()
+        == serde_json::from_str::<Value>(right.get()).ok()
+}
+
 fn dtmf_digit_error() -> Error {
     Error::validation("digit", "must contain exactly one key from 0-9, *, or #")
 }
@@ -1026,6 +1193,98 @@ impl RawSession {
             from_phone_number: self.from_phone_number.clone(),
             to_phone_number: self.to_phone_number.clone(),
             extra: self.extra.clone(),
+        }
+    }
+}
+
+struct RawEventHeader {
+    kind: Option<String>,
+    session: Option<RawSessionHeader>,
+    call_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for RawEventHeader {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawEventHeaderVisitor;
+
+        impl<'de> Visitor<'de> for RawEventHeaderVisitor {
+            type Value = RawEventHeader;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut header = RawEventHeader {
+                    kind: None,
+                    session: None,
+                    call_id: None,
+                };
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" | "event" => {
+                            if header.kind.is_some() {
+                                return Err(serde::de::Error::duplicate_field("type"));
+                            }
+                            header.kind = map.next_value::<Option<String>>()?;
+                        }
+                        "session" => {
+                            if header.session.is_some() {
+                                return Err(serde::de::Error::duplicate_field("session"));
+                            }
+                            header.session = map.next_value::<Option<RawSessionHeader>>()?;
+                        }
+                        "callId" | "call_id" => {
+                            if header.call_id.is_some() {
+                                return Err(serde::de::Error::duplicate_field("call_id"));
+                            }
+                            header.call_id = map.next_value::<Option<String>>()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(header)
+            }
+        }
+
+        deserializer.deserialize_map(RawEventHeaderVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+struct RawSessionHeader {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, alias = "accountId")]
+    account_id: Option<String>,
+    #[serde(default, alias = "phoneNumber")]
+    phone_number: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default, alias = "fromPhoneNumber")]
+    from_phone_number: Option<String>,
+    #[serde(default, alias = "toPhoneNumber")]
+    to_phone_number: Option<String>,
+}
+
+impl RawSessionHeader {
+    fn to_session(&self) -> Session {
+        Session {
+            id: self.id.clone().unwrap_or_default(),
+            account_id: self.account_id.clone(),
+            phone_number: self.phone_number.clone(),
+            direction: self.direction.as_deref().map(Direction::from_wire),
+            from_phone_number: self.from_phone_number.clone(),
+            to_phone_number: self.to_phone_number.clone(),
+            extra: BTreeMap::new(),
         }
     }
 }

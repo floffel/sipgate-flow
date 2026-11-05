@@ -10,6 +10,9 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* Event parsing now rejects bodies above `MAX_EVENT_BODY_BYTES` before
+  deserialising, and unknown event types keep their raw JSON without building
+  the duplicate `Value` trees that the old parser materialised.
 * Transport failures with an unknown write phase now fail closed:
   `Error::transport` returns an ambiguous outcome instead of a retryable one,
   while the new `Error::transport_before_write` marks DNS, TCP connect and TLS

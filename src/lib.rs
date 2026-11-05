@@ -109,7 +109,7 @@ pub use flow::action::{
 pub use flow::client::{FlowClient, OutboundCall, OutboundCallReceipt};
 pub use flow::event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
-    TransferFailedReason,
+    TransferFailedReason, MAX_EVENT_BODY_BYTES,
 };
 pub use flow::response::FlowResponse;
 pub use flow::webhook::{self, WebhookVerifier};
