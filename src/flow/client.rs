@@ -25,7 +25,8 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
 
 use crate::auth::{StaticToken, TokenSource};
 use crate::error::{Error, Result};
@@ -311,6 +312,162 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
             &body,
         ))
     }
+
+    /// Registers or replaces the account's AI-assist webhook URL:
+    /// `PUT /v3/ai-webhooks`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let settings = sipgate_flow::AiWebhookSettings::new("https://example.com/ai-flow")?;
+    /// client.update_ai_webhook(&settings).await?; // 200 or 201
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when the URL is empty or is not an
+    /// absolute `https://` URL, plus the generic transport, auth and API
+    /// errors. Non-idempotent retry handling does not apply: replacement of a
+    /// single account-level webhook is idempotent, so a retryable response is
+    /// reported on [`crate::Error::Api`].
+    pub async fn update_ai_webhook(&self, settings: &AiWebhookSettings) -> Result<Value> {
+        let body = settings.to_json();
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/ai-webhooks",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Put,
+            Some(&body),
+        )
+        .await?;
+        if response.is_success() {
+            return if response.body().iter().all(u8::is_ascii_whitespace) {
+                Ok(Value::Null)
+            } else {
+                response.json()
+            };
+        }
+        Err(crate::retry::api_error(
+            Method::Put,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Reads the account's AI-assist webhook URL: `GET /v3/ai-webhooks`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let settings = client.ai_webhook().await?;
+    /// println!("{:?}", settings.webhook_url());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Json`] when the success body is not JSON, plus the
+    /// generic transport, auth and API errors. A documented `404` is returned
+    /// as [`crate::Error::Api`] so the caller can treat "no webhook configured"
+    /// separately without inventing a value.
+    pub async fn ai_webhook(&self) -> Result<AiWebhookSettings> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/ai-webhooks",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(AiWebhookSettings::from_json(&response.json()?));
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Lists the TTS voices usable in synthesize requests:
+    /// `GET /v3/tts/voices`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for voice in client.tts_voices().await? {
+    ///     println!("{}", voice.id());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when the documented `{"items": [...]}`
+    /// envelope carries no usable voice entries, [`crate::Error::Json`] when
+    /// the body does not use the documented envelope, plus transport, auth and
+    /// generic API errors.
+    pub async fn tts_voices(&self) -> Result<Vec<TtsVoice>> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/tts/voices",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return TtsVoiceCatalogue::from_json(response.json()?).into_voices();
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
 }
 
 impl<T: Transport, A: TokenSource> std::fmt::Debug for FlowClient<T, A> {
@@ -339,6 +496,417 @@ pub struct OutboundCall {
     ai_flow_id: String,
     billing_device: String,
     to_phone_number: String,
+}
+
+/// `PUT`/`GET /v3/ai-webhooks` body: the single URL AI assist events are sent to.
+///
+/// ```
+/// use sipgate_flow::AiWebhookSettings;
+///
+/// let settings = AiWebhookSettings::new("https://example.com/ai-flow")?;
+/// assert_eq!(settings.webhook_url(), "https://example.com/ai-flow");
+/// assert_eq!(settings.to_json()["webhookUrl"], "https://example.com/ai-flow");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiWebhookSettings {
+    webhook_url: String,
+}
+
+impl std::fmt::Debug for AiWebhookSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiWebhookSettings")
+            .field("webhook_url", &RedactedUrl(&self.webhook_url))
+            .finish()
+    }
+}
+
+impl AiWebhookSettings {
+    /// Validates the webhook URL before it can reach the wire.
+    ///
+    /// The v3 document calls the field just `webhookUrl` and requires no secret
+    /// for this endpoint, so the URL is the whole contract. This crate accepts
+    /// only an absolute `https://` URL: webhook delivery over plaintext HTTP
+    /// would expose the event body to the network.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookSettings;
+    ///
+    /// assert!(AiWebhookSettings::new("https://example.com/ai-flow").is_ok());
+    /// assert!(AiWebhookSettings::new("https://example.com").is_ok());
+    /// assert!(AiWebhookSettings::new("http://example.com/ai-flow").is_err());
+    /// assert!(AiWebhookSettings::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty, is not an absolute URL,
+    /// carries credentials, contains whitespace or control characters, or does
+    /// not use `https://`.
+    pub fn new(webhook_url: impl Into<String>) -> Result<Self> {
+        let webhook_url = webhook_url.into();
+        validate::http_url("webhook_url", &webhook_url)?;
+        if !webhook_url
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        {
+            return Err(Error::validation("webhook_url", "must use https://"));
+        }
+        Ok(Self { webhook_url })
+    }
+
+    /// The configured webhook URL.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookSettings;
+    /// assert_eq!(
+    ///     AiWebhookSettings::new("https://example.com/hook")?.webhook_url(),
+    ///     "https://example.com/hook"
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn webhook_url(&self) -> &str {
+        &self.webhook_url
+    }
+
+    /// Renders the request body exactly as the `OpenAPI` schema names it.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookSettings;
+    /// assert_eq!(
+    ///     AiWebhookSettings::new("https://x.test/hook")?.to_json(),
+    ///     serde_json::json!({"webhookUrl": "https://x.test/hook"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "webhookUrl": self.webhook_url })
+    }
+
+    /// Reads an already-decoded response body.
+    ///
+    /// Both `webhookUrl` (documented) and `webhook_url` (tolerated) are
+    /// accepted. A missing or empty value stays `None`: the API documents no
+    /// placeholder, and `Debug` never prints the full URL.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookSettings;
+    ///
+    /// let settings = AiWebhookSettings::from_json(&serde_json::json!({"webhook_url": "https://x.test/hook"}));
+    /// assert_eq!(settings.webhook_url(), "https://x.test/hook");
+    /// assert_eq!(
+    ///     AiWebhookSettings::from_json(&serde_json::json!({})).webhook_url(),
+    ///     ""
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_json(value: &Value) -> Self {
+        let webhook_url = value
+            .get("webhookUrl")
+            .or_else(|| value.get("webhook_url"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Self { webhook_url }
+    }
+}
+
+/// One entry of `GET /v3/tts/voices`.
+///
+/// The current v3 document models each entry as a bare voice-id string. The
+/// adjacent frontdesk catalogue returns richer objects with `voiceId`, `name`,
+/// `languages`, `previewUrl`, `recommended` and `beta`; this type accepts both
+/// shapes so the v3 voice surface does not break when the document converges on
+/// the object form.
+///
+/// ```
+/// use sipgate_flow::TtsVoice;
+///
+/// let plain = TtsVoice::from_json(serde_json::json!("SIPGATE_VOICE"))?;
+/// assert_eq!(plain.id(), "SIPGATE_VOICE");
+/// assert_eq!(plain.name(), None);
+///
+/// let object = TtsVoice::from_json(serde_json::json!({
+///     "voiceId": "NhQJUmAozCa7BWLiUXy",
+///     "name": "Kai",
+///     "languages": ["de", "en"],
+///     "recommended": true,
+///     "beta": false,
+///     "previewUrl": "https://example.com/preview.mp3",
+/// }))?;
+/// assert_eq!(object.id(), "NhQJUmAozCa7BWLiUXy");
+/// assert_eq!(object.languages(), ["de", "en"]);
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TtsVoice {
+    id: String,
+    name: Option<String>,
+    languages: Vec<String>,
+    preview_url: Option<String>,
+    recommended: Option<bool>,
+    beta: Option<bool>,
+    raw: Value,
+}
+
+impl std::fmt::Debug for TtsVoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TtsVoice")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("languages", &self.languages)
+            .field("recommended", &self.recommended)
+            .field("beta", &self.beta)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TtsVoice {
+    /// Reads either the documented string entry or the object catalogue entry.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    ///
+    /// assert_eq!(TtsVoice::from_json(serde_json::json!("RACHEL"))?.id(), "RACHEL");
+    /// assert_eq!(TtsVoice::from_json(serde_json::json!({"voiceId": "v1"}))?.name(), None);
+    /// assert!(TtsVoice::from_json(serde_json::json!({})).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the entry is neither a non-empty string nor
+    /// an object with a non-empty `voiceId`/`id`/`value` field.
+    pub fn from_json(value: Value) -> Result<Self> {
+        match value {
+            Value::String(id) => {
+                if id.is_empty() {
+                    return Err(Error::validation(
+                        "tts_voice",
+                        "must carry a non-empty voice id",
+                    ));
+                }
+                Self::from_id(id, Value::Null, None, Vec::new(), None, None, None)
+            }
+            Value::Object(object) => {
+                let id = string_field(&object, &["voiceId", "voice_id", "id", "value"]);
+                let Some(id) = id.filter(|id| !id.is_empty()) else {
+                    return Err(Error::validation(
+                        "tts_voice",
+                        "must carry a non-empty voice id",
+                    ));
+                };
+                let name = string_field(&object, &["name", "label"]).map(str::to_string);
+                let languages = string_list_field(&object, &["languages", "language"]);
+                let preview_url = string_field(&object, &["previewUrl", "preview_url"])
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string);
+                let recommended = bool_field(&object, "recommended");
+                let beta = bool_field(&object, "beta");
+                Self::from_id(
+                    id.to_string(),
+                    Value::Object(object),
+                    name,
+                    languages,
+                    preview_url,
+                    recommended,
+                    beta,
+                )
+            }
+            _ => Err(Error::validation(
+                "tts_voice",
+                "must be a voice-id string or an object with a voice id",
+            )),
+        }
+    }
+
+    fn from_id(
+        id: String,
+        raw: Value,
+        name: Option<String>,
+        languages: Vec<String>,
+        preview_url: Option<String>,
+        recommended: Option<bool>,
+        beta: Option<bool>,
+    ) -> Result<Self> {
+        if id.is_empty() {
+            return Err(Error::validation(
+                "tts_voice",
+                "must carry a non-empty voice id",
+            ));
+        }
+        validate::non_empty("tts_voice", &id, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self {
+            id,
+            name,
+            languages,
+            preview_url,
+            recommended,
+            beta,
+            raw,
+        })
+    }
+
+    /// The voice id callers pass to a synthesize request.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    /// assert_eq!(TtsVoice::from_json(serde_json::json!("ARIA"))?.id(), "ARIA");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The display name when the catalogue object carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    /// assert_eq!(
+    ///     TtsVoice::from_json(serde_json::json!({"voiceId": "v1", "name": "Kai"}))?.name(),
+    ///     Some("Kai")
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The supported languages, empty for the bare string entry.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    /// assert_eq!(
+    ///     TtsVoice::from_json(serde_json::json!({"voiceId": "v1", "languages": ["de"]}))?.languages(),
+    ///     ["de"]
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn languages(&self) -> &[String] {
+        &self.languages
+    }
+
+    /// The preview URL, when the catalogue object carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    /// let voice = TtsVoice::from_json(serde_json::json!({
+    ///     "voiceId": "v1",
+    ///     "previewUrl": "https://example.com/a.mp3",
+    /// }))?;
+    /// assert_eq!(voice.preview_url(), Some("https://example.com/a.mp3"));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn preview_url(&self) -> Option<&str> {
+        self.preview_url.as_deref()
+    }
+
+    /// Whether the catalogue marked the voice recommended.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    /// assert_eq!(
+    ///     TtsVoice::from_json(serde_json::json!({"voiceId": "v1", "recommended": true}))?.recommended(),
+    ///     Some(true)
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn recommended(&self) -> Option<bool> {
+        self.recommended
+    }
+
+    /// Whether the catalogue marked the voice beta.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    /// assert_eq!(
+    ///     TtsVoice::from_json(serde_json::json!({"voiceId": "v1", "beta": true}))?.beta(),
+    ///     Some(true)
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn beta(&self) -> Option<bool> {
+        self.beta
+    }
+
+    /// The original catalogue entry, for fields this crate does not model.
+    ///
+    /// ```
+    /// use sipgate_flow::TtsVoice;
+    /// let voice = TtsVoice::from_json(serde_json::json!({"voiceId": "v1", "vendor": "x"}))?;
+    /// assert_eq!(voice.raw()["vendor"], "x");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn raw(&self) -> &Value {
+        &self.raw
+    }
+}
+
+/// Reads `{"items": [...]}` from `GET /v3/tts/voices`, tolerating catalogues
+/// that carry bare ids or object entries.
+#[derive(Deserialize)]
+struct TtsVoiceCatalogue {
+    #[serde(default)]
+    items: Vec<Value>,
+}
+
+impl TtsVoiceCatalogue {
+    fn from_json(value: Value) -> Self {
+        serde_json::from_value(value).unwrap_or(Self { items: Vec::new() })
+    }
+
+    fn into_voices(self) -> Result<Vec<TtsVoice>> {
+        let mut voices = Vec::with_capacity(self.items.len());
+        for item in self.items {
+            voices.push(TtsVoice::from_json(item)?);
+        }
+        if voices.is_empty() {
+            return Err(Error::validation(
+                "tts_voices",
+                "must contain at least one voice",
+            ));
+        }
+        Ok(voices)
+    }
+}
+
+fn string_field<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str))
+}
+
+fn string_list_field(object: &Map<String, Value>, names: &[&str]) -> Vec<String> {
+    for name in names {
+        match object.get(*name) {
+            Some(Value::Array(values)) => {
+                return values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            Some(Value::String(value)) if !value.is_empty() => return vec![value.clone()],
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
+fn bool_field(object: &Map<String, Value>, name: &str) -> Option<bool> {
+    object.get(name).and_then(Value::as_bool)
 }
 
 impl std::fmt::Debug for OutboundCall {
@@ -578,6 +1146,23 @@ struct RedactedRaw<'a>(&'a Value);
 impl fmt::Debug for RedactedRaw<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<{} bytes>", json_byte_len(self.0))
+    }
+}
+
+/// A webhook URL as it may appear in `Debug`: never the whole destination.
+struct RedactedUrl<'a>(&'a str);
+
+impl fmt::Debug for RedactedUrl<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match url::Url::parse(self.0) {
+            Ok(url) => write!(
+                f,
+                "{}://{}/<redacted>",
+                url.scheme(),
+                url.host_str().unwrap_or("")
+            ),
+            Err(_) => write!(f, "<redacted url>"),
+        }
     }
 }
 

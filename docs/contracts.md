@@ -236,6 +236,28 @@ Flow"). `FlowClient` composes the base URL from the v3 `servers` entry and keeps
 `try_with_base_url` for a proxy or a regional host; `with_base_url_for_local_testing`
 is the explicit opt-in for plaintext local test doubles.
 
+### 4.1 In-product v3 webhook and TTS voices — verified
+
+The same v3 `OpenAPI` document contains the first two in-product surfaces beyond
+the outbound call. They are implemented by `FlowClient`; both use the v3 server
+URL and the same bearer credential as §4.
+
+| Method | Path | `operationId` | Request type | Success | Implemented as |
+| --- | --- | --- | --- | --- | --- |
+| PUT | `/ai-webhooks` | `updateWebhookSettings` | `WebhookSettingsUpdateRequest` | 200/201 | `FlowClient::update_ai_webhook` |
+| GET | `/ai-webhooks` | `getWebhookSettings` | — | 200 → `WebhookSettingsResponse` | `FlowClient::ai_webhook` |
+| GET | `/tts/voices` | `listVoices` | — | 200 → `GenericListResponseTtsVoice` | `FlowClient::tts_voices` |
+
+* `WebhookSettingsUpdateRequest` and `WebhookSettingsResponse` both carry one
+  `webhookUrl` string. The schema publishes no secret field, so the URL is the
+  whole contract; the client validates it as an absolute `https://` URL before
+  the request exists.
+* `GenericListResponseTtsVoice` is `{"items": [voiceId, ...]}` in the current
+  document. The adjacent frontdesk catalogue uses richer `VoiceResponse`
+  objects (`voiceId`, `name`, `languages`, `previewUrl`, `recommended`,
+  `beta`), so `TtsVoice` accepts both shapes and preserves unknown fields in
+  `raw()`.
+
 ## 5. REST API v2 — verified against the public Swagger
 
 Source: <https://api.sipgate.com/v2/swagger.json> (`host` `api.sipgate.com`,
@@ -525,12 +547,11 @@ in this document — `tests/docs.rs` fails on it. Order of work is the order bel
   [#12](https://github.com/floffel/sipgate-flow/issues/12). Core read paths are
   modelled; the remaining account-administration endpoints are still documented
   but not modelled yet.
-* **v3 webhook and TTS configuration** — <https://api.sipgate.com/v3/openapi.json>,
-  `PUT /ai-webhooks` and the TTS provider catalogue. Tracked in
+* **v3 account inventory** — the same 402-path document; accounts
+  (ai-agents and the playground are other products). Tracked in
   [#15](https://github.com/floffel/sipgate-flow/issues/15).
-* **v3 account, device and phoneline inventory** — the same 402-path document;
-  accounts, devices and phonelines (ai-agents and the playground are other
-  products). Tracked in
+* **v3 device and phoneline inventory** — the same 402-path document; devices
+  and phonelines. Tracked in
   [#15](https://github.com/floffel/sipgate-flow/issues/15).
 
 ### Absent upstream
@@ -552,7 +573,7 @@ implement and no issue to track:
 | Source | Retrieved | Used for |
 | --- | --- | --- |
 | <https://api.sipgate.com/v2/swagger.json> | 2026-10-24 | every REST v2 path, request and response shape |
-| <https://api.sipgate.com/v3/openapi.json> | 2026-10-24 | outbound call URL, DTOs, security, 429/`Retry-After`, `ProblemDetail` |
+| <https://api.sipgate.com/v3/openapi.json> | 2026-11-05 | outbound call URL, `/ai-webhooks`, `/tts/voices`, DTOs, security, 429/`Retry-After`, `ProblemDetail` |
 | <https://api.sipgate.com/v3/swagger.json> | 2026-10-24 | cross-check; still has no `/ai-flows` |
 | <https://flow.sipgate.io/llms-full.txt> | 2026-10-24 | the whole flow documentation in one file (searched for "external API", `X-API`, `language`) |
 | <https://flow.sipgate.io/api/events> + one page per event | 2026-10-24 | event shapes and enums |

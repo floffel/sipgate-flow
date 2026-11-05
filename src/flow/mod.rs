@@ -32,7 +32,9 @@ pub use action::{
     Action, ActionKind, Audio, BargeInConfig, BargeInStrategy, ConfigureTranscription, MixAudio,
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
 };
-pub use client::{FlowClient, OutboundCall, OutboundCallReceipt, DEFAULT_BASE_URL};
+pub use client::{
+    AiWebhookSettings, FlowClient, OutboundCall, OutboundCallReceipt, TtsVoice, DEFAULT_BASE_URL,
+};
 pub use event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
     TransferFailedReason, MAX_EVENT_BODY_BYTES,

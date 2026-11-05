@@ -196,6 +196,10 @@ in any `Debug` output.
   No socket is needed to test a handler: `MockConnection` is the transport.
 * **Outbound Flow calls** (`POST /v3/ai-flows/{id}/call`) with a typed
   `OutboundCallReceipt` for the documented `callSid` response.
+* **The first in-product v3 webhook and TTS surface**: `FlowClient` can
+  register/replace the account-level AI webhook URL
+  (`PUT /v3/ai-webhooks`), read it back (`GET /v3/ai-webhooks`) and list the
+  `GET /v3/tts/voices` catalogue with typed `TtsVoice` entries.
 * **Twenty-one REST v2 operations** covering SMS, fax (send + resend), outbound
   calls (classic and Neo PBX), voicemail playback, IVR/voicemail recording,
   call listing, hangup, DTMF, announcements, recording, hold, mute, transfer,
@@ -276,11 +280,10 @@ an issue behind it:
   numbers, …) — [#12](https://github.com/floffel/sipgate-flow/issues/12).
   Core read paths are modelled; the remaining account-administration endpoints
   are still documented but not modelled yet.
-* **v3 webhook and TTS configuration** (`PUT /ai-webhooks` and the TTS provider
-  catalogue) — [#15](https://github.com/floffel/sipgate-flow/issues/15).
+* **v3 account inventory** (accounts; ai-agents and the playground are other
+  products) — [#15](https://github.com/floffel/sipgate-flow/issues/15).
   Documented paths, not modelled yet.
-* **v3 account, device and phoneline inventory** (accounts, devices,
-  phonelines; ai-agents and the playground are other products) —
+* **v3 device and phoneline inventory** (devices and phonelines) —
   [#15](https://github.com/floffel/sipgate-flow/issues/15). Documented paths,
   not modelled yet.
 
