@@ -196,9 +196,11 @@ in any `Debug` output.
   No socket is needed to test a handler: `MockConnection` is the transport.
 * **Outbound Flow calls** (`POST /v3/ai-flows/{id}/call`) with a typed
   `OutboundCallReceipt` for the documented `callSid` response.
-* **Sixteen REST v2 operations** covering SMS, fax (send + resend), outbound
+* **Twenty-one REST v2 operations** covering SMS, fax (send + resend), outbound
   calls (classic and Neo PBX), voicemail playback, IVR/voicemail recording,
-  call listing, hangup, DTMF, announcements, recording, hold, mute and transfer.
+  call listing, hangup, DTMF, announcements, recording, hold, mute, transfer,
+  and the core account-administration reads for devices, contacts, history and
+  phone lines.
 * **OAuth2 client credentials** with an expiry-aware token cache behind a
   `Mutex` (no `static mut`, no globals), a 60 s refresh margin, and one forced
   refresh on `401`.
@@ -272,7 +274,8 @@ an issue behind it:
 
 * **REST v2 account administration** (devices, contacts, history, phonelines,
   numbers, …) — [#12](https://github.com/floffel/sipgate-flow/issues/12).
-  Documented endpoints, not modelled yet.
+  Core read paths are modelled; the remaining account-administration endpoints
+  are still documented but not modelled yet.
 * **v3 webhook and TTS configuration** (`PUT /ai-webhooks` and the TTS provider
   catalogue) — [#15](https://github.com/floffel/sipgate-flow/issues/15).
   Documented paths, not modelled yet.
