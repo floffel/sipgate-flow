@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use sipgate_flow::auth::MAX_TOKEN_LIFETIME;
 use sipgate_flow::{
     base64, classify, parse_retry_after, wav, Action, Error, Event, EventPayload, Method,
-    RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
+    OutboundCall, RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
 };
 
 /// A recursive JSON value, bounded in depth and width.
@@ -312,5 +312,28 @@ proptest! {
             }
             Err(other) => prop_assert!(false, "unexpected error for {}: {}", seconds, other),
         }
+    }
+
+    #[test]
+    fn a_billing_device_never_escapes_the_documented_shape(suffix in "[a-z][a-z0-9]{0,7}") {
+        let call = OutboundCall::new("flow-1", &suffix, "4915112345678");
+        prop_assert!(call.is_ok(), "valid suffix {:?} rejected", suffix);
+        let rendered = call.expect("checked above").to_json();
+        prop_assert_eq!(rendered["billingDevice"].as_str(), Some(suffix.as_str()));
+    }
+
+    #[test]
+    fn an_unbounded_or_non_ascii_billing_device_is_rejected(suffix in ".{0,32}") {
+        let is_documented_shape = !suffix.is_empty()
+            && suffix.len() <= 8
+            && suffix.bytes().enumerate().all(|(index, byte)| {
+                if index == 0 {
+                    byte.is_ascii_lowercase()
+                } else {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit()
+                }
+            });
+        let accepted = OutboundCall::new("flow-1", &suffix, "4915112345678").is_ok();
+        prop_assert_eq!(accepted, is_documented_shape, "suffix {:?}", suffix);
     }
 }

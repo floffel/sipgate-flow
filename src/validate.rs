@@ -21,10 +21,49 @@ pub(crate) const MAX_PHONE_DIGITS: usize = 15;
 /// Longest BCP-47 tag accepted: the registry caps a tag at 35 characters.
 pub(crate) const MAX_LANGUAGE_TAG: usize = 35;
 
+/// Longest billing device suffix accepted.
+///
+/// sipgate documents the field as a short device suffix (for example `e2`)
+/// with the account's `masterSipId` prepended automatically, so it never needs
+/// to be long. The cap keeps an unbounded caller string out of the JSON body.
+pub(crate) const MAX_BILLING_DEVICE: usize = 8;
+
 /// Rejects empty or over-long identifiers.
 pub(crate) fn non_empty(field: &'static str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
+    }
+    Ok(())
+}
+
+/// Validates the billing device suffix used by the outbound-call request.
+///
+/// The documented value is a short device id such as `e2` or `s0`: an ASCII
+/// lowercase letter followed by lowercase letters or digits, at most
+/// [`MAX_BILLING_DEVICE`] bytes. Enforcing the alphabet and the cap here keeps
+/// control characters, whitespace and unbounded unicode out of the JSON body.
+/// This is intentionally scoped to the field; the general [`non_empty`]
+/// contract is tracked separately.
+pub(crate) fn billing_device(field: &'static str, value: &str) -> Result<()> {
+    non_empty(field, value)?;
+    if value.len() > MAX_BILLING_DEVICE {
+        return Err(Error::validation(
+            field,
+            format!("must be at most {MAX_BILLING_DEVICE} bytes"),
+        ));
+    }
+    let mut bytes = value.bytes();
+    if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase()) {
+        return Err(Error::validation(
+            field,
+            "must start with an ASCII lowercase letter",
+        ));
+    }
+    if !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()) {
+        return Err(Error::validation(
+            field,
+            "must contain only ASCII lowercase letters or digits",
+        ));
     }
     Ok(())
 }
@@ -297,5 +336,56 @@ mod tests {
             assert!(ai_flow_id("id", value).is_err(), "{value:?}");
         }
         assert!(ai_flow_id("id", &"a".repeat(MAX_SESSION_ID + 1)).is_err());
+    }
+
+    #[test]
+    fn billing_device_accepts_the_documented_suffix_shape() {
+        for value in ["e2", "s0", "d0", "a", "a1", "z9", "abc123"] {
+            assert!(billing_device("id", value).is_ok(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn billing_device_accepts_the_max_length() {
+        let value = format!("a{}", "0".repeat(MAX_BILLING_DEVICE - 1));
+        assert_eq!(value.len(), MAX_BILLING_DEVICE);
+        assert!(billing_device("id", &value).is_ok());
+    }
+
+    #[test]
+    fn billing_device_rejects_empty() {
+        assert!(billing_device("id", "").is_err());
+    }
+
+    #[test]
+    fn billing_device_rejects_over_the_max_length() {
+        let value = format!("a{}", "0".repeat(MAX_BILLING_DEVICE));
+        assert_eq!(value.len(), MAX_BILLING_DEVICE + 1);
+        assert!(billing_device("id", &value).is_err());
+    }
+
+    #[test]
+    fn billing_device_rejects_whitespace_and_control_characters() {
+        for value in [
+            "e 2",
+            "e\t2",
+            "e\n2",
+            "e\r2",
+            " e2",
+            "e2 ",
+            "\u{0}e2",
+            "e2\u{7f}",
+            "e2\u{202e}",
+            "e2\u{200b}",
+            "e\u{e9}",
+            "E2",
+            "2e",
+            "e-2",
+            "e_2",
+            "e.2",
+            "e/2",
+        ] {
+            assert!(billing_device("id", value).is_err(), "{value:?}");
+        }
     }
 }
