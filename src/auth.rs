@@ -37,9 +37,11 @@
 
 use std::fmt;
 use std::sync::Mutex;
+use std::task::{Poll, Waker};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
 use crate::retry::truncate_body;
@@ -497,7 +499,8 @@ impl Token {
 /// Token ([`PersonalAccessToken`]), or [`OAuth2Client`] for client credentials.
 ///
 /// `force_refresh` asks for a new token even if the cached one is still valid;
-/// it is how a 401 is answered. `invalidate` drops whatever is cached.
+/// it is how a 401 is answered. `refresh_after` replaces the credential that
+/// was actually rejected, and `invalidate` drops whatever is cached.
 ///
 /// ```
 /// use sipgate_flow::{StaticToken, TokenSource};
@@ -518,6 +521,35 @@ pub trait TokenSource: Send + Sync {
         &self,
         force_refresh: bool,
     ) -> impl std::future::Future<Output = Result<Token>> + Send;
+
+    /// Replaces `stale` after it was rejected with a 401.
+    ///
+    /// This is the single-flight refresh path: if another task already stored a
+    /// different usable token, that token is returned without contacting the
+    /// issuer. Otherwise one caller fetches and concurrent callers await that
+    /// same fetch instead of each starting their own.
+    ///
+    /// ```
+    /// use sipgate_flow::{StaticToken, TokenSource};
+    ///
+    /// # async fn demo() -> sipgate_flow::Result<()> {
+    /// let auth = StaticToken::new("pat")?;
+    /// let stale = auth.access_token(false).await?;
+    /// let fresh = auth.refresh_after(&stale).await?;
+    /// assert_eq!(fresh.access_token(), "pat");
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn refresh_after(
+        &self,
+        stale: &Token,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
+        async move {
+            let _ = stale;
+            self.invalidate();
+            self.access_token(true).await
+        }
+    }
 
     /// Drops the cached token, so the next call fetches a fresh one.
     fn invalidate(&self);
@@ -695,6 +727,8 @@ struct Cached {
 struct CacheState {
     cached: Option<Cached>,
     generation: u64,
+    refresh_generation: Option<u64>,
+    refresh_waiters: Vec<Waker>,
 }
 
 impl CacheState {
@@ -702,6 +736,8 @@ impl CacheState {
         Self {
             cached: None,
             generation: 0,
+            refresh_generation: None,
+            refresh_waiters: Vec::new(),
         }
     }
 
@@ -711,6 +747,20 @@ impl CacheState {
     }
 }
 
+enum RefreshAttempt {
+    Ready(Token),
+    Fetch(u64),
+    Waiting,
+}
+
+fn same_token(left: &Token, right: &Token) -> bool {
+    bool::from(
+        left.access_token
+            .as_bytes()
+            .ct_eq(right.access_token.as_bytes()),
+    )
+}
+
 /// Fetches and caches a client-credentials token.
 ///
 /// Safe to share across tasks: the cache is a [`Mutex`], there is no global
@@ -718,7 +768,9 @@ impl CacheState {
 /// several; a single-flight lock would serialise every call for no benefit).
 /// Each fetch reserves a cache generation, so an `invalidate` call or a fetch
 /// started later supersedes an in-flight response instead of letting the older
-/// response overwrite newer cache state.
+/// response overwrite newer cache state. A 401 takes the stricter
+/// [`TokenSource::refresh_after`] path: only the rejected token is replaced, and
+/// concurrent rejections of that same token wait for one fetch.
 ///
 /// ```
 /// use sipgate_flow::{ClientCredentials, OAuth2Client, TokenSource};
@@ -976,6 +1028,30 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
         guard.next_generation()
     }
 
+    fn begin_refresh(&self, stale: &Token) -> RefreshAttempt {
+        let now = self.clock.now();
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cached = guard
+            .cached
+            .as_ref()
+            .filter(|cached| now < cached.usable_until);
+        match cached {
+            Some(cached) if !same_token(&cached.token, stale) => {
+                return RefreshAttempt::Ready(cached.token.clone());
+            }
+            _ => {}
+        }
+        if guard.refresh_generation.is_some() {
+            return RefreshAttempt::Waiting;
+        }
+        let generation = guard.next_generation();
+        guard.refresh_generation = Some(generation);
+        RefreshAttempt::Fetch(generation)
+    }
+
     fn store(&self, token: Token, generation: u64) -> Result<()> {
         let lifetime = token.expires_in().unwrap_or(DEFAULT_LIFETIME);
         let usable_for = lifetime.saturating_sub(self.refresh_margin);
@@ -997,7 +1073,26 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
                 usable_until,
             });
         }
+        if guard.refresh_generation == Some(generation) {
+            guard.refresh_generation = None;
+            for waiter in guard.refresh_waiters.drain(..) {
+                waiter.wake();
+            }
+        }
         Ok(())
+    }
+
+    fn finish_refresh(&self, generation: u64) {
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.refresh_generation == Some(generation) {
+            guard.refresh_generation = None;
+            for waiter in guard.refresh_waiters.drain(..) {
+                waiter.wake();
+            }
+        }
     }
 
     async fn fetch(&self) -> Result<Token> {
@@ -1028,6 +1123,48 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
         Ok(token)
     }
 
+    async fn refresh_after(&self, stale: &Token) -> Result<Token> {
+        let generation = loop {
+            match self.begin_refresh(stale) {
+                RefreshAttempt::Ready(token) => return Ok(token),
+                RefreshAttempt::Fetch(generation) => break generation,
+                RefreshAttempt::Waiting => {
+                    std::future::poll_fn(|cx| {
+                        let mut guard = self
+                            .cache
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if guard.refresh_generation.is_none() {
+                            return Poll::Ready(());
+                        }
+                        let waker = cx.waker();
+                        if !guard
+                            .refresh_waiters
+                            .iter()
+                            .any(|waiting| waiting.will_wake(waker))
+                        {
+                            guard.refresh_waiters.push(waker.clone());
+                        }
+                        Poll::Pending
+                    })
+                    .await;
+                }
+            }
+        };
+        let token = match self.fetch().await {
+            Ok(token) => token,
+            Err(error) => {
+                self.finish_refresh(generation);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.store(token.clone(), generation) {
+            self.finish_refresh(generation);
+            return Err(error);
+        }
+        Ok(token)
+    }
+
     fn invalidate(&self) {
         let mut guard = self
             .cache
@@ -1035,6 +1172,12 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.cached = None;
         guard.next_generation();
+        if guard.refresh_generation.is_some() {
+            guard.refresh_generation = None;
+            for waiter in guard.refresh_waiters.drain(..) {
+                waiter.wake();
+            }
+        }
     }
 }
 

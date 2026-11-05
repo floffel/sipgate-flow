@@ -1,8 +1,8 @@
 //! The authenticated request exchange shared by both clients.
 //!
 //! One rule lives here and only here: a 401 means the cached credential is
-//! stale, so it is invalidated, fetched once with `force_refresh`, and the
-//! request is retried exactly once. A second 401 is terminal — retrying it
+//! stale, so the token that was actually used is refreshed single-flight and
+//! the request is retried exactly once. A second 401 is terminal — retrying it
 //! would burn rate limit for nothing.
 //!
 //! The header the credential goes out with comes from
@@ -44,8 +44,7 @@ pub(crate) async fn authorized<T: Transport, A: TokenSource>(
         return Ok(response);
     }
 
-    auth.invalidate();
-    let token = auth.access_token(true).await?;
+    let token = auth.refresh_after(&token).await?;
     let response = send_once(
         transport,
         base_url,
