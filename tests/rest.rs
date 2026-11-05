@@ -12,7 +12,13 @@ use common::{
 };
 use sipgate_flow::rest::{
     Announcement, Call, ChannelCall, DeviceKind, Dtmf, Fax, HistoryEntryKind, PlayVoicemail,
-    Recording, RecordingSession, ResendFax, Sms, TransferRequest,
+    Recording, RecordingSession, ResendFax, Sms, TransferRequest, UpdateHistoryEntriesRequest,
+};
+use sipgate_flow::rest::{
+    DeleteHistoryEntriesRequest, HistoryDirection, HistoryEntryUpdate, HistoryExportRequest,
+    HistoryQuery, HistoryStarred, SetHistoryEntryArchiveRequest, SetHistoryEntryNoteRequest,
+    SetHistoryEntryReadRequest, UpdateHistoryEntryRequest, MAX_HISTORY_LIMIT, MAX_HISTORY_OFFSET,
+    MAX_HISTORY_UPDATE_ENTRIES,
 };
 use sipgate_flow::{
     ClientCredentials, Error, OAuth2Client, RestClient, Result, RetryPolicy, RetryPolicy as Policy,
@@ -579,6 +585,343 @@ async fn a_call_id_that_would_escape_the_path_is_refused_before_sending() {
         );
     }
     assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn the_history_resource_hits_every_documented_endpoint() {
+    let (transport, _, client) = harness();
+    push_history_responses(&transport);
+    exercise_history_reads(&client).await;
+    exercise_history_writes(&client).await;
+    assert_history_requests(&transport);
+}
+
+fn push_history_responses(transport: &MockTransport) {
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "100001234",
+            "type": "CALL",
+            "direction": "MISSED_INCOMING",
+            "status": "NOPICKUP",
+            "created": "2016-02-10T14:19:39Z",
+            "lastModified": "2016-02-10T14:20:39Z",
+            "source": "anonymous",
+            "sourceAlias": "Dennis Ritchie",
+            "target": "01579-9912345",
+            "targetAlias": "Ken Thompson",
+            "archived": false,
+            "incoming": true,
+            "starred": false,
+            "read": true,
+            "labels": ["support"],
+            "connectionIds": ["c1"],
+            "endpoints": [{
+                "type": "ROUTED",
+                "endpoint": {"extension": "e0", "type": "REGISTER"}
+            }],
+            "futureField": {"kept": true}
+        }],
+        "totalCount": 1,
+        "futureEnvelopeField": "ignored"
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "id": "100001234",
+        "type": "CALL",
+        "direction": "INCOMING",
+        "futureField": 1
+    })));
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/octet-stream")],
+        b"id,type\n100001234,CALL\n",
+    ));
+    for _ in 0..7 {
+        transport.push_response(no_content());
+    }
+}
+
+async fn exercise_history_reads(client: &TestClient) {
+    let page = client
+        .history_page(&full_history_query())
+        .await
+        .expect("history page");
+    assert_eq!(page.total_count, Some(1));
+    assert_eq!(page.items[0].id, "100001234");
+    assert_eq!(page.items[0].kind, Some(HistoryEntryKind::Call));
+    assert_eq!(
+        page.items[0].direction,
+        Some(HistoryDirection::MissedIncoming)
+    );
+    assert_eq!(
+        page.items[0].endpoints[0]
+            .endpoint
+            .as_ref()
+            .map(|e| e.extension.as_str()),
+        Some("e0")
+    );
+
+    let entry = client.history_entry("100001234").await.expect("entry");
+    assert_eq!(entry.id, "100001234");
+
+    let mut export_query = HistoryQuery::new();
+    export_query.limit = Some(5);
+    let csv = client
+        .history_export_csv(&HistoryExportRequest::new(export_query))
+        .await
+        .expect("csv");
+    assert_eq!(csv, "id,type\n100001234,CALL\n");
+}
+
+async fn exercise_history_writes(client: &TestClient) {
+    client
+        .delete_history_entries(&delete_history_request())
+        .await
+        .expect("deleted many");
+    client
+        .delete_history_entry("100001236")
+        .await
+        .expect("deleted one");
+    client
+        .update_history_entries(&bulk_history_update())
+        .await
+        .expect("updated many");
+    client
+        .update_history_entry("100001234", &single_history_update())
+        .await
+        .expect("updated one");
+    client
+        .set_history_entry_archive("100001234", &SetHistoryEntryArchiveRequest::new(true))
+        .await
+        .expect("archived");
+    client
+        .set_history_entry_note(
+            "100001234",
+            &SetHistoryEntryNoteRequest::new("done").expect("note"),
+        )
+        .await
+        .expect("noted");
+    client
+        .set_history_entry_read("100001234", &SetHistoryEntryReadRequest::new(false))
+        .await
+        .expect("read state");
+}
+
+fn full_history_query() -> HistoryQuery {
+    let mut query = HistoryQuery::new();
+    query.types = vec![HistoryEntryKind::Call, HistoryEntryKind::Sms];
+    query.directions = vec![HistoryDirection::Incoming, HistoryDirection::MissedOutgoing];
+    query.starred = vec![HistoryStarred::Starred, HistoryStarred::Unstarred];
+    query.offset = Some(0);
+    query.limit = Some(MAX_HISTORY_LIMIT);
+    query.archived = Some(false);
+    query.from = Some("2016-02-01T00:00:00Z".to_string());
+    query.to = Some("2016-02-29T23:59:59Z".to_string());
+    query.phone_number = Some("+4915112345678".to_string());
+    query.include_all_users = Some(true);
+    query.connection_ids = vec!["c1".to_string(), "c2".to_string()];
+    query
+}
+
+fn delete_history_request() -> DeleteHistoryEntriesRequest {
+    DeleteHistoryEntriesRequest::new(["100001234".to_string(), "100001235".to_string()])
+        .expect("delete request")
+}
+
+fn bulk_history_update() -> UpdateHistoryEntriesRequest {
+    let mut update = HistoryEntryUpdate::new("100001234").expect("update");
+    update.archived = Some(false);
+    update.read = Some(true);
+    update.starred = Some(true);
+    UpdateHistoryEntriesRequest::new([update]).expect("bulk update")
+}
+
+fn single_history_update() -> UpdateHistoryEntryRequest {
+    let mut update = UpdateHistoryEntryRequest::new();
+    update.archived = Some(false);
+    update.read = Some(true);
+    update.starred = Some(false);
+    update.note = Some("called back".to_string());
+    update
+}
+
+fn assert_history_requests(transport: &MockTransport) {
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 10);
+    let expected_methods = [
+        "GET", "GET", "GET", "DELETE", "DELETE", "PUT", "PUT", "PUT", "PUT", "PUT",
+    ];
+    for (call, method) in calls.iter().zip(expected_methods) {
+        assert_eq!(call.method.as_str(), method);
+    }
+
+    assert_eq!(
+        calls[0].url,
+        "https://api.sipgate.com/v2/history?types=CALL&types=SMS&directions=INCOMING&directions=MISSED_OUTGOING&offset=0&limit=1000&archived=false&starred=STARRED&starred=UNSTARRED&from=2016-02-01T00%3A00%3A00Z&to=2016-02-29T23%3A59%3A59Z&phonenumber=%2B4915112345678&includeAllUsers=true&connectionIds=c1&connectionIds=c2"
+    );
+    assert_eq!(calls[1].url, "https://api.sipgate.com/v2/history/100001234");
+    assert_eq!(
+        calls[2].url,
+        "https://api.sipgate.com/v2/history/export?limit=5"
+    );
+    assert_eq!(
+        calls[3].url,
+        "https://api.sipgate.com/v2/history?id=100001234&id=100001235"
+    );
+    assert_eq!(calls[4].url, "https://api.sipgate.com/v2/history/100001236");
+    assert_eq!(calls[5].url, "https://api.sipgate.com/v2/history");
+    assert_eq!(calls[6].url, "https://api.sipgate.com/v2/history/100001234");
+    assert_eq!(
+        calls[7].url,
+        "https://api.sipgate.com/v2/history/100001234/archive"
+    );
+    assert_eq!(
+        calls[8].url,
+        "https://api.sipgate.com/v2/history/100001234/note"
+    );
+    assert_eq!(
+        calls[9].url,
+        "https://api.sipgate.com/v2/history/100001234/read"
+    );
+
+    assert_eq!(
+        json_body(&calls[5].body),
+        serde_json::json!([{"id": "100001234", "archived": false, "read": true, "starred": true}])
+    );
+    assert_eq!(
+        json_body(&calls[6].body),
+        serde_json::json!({"archived": false, "read": true, "starred": false, "note": "called back"})
+    );
+    assert_eq!(
+        json_body(&calls[7].body),
+        serde_json::json!({"value": true})
+    );
+    assert_eq!(
+        json_body(&calls[8].body),
+        serde_json::json!({"note": "done"})
+    );
+    assert_eq!(
+        json_body(&calls[9].body),
+        serde_json::json!({"value": false})
+    );
+    for call in &calls[3..] {
+        assert_eq!(call.auth.bearer(), Some("access-token"));
+    }
+}
+
+#[test]
+fn history_query_validation_has_just_inside_and_just_outside_bounds() {
+    let mut query = HistoryQuery::new();
+    query.offset = Some(MAX_HISTORY_OFFSET);
+    query.limit = Some(MAX_HISTORY_LIMIT);
+    assert!(query.to_query().is_ok());
+
+    query.offset = Some(MAX_HISTORY_OFFSET + 1);
+    assert!(matches!(
+        query.to_query(),
+        Err(Error::Validation {
+            field: "offset",
+            ..
+        })
+    ));
+
+    query.offset = None;
+    query.limit = Some(MAX_HISTORY_LIMIT + 1);
+    assert!(matches!(
+        query.to_query(),
+        Err(Error::Validation { field: "limit", .. })
+    ));
+
+    query.limit = Some(0);
+    assert_eq!(query.to_query().expect("zero is documented"), "limit=0");
+}
+
+#[test]
+fn history_filter_writes_refuse_empty_or_escaping_values() {
+    let mut query = HistoryQuery::new();
+    query.connection_ids = vec!["a/b".to_string()];
+    assert!(matches!(
+        query.to_query(),
+        Err(Error::Validation {
+            field: "connectionIds",
+            ..
+        })
+    ));
+
+    let mut query = HistoryQuery::new();
+    query.from = Some(String::new());
+    assert!(matches!(
+        query.to_query(),
+        Err(Error::Validation { field: "from", .. })
+    ));
+
+    let mut query = HistoryQuery::new();
+    query.phone_number = Some("+4915112345678".to_string());
+    assert!(matches!(
+        HistoryExportRequest::new(query).to_query(),
+        Err(Error::Validation {
+            field: "phonenumber",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn history_update_requests_enforce_the_documented_bulk_limit_and_ids() {
+    let just_inside = (0..MAX_HISTORY_UPDATE_ENTRIES)
+        .map(|index| HistoryEntryUpdate::new(format!("entry-{index}")).expect("valid"))
+        .collect::<Vec<_>>();
+    assert!(UpdateHistoryEntriesRequest::new(just_inside).is_ok());
+
+    let just_outside = (0..=MAX_HISTORY_UPDATE_ENTRIES)
+        .map(|index| HistoryEntryUpdate::new(format!("entry-{index}")).expect("valid"))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        UpdateHistoryEntriesRequest::new(just_outside),
+        Err(Error::Validation {
+            field: "entries",
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        HistoryEntryUpdate::new(""),
+        Err(Error::Validation { field: "id", .. })
+    ));
+    assert!(matches!(
+        DeleteHistoryEntriesRequest::new(Vec::<String>::new()),
+        Err(Error::Validation { field: "id", .. })
+    ));
+    assert!(matches!(
+        DeleteHistoryEntriesRequest::new(["100001234".to_string(), "100001234".to_string(),]),
+        Err(Error::Validation { field: "id", .. })
+    ));
+    assert!(matches!(
+        DeleteHistoryEntriesRequest::new(["../history".to_string()]),
+        Err(Error::Validation { field: "id", .. })
+    ));
+}
+
+#[test]
+fn history_note_update_and_response_helpers_cover_empty_and_unknown_values() {
+    let mut request = UpdateHistoryEntryRequest::new();
+    request.note = Some(String::new());
+    assert_eq!(request.to_json(), serde_json::json!({"note": ""}));
+    assert!(matches!(
+        SetHistoryEntryNoteRequest::new(""),
+        Err(Error::Validation { field: "note", .. })
+    ));
+    assert_eq!(
+        HistoryEntryKind::from_wire("page"),
+        HistoryEntryKind::Other("page".to_string())
+    );
+    assert_eq!(
+        HistoryDirection::from_wire("sideways"),
+        HistoryDirection::Other("sideways".to_string())
+    );
+    assert_eq!(
+        HistoryStarred::from_wire("tomorrow"),
+        HistoryStarred::Other("tomorrow".to_string())
+    );
 }
 
 #[tokio::test]

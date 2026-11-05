@@ -72,6 +72,15 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `Error::socket_with_source`) reports a failed link with its cause attached and
   `is_retryable()` telling the caller whether a new connection is worth trying.
   It never re-sends a frame: a lost action is reported, not repaired.
+* The **full REST v2 history resource** (#166): typed `RestClient` methods for
+  `GET /v2/history`, `GET /v2/history/export`, `GET`/`DELETE`/`PUT`
+  `/v2/history/{entryId}`, `DELETE`/`PUT` `/v2/history`, and the deprecated
+  archive/note/read updates. `HistoryQuery` validates the documented pagination
+  bounds before the wire, accepts the documented filters (types, directions,
+  starred state, date range, include-all-users and connection IDs), and sends
+  them as the repeated query parameters Swagger documents. Response decoding
+  remains permissive, including `total_count`/`totalCount`, while single-entry
+  and bulk write requests carry typed bodies.
 
 ### Fixed
 
