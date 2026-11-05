@@ -34,6 +34,14 @@ with the pre-1.0 reading described in the README section *Versioning*.
   applied after a `POST`, while `408` and `425` are retryable because they mean
   nothing was processed. The refined table is pinned in the property and
   delivery tests.
+* `WebhookVerifier::verify_headers` admits the webhook shared secret from a
+  request's headers regardless of how the framework spells the header name.
+  HTTP header names are case-insensitive, but the exported `SECRET_HEADER` /
+  `SECRET_HEADER_LEGACY` constants are lowercased, so a handler indexing a map
+  that preserved `X-API-TOKEN` got `None` and every request failed closed with
+  `MissingSecret`. The new method matches both documented names with
+  `eq_ignore_ascii_case`, rejects a request whose two present spellings
+  disagree, and keeps the constant-time value comparison.
 * The flagship crate example no longer teaches failure-to-default. It used
   `event.session_id().unwrap_or_default()`, silently substituting an empty
   session id and returning `200` as if the action were valid. The example now

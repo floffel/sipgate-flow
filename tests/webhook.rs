@@ -403,3 +403,128 @@ fn the_header_names_the_documentation_uses_are_exported() {
     assert_eq!(sipgate_flow::webhook::SECRET_HEADER, "x-api-token");
     assert_eq!(sipgate_flow::webhook::SECRET_HEADER_LEGACY, "x-api-key");
 }
+
+#[test]
+fn verify_headers_accepts_the_canonical_spelling_in_any_casing() {
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    for name in ["x-api-token", "X-API-TOKEN", "X-Api-Token", "x-API-Token"] {
+        assert!(
+            verifier.verify_headers([(name, "s3cret")]).is_ok(),
+            "{name:?} should be accepted"
+        );
+    }
+}
+
+#[test]
+fn verify_headers_accepts_the_legacy_spelling_in_any_casing() {
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    for name in ["x-api-key", "X-API-KEY", "X-Api-Key", "x-API-Key"] {
+        assert!(
+            verifier.verify_headers([(name, "s3cret")]).is_ok(),
+            "{name:?} should be accepted"
+        );
+    }
+}
+
+#[test]
+fn verify_headers_ignores_unrelated_headers() {
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    assert!(verifier
+        .verify_headers([
+            ("Content-Type", "application/json"),
+            ("X-API-TOKEN", "s3cret"),
+            ("User-Agent", "sipgate-flow/1.0"),
+        ])
+        .is_ok());
+    assert!(verifier
+        .verify_headers([
+            ("Content-Type", "application/json"),
+            ("X-API-Key", "s3cret"),
+        ])
+        .is_ok());
+}
+
+#[test]
+fn verify_headers_accepts_both_spellings_when_they_agree() {
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    assert!(verifier
+        .verify_headers([("X-API-TOKEN", "s3cret"), ("X-API-Key", "s3cret")])
+        .is_ok());
+    // Order must not matter, and casing must not matter.
+    assert!(verifier
+        .verify_headers([("X-API-Key", "s3cret"), ("x-api-token", "s3cret")])
+        .is_ok());
+}
+
+#[test]
+fn verify_headers_rejects_two_present_spellings_that_disagree() {
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    let error = verifier
+        .verify_headers([("X-API-TOKEN", "s3cret"), ("X-API-Key", "s3cre")])
+        .expect_err("disagreeing spellings are ambiguous");
+    assert!(matches!(error, Error::SecretMismatch));
+
+    // Reversed order must be rejected too.
+    let error = verifier
+        .verify_headers([("X-API-Key", "wrong"), ("X-API-TOKEN", "s3cret")])
+        .expect_err("disagreeing spellings are ambiguous");
+    assert!(matches!(error, Error::SecretMismatch));
+}
+
+#[test]
+fn verify_headers_rejects_a_request_with_no_documented_header() {
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    assert!(matches!(
+        verifier.verify_headers(Vec::<(&str, &str)>::new()),
+        Err(Error::MissingSecret)
+    ));
+    assert!(matches!(
+        verifier.verify_headers([("Authorization", "Bearer s3cret")]),
+        Err(Error::MissingSecret)
+    ));
+    // A near-miss name is not the documented header.
+    assert!(matches!(
+        verifier.verify_headers([("X-API-TOKEN ", "s3cret")]),
+        Err(Error::MissingSecret)
+    ));
+}
+
+#[test]
+fn verify_headers_rejects_an_empty_or_wrong_secret() {
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    assert!(matches!(
+        verifier.verify_headers([("X-API-TOKEN", "")]),
+        Err(Error::MissingSecret)
+    ));
+    for wrong in ["s3cre", "s3crets", "S3CRET", "s3cret ", " s3cret"] {
+        assert!(
+            matches!(
+                verifier.verify_headers([("X-API-TOKEN", wrong)]),
+                Err(Error::SecretMismatch)
+            ),
+            "{wrong:?} should not verify"
+        );
+        assert!(
+            matches!(
+                verifier.verify_headers([("x-api-key", wrong)]),
+                Err(Error::SecretMismatch)
+            ),
+            "{wrong:?} should not verify via the legacy name"
+        );
+    }
+}
+
+#[test]
+fn verify_headers_does_not_accept_a_bad_value_before_a_good_one() {
+    // Frameworks that surface the same header twice should not accidentally
+    // accept an earlier value once a later, correct one shows up; the last
+    // occurrence wins, matching how a header map would fold duplicates.
+    let verifier = WebhookVerifier::new("s3cret").expect("valid");
+    assert!(verifier
+        .verify_headers([("X-API-TOKEN", "wrong"), ("X-API-TOKEN", "s3cret")])
+        .is_ok());
+    assert!(matches!(
+        verifier.verify_headers([("X-API-TOKEN", "s3cret"), ("X-API-TOKEN", "wrong")]),
+        Err(Error::SecretMismatch)
+    ));
+}
