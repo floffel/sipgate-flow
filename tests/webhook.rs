@@ -45,8 +45,10 @@ fn a_missing_empty_or_wrong_secret_fails_closed() {
 fn json_content_types_are_accepted_with_parameters_and_casing() {
     for value in [
         "application/json",
+        "application/json; charset=utf-8",
         "Application/JSON; charset=utf-8",
         "application/json;charset=UTF-8",
+        "application/vnd.x+json",
         "application/problem+json",
         " application/json ",
     ] {
@@ -56,6 +58,8 @@ fn json_content_types_are_accepted_with_parameters_and_casing() {
         "application/x-www-form-urlencoded",
         "text/plain",
         "application/xml",
+        "not+json",
+        "not a media type",
         "",
     ] {
         assert!(!is_json_content_type(value), "{value:?}");
