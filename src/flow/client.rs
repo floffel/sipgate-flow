@@ -22,6 +22,7 @@
 //! # }
 //! ```
 
+use std::fmt;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -333,11 +334,24 @@ impl<T: Transport, A: TokenSource> std::fmt::Debug for FlowClient<T, A> {
 /// );
 /// # Ok::<(), sipgate_flow::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OutboundCall {
     ai_flow_id: String,
     billing_device: String,
     to_phone_number: String,
+}
+
+impl std::fmt::Debug for OutboundCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundCall")
+            .field("ai_flow_id", &self.ai_flow_id)
+            .field("billing_device", &self.billing_device)
+            .field(
+                "to_phone_number",
+                &masked_phone_number(&self.to_phone_number),
+            )
+            .finish()
+    }
 }
 
 impl OutboundCall {
@@ -451,11 +465,20 @@ impl OutboundCall {
 /// assert_eq!(receipt.call_sid(), Some("pbx-c-ffff"));
 /// # Ok::<(), sipgate_flow::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct OutboundCallReceipt {
     call_sid: Option<String>,
     raw: Value,
+}
+
+impl std::fmt::Debug for OutboundCallReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundCallReceipt")
+            .field("call_sid", &self.call_sid)
+            .field("raw", &RedactedRaw(&self.raw))
+            .finish()
+    }
 }
 
 impl OutboundCallReceipt {
@@ -530,5 +553,51 @@ impl OutboundCallReceipt {
     #[must_use]
     pub fn raw(&self) -> &Value {
         &self.raw
+    }
+}
+
+/// A phone number for `Debug` output: keep a short prefix and the last four
+/// digits, masking the middle with the same style as error bodies.
+fn masked_phone_number(number: &str) -> String {
+    const PREFIX: usize = 3;
+    const SUFFIX: usize = 4;
+    const MASK: &str = "****";
+
+    let prefix_len = PREFIX.min(number.len().saturating_sub(SUFFIX + 1));
+    let suffix_start = number.len().saturating_sub(SUFFIX);
+    format!(
+        "+{}{MASK}{}",
+        &number[..prefix_len],
+        &number[suffix_start..]
+    )
+}
+
+/// The raw response body as it may appear in `Debug`: only its serialized size.
+struct RedactedRaw<'a>(&'a Value);
+
+impl fmt::Debug for RedactedRaw<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} bytes>", json_byte_len(self.0))
+    }
+}
+
+/// Counts serialized JSON bytes without allocating the serialized payload.
+fn json_byte_len(value: &Value) -> usize {
+    let mut counter = JsonByteCounter(0);
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) | Err(_) => counter.0,
+    }
+}
+
+struct JsonByteCounter(usize);
+
+impl std::io::Write for JsonByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
