@@ -11,13 +11,15 @@ use common::{
     json_response, no_content, response, static_auth, Body, MockTransport, RecordingSleeper,
 };
 use sipgate_flow::rest::{
-    Announcement, Call, ChannelCall, DeviceKind, Dtmf, Fax, HistoryEntryKind, PlayVoicemail,
-    Recording, RecordingSession, ResendFax, Sms, TransferRequest, UpdateHistoryEntriesRequest,
-};
-use sipgate_flow::rest::{
-    DeleteHistoryEntriesRequest, HistoryDirection, HistoryEntryUpdate, HistoryExportRequest,
-    HistoryQuery, HistoryStarred, SetHistoryEntryArchiveRequest, SetHistoryEntryNoteRequest,
-    SetHistoryEntryReadRequest, UpdateHistoryEntryRequest, MAX_HISTORY_LIMIT, MAX_HISTORY_OFFSET,
+    Announcement, BlockAnonymousTarget, Call, ChannelCall, DeleteHistoryEntriesRequest, DeviceKind,
+    Dtmf, Fax, HistoryDirection, HistoryEntryKind, HistoryEntryUpdate, HistoryExportRequest,
+    HistoryQuery, HistoryStarred, ParallelForwardingRequest, PhonelineAlias,
+    PhonelineBlockAnonymousSetting, PhonelineForwardingRule, PhonelineForwardings,
+    PhonelineNumberKind, PhonelineSipgateIo, PlayVoicemail, Recording, RecordingSession, ResendFax,
+    RouteDeviceRequest, SetHistoryEntryArchiveRequest, SetHistoryEntryNoteRequest,
+    SetHistoryEntryReadRequest, Sms, TransferRequest, UpdateHistoryEntriesRequest,
+    UpdateHistoryEntryRequest, VoicemailGreetingRequest, VoicemailGreetingUpdate,
+    VoicemailSettingsUpdate, VoicemailTranscriptionUpdate, MAX_HISTORY_LIMIT, MAX_HISTORY_OFFSET,
     MAX_HISTORY_UPDATE_ENTRIES,
 };
 use sipgate_flow::{
@@ -2272,4 +2274,447 @@ mod devices_164 {
         let empty_register = CreateRegisterDevice::new().to_json();
         assert_eq!(empty_register, serde_json::json!({}));
     }
+}
+
+#[tokio::test]
+async fn phoneline_account_crud_uses_the_documented_paths_and_types() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "p0",
+            "alias": "Front desk",
+            "devicesUrl": "https://api.sipgate.com/v2/w0/phonelines/p0/devices",
+            "futureField": true
+        }]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "id": "p1",
+        "alias": "New line",
+        "futureField": true
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "id": "p0",
+        "alias": "Front desk",
+        "voicemails": [{"id": "v0", "active": true, "timeout": 20}],
+        "futureField": true
+    })));
+    transport.push_response(no_content());
+    transport.push_response(no_content());
+
+    let lines = client
+        .user_phonelines("w0")
+        .await
+        .expect("listed user lines");
+    assert_eq!(lines[0].id, "p0");
+    assert!(lines[0].devices_url.ends_with("/devices"));
+
+    let created = client.create_user_phoneline("w0").await.expect("created");
+    assert_eq!(created.id, "p1");
+
+    let line = client.user_phoneline("w0", "p0").await.expect("line");
+    assert_eq!(line.voicemails[0].timeout, 20);
+
+    client
+        .set_user_phoneline_alias(
+            "w0",
+            "p0",
+            &PhonelineAlias::new("Front desk").expect("alias"),
+        )
+        .await
+        .expect("alias updated");
+    client
+        .delete_user_phoneline("w0", "p0")
+        .await
+        .expect("deleted");
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(calls[0].method.as_str(), "GET");
+    assert_eq!(calls[0].url, "https://api.sipgate.com/v2/w0/phonelines");
+    assert_eq!(calls[1].method.as_str(), "POST");
+    assert_eq!(calls[1].url, "https://api.sipgate.com/v2/w0/phonelines");
+    assert_eq!(calls[2].url, "https://api.sipgate.com/v2/w0/phonelines/p0");
+    assert_eq!(calls[3].method.as_str(), "PUT");
+    assert_eq!(calls[3].url, "https://api.sipgate.com/v2/w0/phonelines/p0");
+    assert_eq!(json_body(&calls[3].body)["alias"], "Front desk");
+    assert_eq!(calls[4].method.as_str(), "DELETE");
+    assert_eq!(calls[4].url, "https://api.sipgate.com/v2/w0/phonelines/p0");
+}
+
+#[tokio::test]
+async fn phoneline_settings_and_routing_reads_decode_typed_models() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({
+        "enabled": true,
+        "target": "VOICEMAIL",
+        "futureField": true
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{"id": "e0", "alias": "Desk phone", "type": "REGISTER"}]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{"active": true, "alias": "Mobile", "destination": "+4915112345678", "timeout": 20}]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{"id": "n0", "number": "+4915112345678", "localized": "01579-9912345", "type": "MOBILE"}]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{"id": "x0", "active": true, "alias": "Mobile", "destination": "+4915112345678"}]
+    })));
+
+    let setting = client
+        .phoneline_block_anonymous_setting("w0", "p0")
+        .await
+        .expect("block anonymous");
+    assert_eq!(setting.target, Some(BlockAnonymousTarget::Voicemail));
+
+    let devices = client.phoneline_devices("w0", "p0").await.expect("devices");
+    assert_eq!(devices[0].id, "e0");
+
+    let forwardings = client
+        .phoneline_forwardings("w0", "p0")
+        .await
+        .expect("forwardings");
+    assert_eq!(forwardings[0].timeout, 20);
+
+    let numbers = client.phoneline_numbers("w0", "p0").await.expect("numbers");
+    assert_eq!(numbers[0].kind, Some(PhonelineNumberKind::Mobile));
+
+    let parallel = client
+        .phoneline_parallel_forwardings("w0", "p0")
+        .await
+        .expect("parallel");
+    assert_eq!(parallel[0].id, "x0");
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(
+        calls[0].url,
+        "https://api.sipgate.com/v2/w0/phonelines/p0/blockanonymous"
+    );
+}
+
+#[tokio::test]
+async fn phoneline_sipgate_io_and_voicemail_reads_decode_typed_models() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({
+        "incomingActive": true,
+        "incomingUrl": "https://example.com/in",
+        "outgoingActive": false,
+        "outgoingUrl": "https://example.com/out",
+        "allowSelfSigned": false,
+        "certificate": "-----BEGIN CERTIFICATE-----",
+        "log": true,
+        "futureField": true
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "created": "2015-10-21T19:28:00Z",
+            "pushApiVersion": 2,
+            "request": "event=newCall",
+            "response": "HTTP/1.1 200 OK",
+            "status": "200",
+            "url": "https://demo.sipgate.io",
+            "xmlError": ""
+        }]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "v0",
+            "alias": "Voicemail",
+            "active": true,
+            "timeout": 20,
+            "accessNumber": "50000",
+            "activeGreetingId": "g0",
+            "activeGreetingAlias": "Default",
+            "canTranscribe": true,
+            "transcription": false
+        }]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "g0",
+            "alias": "Default greeting",
+            "active": true,
+            "greetingUrl": "https://example.com/greeting.mp3",
+            "recordingEnabled": false
+        }]
+    })));
+
+    let io = client
+        .phoneline_sipgate_io("w0", "p0")
+        .await
+        .expect("sipgateio");
+    assert!(io.incoming_active);
+    assert!(io.log);
+
+    let logs = client
+        .phoneline_sipgate_io_logs("w0", "p0")
+        .await
+        .expect("logs");
+    assert_eq!(logs[0].push_api_version, 2);
+
+    let voicemails = client
+        .phoneline_voicemails("w0", "p0")
+        .await
+        .expect("voicemails");
+    assert_eq!(voicemails[0].active_greeting_id, "g0");
+
+    let greetings = client
+        .phoneline_voicemail_greetings("w0", "p0", "v0")
+        .await
+        .expect("greetings");
+    assert_eq!(greetings[0].id, "g0");
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls[0].url,
+        "https://api.sipgate.com/v2/w0/phonelines/p0/sipgateio"
+    );
+    assert_eq!(
+        calls[3].url,
+        "https://api.sipgate.com/v2/w0/phonelines/p0/voicemails/v0/greetings"
+    );
+}
+
+#[tokio::test]
+async fn phoneline_settings_and_routing_writes_use_documented_bodies() {
+    let (transport, _, client) = harness();
+    for _ in 0..3 {
+        transport.push_response(no_content());
+    }
+    transport.push_response(json_response(&serde_json::json!({
+        "active": true,
+        "alias": "Mobile",
+        "destination": "+4915112345678",
+        "timeout": 20
+    })));
+    for _ in 0..3 {
+        transport.push_response(no_content());
+    }
+
+    let blocking = PhonelineBlockAnonymousSetting::reject(true);
+    client
+        .set_phoneline_block_anonymous_setting("w0", "p0", &blocking)
+        .await
+        .expect("blocking");
+    client
+        .add_device_to_phoneline("w0", "p0", &RouteDeviceRequest::new("e0").expect("device"))
+        .await
+        .expect("device added");
+    client
+        .remove_device_from_phoneline("w0", "p0", "e0")
+        .await
+        .expect("device removed");
+    let rules = PhonelineForwardings::new(vec![PhonelineForwardingRule::new(
+        true,
+        "+4915112345678",
+        20,
+    )
+    .expect("rule")])
+    .expect("rules");
+    let updated = client
+        .set_phoneline_forwardings("w0", "p0", &rules)
+        .await
+        .expect("forwarding updated");
+    assert!(updated.active);
+    let parallel = ParallelForwardingRequest::new("+4915112345678")
+        .expect("parallel")
+        .with_alias("Mobile");
+    client
+        .add_phoneline_parallel_forwarding("w0", "p0", &parallel)
+        .await
+        .expect("parallel added");
+    client
+        .update_phoneline_parallel_forwarding("w0", "p0", "x0", &parallel)
+        .await
+        .expect("parallel updated");
+    client
+        .delete_phoneline_parallel_forwarding("w0", "p0", "x0")
+        .await
+        .expect("parallel deleted");
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 7);
+    assert_eq!(json_body(&calls[0].body)["target"], "REJECT");
+    assert_eq!(json_body(&calls[1].body)["deviceId"], "e0");
+    assert_eq!(json_body(&calls[3].body)["forwardings"][0]["timeout"], 20);
+    assert_eq!(json_body(&calls[4].body)["destination"], "+4915112345678");
+}
+
+#[tokio::test]
+async fn phoneline_sipgate_io_and_voicemail_writes_use_documented_bodies() {
+    let (transport, _, client) = harness();
+    for _ in 0..6 {
+        transport.push_response(no_content());
+    }
+
+    let io = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")
+        .expect("io")
+        .with_incoming_active(true)
+        .with_outgoing_active(true)
+        .with_allow_self_signed(true)
+        .with_certificate("-----BEGIN CERTIFICATE-----")
+        .with_log(true);
+    client
+        .set_phoneline_sipgate_io("w0", "p0", &io)
+        .await
+        .expect("io updated");
+    client
+        .update_phoneline_voicemail(
+            "w0",
+            "p0",
+            "v0",
+            &VoicemailSettingsUpdate::new(true, false).with_timeout(0),
+        )
+        .await
+        .expect("voicemail updated");
+    let greeting =
+        VoicemailGreetingRequest::new("greeting.mp3", "RG8uIE9yIGRvIG5vdC4=").expect("greeting");
+    client
+        .add_phoneline_voicemail_greeting("w0", "p0", "v0", &greeting)
+        .await
+        .expect("greeting added");
+    client
+        .update_phoneline_voicemail_greeting(
+            "w0",
+            "p0",
+            "v0",
+            "g0",
+            &VoicemailGreetingUpdate::new(true),
+        )
+        .await
+        .expect("greeting updated");
+    client
+        .delete_phoneline_voicemail_greeting("w0", "p0", "v0", "g0")
+        .await
+        .expect("greeting deleted");
+    client
+        .update_phoneline_voicemail_transcription(
+            "w0",
+            "p0",
+            "v0",
+            &VoicemailTranscriptionUpdate::new(true),
+        )
+        .await
+        .expect("transcription updated");
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 6);
+    assert_eq!(json_body(&calls[0].body)["incomingActive"], true);
+    assert_eq!(json_body(&calls[1].body)["timeout"], 0);
+    assert_eq!(
+        json_body(&calls[2].body)["base64Content"],
+        "RG8uIE9yIGRvIG5vdC4="
+    );
+    assert_eq!(json_body(&calls[3].body)["active"], true);
+    assert_eq!(
+        calls[5].url,
+        "https://api.sipgate.com/v2/w0/phonelines/p0/voicemails/v0/transcriptions"
+    );
+}
+
+#[tokio::test]
+async fn phoneline_path_parameters_and_bytes_are_validated_before_the_wire() {
+    let (transport, _, client) = harness();
+    for bad in ["", ".", "..", "a/b", "a?b", "a b", "a\tb"] {
+        assert!(matches!(
+            client.user_phonelines(bad).await,
+            Err(Error::Validation {
+                field: "user_id",
+                ..
+            })
+        ));
+        assert!(matches!(
+            client.user_phoneline("w0", bad).await,
+            Err(Error::Validation {
+                field: "phoneline_id",
+                ..
+            })
+        ));
+    }
+    assert!(matches!(
+        client.remove_device_from_phoneline("w0", "p0", "a/b").await,
+        Err(Error::Validation {
+            field: "device_id",
+            ..
+        })
+    ));
+    assert!(matches!(
+        client
+            .delete_phoneline_voicemail_greeting("w0", "p0", "v0", "a/b")
+            .await,
+        Err(Error::Validation {
+            field: "greeting_id",
+            ..
+        })
+    ));
+    assert_eq!(transport.call_count(), 0);
+}
+
+#[test]
+fn phoneline_request_boundaries_are_proven() {
+    let limit = 1024 * 1024;
+    assert!(PhonelineAlias::new("a".repeat(limit)).is_ok());
+    assert!(PhonelineAlias::new("a".repeat(limit + 1)).is_err());
+
+    assert!(RouteDeviceRequest::new("e0").is_ok());
+    assert!(RouteDeviceRequest::new("a/b").is_err());
+
+    assert!(PhonelineForwardingRule::new(true, "+4915112345", 20).is_ok());
+    assert!(PhonelineForwardingRule::new(true, "123", 20).is_err());
+
+    assert!(PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out").is_ok());
+    assert!(PhonelineSipgateIo::new("example.com/in", "https://example.com/out").is_err());
+
+    assert!(VoicemailGreetingRequest::new("g.mp3", "A".repeat(15_000_000)).is_ok());
+    assert!(VoicemailGreetingRequest::new("g.mp3", "A".repeat(15_000_001)).is_err());
+    assert!(VoicemailGreetingRequest::new("g.mp3", "not base64").is_err());
+}
+
+#[tokio::test]
+async fn phoneline_models_are_permissive_and_carry_unknown_variants() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "n0",
+            "number": "+4915112345678",
+            "localized": "01579-9912345",
+            "type": "SATELLITE",
+            "futureField": true
+        }]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "incoming_active": true,
+        "incoming_url": "https://example.com/in",
+        "outgoing_active": false,
+        "outgoing_url": "https://example.com/out",
+        "allow_self_signed": false,
+        "certificate": "",
+        "log": false,
+        "futureField": true
+    })));
+
+    let numbers = client.phoneline_numbers("w0", "p0").await.expect("numbers");
+    assert_eq!(
+        numbers[0].kind,
+        Some(PhonelineNumberKind::Other("SATELLITE".into()))
+    );
+
+    let io = client.phoneline_sipgate_io("w0", "p0").await.expect("io");
+    assert!(io.incoming_active);
+    assert_eq!(io.incoming_url, "https://example.com/in");
+}
+
+#[tokio::test]
+async fn phoneline_response_shape_mismatch_is_a_typed_json_error() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({"id": 1})));
+
+    let error = client
+        .user_phoneline("w0", "p0")
+        .await
+        .expect_err("wrong shape");
+    assert!(matches!(error, Error::Json { .. }));
 }

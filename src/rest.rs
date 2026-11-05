@@ -847,6 +847,949 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
     }
 }
 
+// BEGIN REST v2 phonelines surface (#167)
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    fn user_path(user_id: &str) -> Result<String> {
+        validate::path_segment("user_id", user_id)?;
+        Ok(format!("/v2/{user_id}/phonelines"))
+    }
+
+    fn user_phoneline_path(user_id: &str, phoneline_id: &str) -> Result<String> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("phoneline_id", phoneline_id)?;
+        Ok(format!("/v2/{user_id}/phonelines/{phoneline_id}"))
+    }
+
+    fn user_phoneline_subpath(user_id: &str, phoneline_id: &str, suffix: &str) -> Result<String> {
+        Ok(format!(
+            "{}/{}",
+            Self::user_phoneline_path(user_id, phoneline_id)?,
+            suffix
+        ))
+    }
+
+    fn user_phoneline_voicemail_path(
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+    ) -> Result<String> {
+        validate::path_segment("voicemail_id", voicemail_id)?;
+        Self::user_phoneline_subpath(user_id, phoneline_id, &format!("voicemails/{voicemail_id}"))
+    }
+
+    fn user_phoneline_greeting_path(
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+        greeting_id: &str,
+    ) -> Result<String> {
+        validate::path_segment("greeting_id", greeting_id)?;
+        Ok(format!(
+            "{}/greetings/{greeting_id}",
+            Self::user_phoneline_voicemail_path(user_id, phoneline_id, voicemail_id)?
+        ))
+    }
+
+    fn parse_phoneline<U: serde::de::DeserializeOwned>(value: Value) -> Result<U> {
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/{userId}/phonelines` — every phone line owned by one user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for line in client.user_phonelines("w0").await? {
+    ///     println!("{}", line.alias);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user id, [`Error::Json`] when the
+    /// body is not the documented `{"items": [...]}` envelope, plus transport
+    /// and auth errors.
+    pub async fn user_phonelines(&self, user_id: &str) -> Result<Vec<SimplePhoneline>> {
+        self.get_items(&Self::user_path(user_id)?).await
+    }
+
+    /// `POST /v2/{userId}/phonelines` — create a phone line for one user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let line = client.create_user_phoneline("w0").await?;
+    /// println!("{}", line.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user id, [`Error::Json`] when the
+    /// response is not a phoneline object, plus transport and auth errors.
+    pub async fn create_user_phoneline(&self, user_id: &str) -> Result<SimplePhoneline> {
+        let value = self
+            .send(Method::Post, &Self::user_path(user_id)?, None)
+            .await?;
+        Self::parse_phoneline(value)
+    }
+
+    /// `DELETE /v2/{userId}/phonelines/{phonelineId}` — delete one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_user_phoneline("w0", "p0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, plus
+    /// transport and auth errors.
+    pub async fn delete_user_phoneline(&self, user_id: &str, phoneline_id: &str) -> Result<Value> {
+        self.send(
+            Method::Delete,
+            &Self::user_phoneline_path(user_id, phoneline_id)?,
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}` — one phone line, typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let line = client.user_phoneline("w0", "p0").await?;
+    /// println!("{}", line.voicemails.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the response is not a phoneline object, plus transport and auth errors.
+    pub async fn user_phoneline(&self, user_id: &str, phoneline_id: &str) -> Result<Phoneline> {
+        let value = self
+            .send(
+                Method::Get,
+                &Self::user_phoneline_path(user_id, phoneline_id)?,
+                None,
+            )
+            .await?;
+        Self::parse_phoneline(value)
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}` — update the alias.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::PhonelineAlias, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_user_phoneline_alias("w0", "p0", &PhonelineAlias::new("Front desk")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, plus
+    /// transport and auth errors.
+    pub async fn set_user_phoneline_alias(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        request: &PhonelineAlias,
+    ) -> Result<Value> {
+        self.send(
+            Method::Put,
+            &Self::user_phoneline_path(user_id, phoneline_id)?,
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/blockanonymous` — read the
+    /// anonymous-call blocking setting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let setting = client.phoneline_block_anonymous_setting("w0", "p0").await?;
+    /// println!("{}", setting.enabled);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the response has the wrong shape, plus transport and auth errors.
+    pub async fn phoneline_block_anonymous_setting(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<PhonelineBlockAnonymousSetting> {
+        let value = self
+            .send(
+                Method::Get,
+                &Self::user_phoneline_subpath(user_id, phoneline_id, "blockanonymous")?,
+                None,
+            )
+            .await?;
+        Self::parse_phoneline(value)
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}/blockanonymous` — update the
+    /// anonymous-call blocking setting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::PhonelineBlockAnonymousSetting, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let setting = PhonelineBlockAnonymousSetting::reject(true);
+    /// client.set_phoneline_block_anonymous_setting("w0", "p0", &setting).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, plus
+    /// transport and auth errors.
+    pub async fn set_phoneline_block_anonymous_setting(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        setting: &PhonelineBlockAnonymousSetting,
+    ) -> Result<Value> {
+        self.send(
+            Method::Put,
+            &Self::user_phoneline_subpath(user_id, phoneline_id, "blockanonymous")?,
+            Some(&setting.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/devices` — devices routed to
+    /// one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for device in client.phoneline_devices("w0", "p0").await? {
+    ///     println!("{}", device.alias);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the body is not the documented `{"items": [...]}` envelope, plus
+    /// transport and auth errors.
+    pub async fn phoneline_devices(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<Vec<Device>> {
+        self.get_items(&Self::user_phoneline_subpath(
+            user_id,
+            phoneline_id,
+            "devices",
+        )?)
+        .await
+    }
+
+    /// `POST /v2/{userId}/phonelines/{phonelineId}/devices` — route a device to
+    /// one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::RouteDeviceRequest, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.add_device_to_phoneline("w0", "p0", &RouteDeviceRequest::new("e0")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or device id, plus
+    /// transport and auth errors.
+    pub async fn add_device_to_phoneline(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        request: &RouteDeviceRequest,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", request.device_id())?;
+        self.send(
+            Method::Post,
+            &Self::user_phoneline_subpath(user_id, phoneline_id, "devices")?,
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `DELETE /v2/{userId}/phonelines/{phonelineId}/devices/{deviceId}` —
+    /// remove a device from one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.remove_device_from_phoneline("w0", "p0", "e0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or device id, plus
+    /// transport and auth errors.
+    pub async fn remove_device_from_phoneline(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        device_id: &str,
+    ) -> Result<Value> {
+        validate::path_segment("device_id", device_id)?;
+        self.send(
+            Method::Delete,
+            &Self::user_phoneline_subpath(user_id, phoneline_id, &format!("devices/{device_id}"))?,
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/forwardings` — forwarding
+    /// settings for one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for forwarding in client.phoneline_forwardings("w0", "p0").await? {
+    ///     println!("{}", forwarding.active);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the body is not the documented `{"items": [...]}` envelope, plus
+    /// transport and auth errors.
+    pub async fn phoneline_forwardings(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<Vec<PhonelineForwarding>> {
+        self.get_items(&Self::user_phoneline_subpath(
+            user_id,
+            phoneline_id,
+            "forwardings",
+        )?)
+        .await
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}/forwardings` — update
+    /// forwarding settings.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::{PhonelineForwardingRule, PhonelineForwardings}, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let rules = PhonelineForwardings::new(vec![PhonelineForwardingRule::new(true, "+4915112345678", 20)?])?;
+    /// let updated = client.set_phoneline_forwardings("w0", "p0", &rules).await?;
+    /// println!("{}", updated.active);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the response is not a forwarding object, plus transport and auth
+    /// errors.
+    pub async fn set_phoneline_forwardings(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        request: &PhonelineForwardings,
+    ) -> Result<PhonelineForwarding> {
+        let value = self
+            .send(
+                Method::Put,
+                &Self::user_phoneline_subpath(user_id, phoneline_id, "forwardings")?,
+                Some(&request.to_json()),
+            )
+            .await?;
+        Self::parse_phoneline(value)
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/numbers` — numbers routed to
+    /// one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for number in client.phoneline_numbers("w0", "p0").await? {
+    ///     println!("{}", number.number);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the body is not the documented `{"items": [...]}` envelope, plus
+    /// transport and auth errors.
+    pub async fn phoneline_numbers(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<Vec<PhonelineNumber>> {
+        self.get_items(&Self::user_phoneline_subpath(
+            user_id,
+            phoneline_id,
+            "numbers",
+        )?)
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/parallelforwardings` — every
+    /// parallel forwarding of one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for forwarding in client.phoneline_parallel_forwardings("w0", "p0").await? {
+    ///     println!("{}", forwarding.alias);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the body is not the documented `{"items": [...]}` envelope, plus
+    /// transport and auth errors.
+    pub async fn phoneline_parallel_forwardings(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<Vec<ParallelForwarding>> {
+        self.get_items(&Self::user_phoneline_subpath(
+            user_id,
+            phoneline_id,
+            "parallelforwardings",
+        )?)
+        .await
+    }
+
+    /// `POST /v2/{userId}/phonelines/{phonelineId}/parallelforwardings` —
+    /// create a parallel forwarding.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::ParallelForwardingRequest, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = ParallelForwardingRequest::new("+4915112345678")?.with_alias("Mobile");
+    /// client.add_phoneline_parallel_forwarding("w0", "p0", &request).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, plus
+    /// transport and auth errors.
+    pub async fn add_phoneline_parallel_forwarding(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        request: &ParallelForwardingRequest,
+    ) -> Result<Value> {
+        self.send(
+            Method::Post,
+            &Self::user_phoneline_subpath(user_id, phoneline_id, "parallelforwardings")?,
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}/parallelforwardings/{parallelForwardingId}`
+    /// — update a parallel forwarding.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::ParallelForwardingRequest, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = ParallelForwardingRequest::new("+4915112345678")?;
+    /// client.update_phoneline_parallel_forwarding("w0", "p0", "x0", &request).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or forwarding id,
+    /// plus transport and auth errors.
+    pub async fn update_phoneline_parallel_forwarding(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        parallel_forwarding_id: &str,
+        request: &ParallelForwardingRequest,
+    ) -> Result<Value> {
+        validate::path_segment("parallel_forwarding_id", parallel_forwarding_id)?;
+        self.send(
+            Method::Put,
+            &Self::user_phoneline_subpath(
+                user_id,
+                phoneline_id,
+                &format!("parallelforwardings/{parallel_forwarding_id}"),
+            )?,
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `DELETE /v2/{userId}/phonelines/{phonelineId}/parallelforwardings/{parallelForwardingId}`
+    /// — delete a parallel forwarding.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_phoneline_parallel_forwarding("w0", "p0", "x0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or forwarding id,
+    /// plus transport and auth errors.
+    pub async fn delete_phoneline_parallel_forwarding(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        parallel_forwarding_id: &str,
+    ) -> Result<Value> {
+        validate::path_segment("parallel_forwarding_id", parallel_forwarding_id)?;
+        self.send(
+            Method::Delete,
+            &Self::user_phoneline_subpath(
+                user_id,
+                phoneline_id,
+                &format!("parallelforwardings/{parallel_forwarding_id}"),
+            )?,
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/sipgateio` — sipgate.io
+    /// settings for one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let settings = client.phoneline_sipgate_io("w0", "p0").await?;
+    /// println!("{}", settings.incoming_url);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the response is not a sipgate.io settings object, plus transport and
+    /// auth errors.
+    pub async fn phoneline_sipgate_io(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<PhonelineSipgateIo> {
+        let value = self
+            .send(
+                Method::Get,
+                &Self::user_phoneline_subpath(user_id, phoneline_id, "sipgateio")?,
+                None,
+            )
+            .await?;
+        Self::parse_phoneline(value)
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}/sipgateio` — update sipgate.io
+    /// settings.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::PhonelineSipgateIo, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let settings = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")?;
+    /// client.set_phoneline_sipgate_io("w0", "p0", &settings).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, plus
+    /// transport and auth errors.
+    pub async fn set_phoneline_sipgate_io(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        settings: &PhonelineSipgateIo,
+    ) -> Result<Value> {
+        self.send(
+            Method::Put,
+            &Self::user_phoneline_subpath(user_id, phoneline_id, "sipgateio")?,
+            Some(&settings.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/sipgateio/log` — sipgate.io
+    /// debug log for one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for entry in client.phoneline_sipgate_io_logs("w0", "p0").await? {
+    ///     println!("{}", entry.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the body is not the documented `{"items": [...]}` envelope, plus
+    /// transport and auth errors.
+    pub async fn phoneline_sipgate_io_logs(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<Vec<PhonelineSipgateIoLog>> {
+        self.get_items(&Self::user_phoneline_subpath(
+            user_id,
+            phoneline_id,
+            "sipgateio/log",
+        )?)
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/voicemails` — voicemail
+    /// settings for one phone line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for voicemail in client.phoneline_voicemails("w0", "p0").await? {
+    ///     println!("{}", voicemail.alias);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user or phoneline id, [`Error::Json`]
+    /// when the body is not the documented `{"items": [...]}` envelope, plus
+    /// transport and auth errors.
+    pub async fn phoneline_voicemails(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+    ) -> Result<Vec<PhonelineVoicemail>> {
+        self.get_items(&Self::user_phoneline_subpath(
+            user_id,
+            phoneline_id,
+            "voicemails",
+        )?)
+        .await
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}` —
+    /// update one voicemail's settings.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::VoicemailSettingsUpdate, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let settings = VoicemailSettingsUpdate::new(true, false).with_timeout(20);
+    /// client.update_phoneline_voicemail("w0", "p0", "v0", &settings).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or voicemail id,
+    /// plus transport and auth errors.
+    pub async fn update_phoneline_voicemail(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+        settings: &VoicemailSettingsUpdate,
+    ) -> Result<Value> {
+        self.send(
+            Method::Put,
+            &Self::user_phoneline_voicemail_path(user_id, phoneline_id, voicemail_id)?,
+            Some(&settings.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}/greetings`
+    /// — greetings for one voicemail.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for greeting in client.phoneline_voicemail_greetings("w0", "p0", "v0").await? {
+    ///     println!("{}", greeting.alias);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or voicemail id,
+    /// [`Error::Json`] when the body is not the documented `{"items": [...]}`
+    /// envelope, plus transport and auth errors.
+    pub async fn phoneline_voicemail_greetings(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+    ) -> Result<Vec<VoicemailGreeting>> {
+        self.get_items(&format!(
+            "{}/greetings",
+            Self::user_phoneline_voicemail_path(user_id, phoneline_id, voicemail_id)?
+        ))
+        .await
+    }
+
+    /// `POST /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}/greetings`
+    /// — upload a voicemail greeting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::VoicemailGreetingRequest, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let greeting = VoicemailGreetingRequest::new("greeting.mp3", "RG8uIE9yIGRvIG5vdC4=")?;
+    /// client.add_phoneline_voicemail_greeting("w0", "p0", "v0", &greeting).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or voicemail id,
+    /// plus transport and auth errors.
+    pub async fn add_phoneline_voicemail_greeting(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+        greeting: &VoicemailGreetingRequest,
+    ) -> Result<Value> {
+        self.send(
+            Method::Post,
+            &format!(
+                "{}/greetings",
+                Self::user_phoneline_voicemail_path(user_id, phoneline_id, voicemail_id)?
+            ),
+            Some(&greeting.to_json()),
+        )
+        .await
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}/greetings/{greetingId}`
+    /// — activate or deactivate a voicemail greeting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::VoicemailGreetingUpdate, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_phoneline_voicemail_greeting("w0", "p0", "v0", "g0", &VoicemailGreetingUpdate::new(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline, voicemail or
+    /// greeting id, plus transport and auth errors.
+    pub async fn update_phoneline_voicemail_greeting(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+        greeting_id: &str,
+        request: &VoicemailGreetingUpdate,
+    ) -> Result<Value> {
+        self.send(
+            Method::Put,
+            &Self::user_phoneline_greeting_path(user_id, phoneline_id, voicemail_id, greeting_id)?,
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `DELETE /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}/greetings/{greetingId}`
+    /// — delete a voicemail greeting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_phoneline_voicemail_greeting("w0", "p0", "v0", "g0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline, voicemail or
+    /// greeting id, plus transport and auth errors.
+    pub async fn delete_phoneline_voicemail_greeting(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+        greeting_id: &str,
+    ) -> Result<Value> {
+        self.send(
+            Method::Delete,
+            &Self::user_phoneline_greeting_path(user_id, phoneline_id, voicemail_id, greeting_id)?,
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}/transcriptions`
+    /// — enable or disable voicemail transcription.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::VoicemailTranscriptionUpdate, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_phoneline_voicemail_transcription("w0", "p0", "v0", &VoicemailTranscriptionUpdate::new(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable user, phoneline or voicemail id,
+    /// plus transport and auth errors.
+    pub async fn update_phoneline_voicemail_transcription(
+        &self,
+        user_id: &str,
+        phoneline_id: &str,
+        voicemail_id: &str,
+        request: &VoicemailTranscriptionUpdate,
+    ) -> Result<Value> {
+        self.send(
+            Method::Put,
+            &format!(
+                "{}/transcriptions",
+                Self::user_phoneline_voicemail_path(user_id, phoneline_id, voicemail_id)?
+            ),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+}
+// END REST v2 phonelines surface (#167)
+
 /// `POST /v2/sessions/sms` body.
 ///
 /// `sms_id` is the sending device (`s0`, `s1`, …), which the schema marks
@@ -2518,9 +3461,1171 @@ pub struct VoicemailSettings {
     #[serde(default)]
     pub active: bool,
     /// Ring timeout before voicemail starts.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "phoneline::u32_or_default")]
     pub timeout: u32,
 }
+
+// BEGIN REST v2 phonelines models and requests (#167)
+mod phoneline {
+    use serde::{Deserialize, Deserializer};
+
+    pub(super) fn u32_or_default<'de, D>(deserializer: D) -> Result<u32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<u32>::deserialize(deserializer)?.unwrap_or_default())
+    }
+}
+
+wire_enum! {
+    /// Anonymous-call handling target, from `blockanonymous.target`.
+    pub enum BlockAnonymousTarget {
+        /// Reject anonymous calls.
+        Reject => "reject",
+        /// Route anonymous calls to voicemail.
+        Voicemail => "voicemail",
+    }
+}
+
+wire_enum! {
+    /// Phone-number kind, from `numbers[].type`.
+    pub enum PhonelineNumberKind {
+        /// A mobile number.
+        Mobile => "mobile",
+        /// A landline number.
+        Landline => "landline",
+        /// A quick-dial number.
+        Quickdial => "quickdial",
+        /// An international number.
+        International => "international",
+    }
+}
+
+/// One phone line from `GET /v2/{userId}/phonelines`.
+///
+/// ```
+/// use sipgate_flow::rest::SimplePhoneline;
+///
+/// let line: SimplePhoneline = serde_json::from_value(serde_json::json!({
+///     "id": "p0",
+///     "alias": "Front desk",
+///     "devicesUrl": "https://api.sipgate.com/v2/w0/phonelines/p0/devices",
+///     "futureField": true
+/// }))
+/// .unwrap();
+/// assert_eq!(line.id, "p0");
+/// assert!(line.devices_url.ends_with("/devices"));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SimplePhoneline {
+    /// Unique phoneline identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable phoneline name.
+    #[serde(default)]
+    pub alias: String,
+    /// URL for the line's anonymous-call blocking setting.
+    #[serde(default, alias = "block_anonymous_url")]
+    pub block_anonymous_url: String,
+    /// URL for the line's devices.
+    #[serde(default, alias = "devices_url")]
+    pub devices_url: String,
+    /// URL for the line's forwardings.
+    #[serde(default, alias = "forwardings_url")]
+    pub forwardings_url: String,
+    /// URL for the line's numbers.
+    #[serde(default, alias = "numbers_url")]
+    pub numbers_url: String,
+    /// URL for the line's parallel forwardings.
+    #[serde(default, alias = "parallel_forwardings_url")]
+    pub parallel_forwardings_url: String,
+    /// URL for the line's voicemails.
+    #[serde(default, alias = "voicemails_url")]
+    pub voicemails_url: String,
+}
+
+/// Anonymous-call blocking setting for one phone line.
+///
+/// ```
+/// use sipgate_flow::rest::{BlockAnonymousTarget, PhonelineBlockAnonymousSetting};
+///
+/// let setting = PhonelineBlockAnonymousSetting::voicemail(true);
+/// assert!(setting.enabled);
+/// assert_eq!(setting.target, Some(BlockAnonymousTarget::Voicemail));
+/// assert_eq!(setting.to_json()["target"], "VOICEMAIL");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PhonelineBlockAnonymousSetting {
+    /// Whether anonymous calls are blocked.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Where an anonymous call should go when blocking is enabled.
+    #[serde(default)]
+    pub target: Option<BlockAnonymousTarget>,
+}
+
+impl Default for PhonelineBlockAnonymousSetting {
+    fn default() -> Self {
+        Self::reject(false)
+    }
+}
+
+impl PhonelineBlockAnonymousSetting {
+    /// Blocks anonymous calls by rejecting them.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{BlockAnonymousTarget, PhonelineBlockAnonymousSetting};
+    ///
+    /// let setting = PhonelineBlockAnonymousSetting::reject(true);
+    /// assert!(setting.enabled);
+    /// assert_eq!(setting.target, Some(BlockAnonymousTarget::Reject));
+    /// assert_eq!(setting.to_json()["enabled"], true);
+    /// ```
+    #[must_use]
+    pub fn reject(enabled: bool) -> Self {
+        Self {
+            enabled,
+            target: Some(BlockAnonymousTarget::Reject),
+        }
+    }
+
+    /// Blocks anonymous calls by sending them to voicemail.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{BlockAnonymousTarget, PhonelineBlockAnonymousSetting};
+    ///
+    /// let setting = PhonelineBlockAnonymousSetting::voicemail(true);
+    /// assert_eq!(setting.target, Some(BlockAnonymousTarget::Voicemail));
+    /// assert_eq!(setting.to_json()["target"], "VOICEMAIL");
+    /// ```
+    #[must_use]
+    pub fn voicemail(enabled: bool) -> Self {
+        Self {
+            enabled,
+            target: Some(BlockAnonymousTarget::Voicemail),
+        }
+    }
+
+    /// Renders the setting in the documented request shape.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineBlockAnonymousSetting;
+    ///
+    /// assert_eq!(
+    ///     PhonelineBlockAnonymousSetting::reject(true).to_json(),
+    ///     serde_json::json!({"enabled": true, "target": "REJECT"})
+    /// );
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "enabled": self.enabled,
+            "target": self.target.as_ref().map_or("REJECT", BlockAnonymousTarget::as_str).to_ascii_uppercase(),
+        })
+    }
+}
+
+/// `PUT /v2/{userId}/phonelines/{phonelineId}` body (`SetAliasRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::PhonelineAlias;
+///
+/// let alias = PhonelineAlias::new("Front desk")?;
+/// assert_eq!(alias.to_json()["alias"], "Front desk");
+/// assert!(PhonelineAlias::new("").is_err());
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhonelineAlias {
+    alias: String,
+}
+
+impl PhonelineAlias {
+    /// Builds the alias body, bounding the value before the request exists.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineAlias;
+    ///
+    /// assert!(PhonelineAlias::new("Front desk").is_ok());
+    /// assert!(PhonelineAlias::new("a".repeat(1024 * 1024)).is_ok());
+    /// assert!(PhonelineAlias::new("a".repeat(1024 * 1024 + 1)).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or oversized alias.
+    pub fn new(alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        validate::non_empty("alias", &alias, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self { alias })
+    }
+
+    /// Renders the `SetAliasRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineAlias;
+    ///
+    /// assert_eq!(
+    ///     PhonelineAlias::new("Desk")?.to_json(),
+    ///     serde_json::json!({"alias": "Desk"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "alias": self.alias })
+    }
+}
+
+/// `POST /v2/{userId}/phonelines/{phonelineId}/devices` body
+/// (`RouteDeviceRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::RouteDeviceRequest;
+///
+/// let request = RouteDeviceRequest::new("e0")?;
+/// assert_eq!(request.to_json()["deviceId"], "e0");
+/// assert!(RouteDeviceRequest::new("").is_err());
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteDeviceRequest {
+    device_id: String,
+}
+
+impl RouteDeviceRequest {
+    /// Builds the request. The device id is validated as a URL path segment.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::RouteDeviceRequest;
+    ///
+    /// assert!(RouteDeviceRequest::new("e0").is_ok());
+    /// assert!(RouteDeviceRequest::new("a/b").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id.
+    pub fn new(device_id: impl Into<String>) -> Result<Self> {
+        let device_id = device_id.into();
+        validate::path_segment("device_id", &device_id)?;
+        Ok(Self { device_id })
+    }
+
+    /// The device id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::RouteDeviceRequest;
+    ///
+    /// assert_eq!(RouteDeviceRequest::new("e0")?.device_id(), "e0");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Renders the `RouteDeviceRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::RouteDeviceRequest;
+    ///
+    /// assert_eq!(
+    ///     RouteDeviceRequest::new("e0")?.to_json(),
+    ///     serde_json::json!({"deviceId": "e0"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "deviceId": self.device_id })
+    }
+}
+
+/// One forwarding setting from
+/// `GET /v2/{userId}/phonelines/{phonelineId}/forwardings`.
+///
+/// ```
+/// use sipgate_flow::rest::PhonelineForwarding;
+///
+/// let forwarding: PhonelineForwarding = serde_json::from_value(serde_json::json!({
+///     "active": true,
+///     "alias": "Mobile",
+///     "destination": "+4915112345678",
+///     "timeout": 20,
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert!(forwarding.active);
+/// assert_eq!(forwarding.timeout, 20);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PhonelineForwarding {
+    /// Whether this forwarding is active.
+    #[serde(default)]
+    pub active: bool,
+    /// Human-readable forwarding name.
+    #[serde(default)]
+    pub alias: String,
+    /// Forwarding target number.
+    #[serde(default)]
+    pub destination: String,
+    /// Ring timeout before forwarding starts.
+    #[serde(default, deserialize_with = "phoneline::u32_or_default")]
+    pub timeout: u32,
+}
+
+/// `PUT /v2/{userId}/phonelines/{phonelineId}/forwardings` body
+/// (`LegacyForwardingRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::{PhonelineForwardingRule, PhonelineForwardings};
+///
+/// let rules = PhonelineForwardings::new(vec![
+///     PhonelineForwardingRule::new(true, "+4915112345678", 20)?,
+/// ])?;
+/// assert_eq!(rules.to_json()["forwardings"][0]["active"], true);
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhonelineForwardings {
+    forwardings: Vec<PhonelineForwardingRule>,
+}
+
+impl PhonelineForwardings {
+    /// Builds the forwarding request. At least one rule is required.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{PhonelineForwardingRule, PhonelineForwardings};
+    ///
+    /// let rule = PhonelineForwardingRule::new(true, "+4915112345678", 1)?;
+    /// assert!(PhonelineForwardings::new(vec![rule]).is_ok());
+    /// assert!(PhonelineForwardings::new(Vec::new()).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when no forwarding rules are supplied.
+    pub fn new(forwardings: Vec<PhonelineForwardingRule>) -> Result<Self> {
+        if forwardings.is_empty() {
+            return Err(Error::validation(
+                "forwardings",
+                "must contain at least one forwarding rule",
+            ));
+        }
+        Ok(Self { forwardings })
+    }
+
+    /// Renders the `LegacyForwardingRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::{PhonelineForwardingRule, PhonelineForwardings};
+    ///
+    /// let rules = PhonelineForwardings::new(vec![
+    ///     PhonelineForwardingRule::new(false, "+4915112345678", 20)?,
+    /// ])?;
+    /// assert_eq!(rules.to_json()["forwardings"][0]["destination"], "+4915112345678");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "forwardings": self
+                .forwardings
+                .iter()
+                .map(PhonelineForwardingRule::to_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// One forwarding rule in [`PhonelineForwardings`].
+///
+/// ```
+/// use sipgate_flow::rest::PhonelineForwardingRule;
+///
+/// let rule = PhonelineForwardingRule::new(true, "+4915112345678", 20)?;
+/// assert_eq!(rule.to_json()["timeout"], 20);
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhonelineForwardingRule {
+    active: bool,
+    destination: String,
+    timeout: u32,
+}
+
+impl PhonelineForwardingRule {
+    /// Builds one rule. The destination is validated as an E.164 number.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineForwardingRule;
+    ///
+    /// assert!(PhonelineForwardingRule::new(true, "+4915112345678", 20).is_ok());
+    /// assert!(PhonelineForwardingRule::new(true, "", 20).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a destination that is not E.164.
+    pub fn new(active: bool, destination: impl Into<String>, timeout: u32) -> Result<Self> {
+        let destination = format!("+{}", validate::phone("destination", &destination.into())?);
+        Ok(Self {
+            active,
+            destination,
+            timeout,
+        })
+    }
+
+    /// Renders one `LegacyForwardingSetRequest` entry.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineForwardingRule;
+    ///
+    /// let rule = PhonelineForwardingRule::new(false, "+4915112345678", 20)?;
+    /// assert_eq!(rule.to_json()["active"], false);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "active": self.active,
+            "destination": self.destination,
+            "timeout": self.timeout,
+        })
+    }
+}
+
+/// One phone number from
+/// `GET /v2/{userId}/phonelines/{phonelineId}/numbers`.
+///
+/// ```
+/// use sipgate_flow::rest::PhonelineNumber;
+///
+/// let number: PhonelineNumber = serde_json::from_value(serde_json::json!({
+///     "id": "n0",
+///     "number": "+4915112345678",
+///     "localized": "01579-9912345",
+///     "type": "MOBILE",
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(number.number, "+4915112345678");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PhonelineNumber {
+    /// Number identifier.
+    #[serde(default)]
+    pub id: String,
+    /// E.164 number.
+    #[serde(default)]
+    pub number: String,
+    /// Locally formatted number.
+    #[serde(default)]
+    pub localized: String,
+    /// Number kind. A future value is carried as [`PhonelineNumberKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<PhonelineNumberKind>,
+}
+
+/// One parallel forwarding from
+/// `GET /v2/{userId}/phonelines/{phonelineId}/parallelforwardings`.
+///
+/// ```
+/// use sipgate_flow::rest::ParallelForwarding;
+///
+/// let forwarding: ParallelForwarding = serde_json::from_value(serde_json::json!({
+///     "id": "x0",
+///     "active": true,
+///     "alias": "Mobile",
+///     "destination": "+4915112345678",
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(forwarding.id, "x0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ParallelForwarding {
+    /// Parallel-forwarding identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Whether this forwarding is active.
+    #[serde(default)]
+    pub active: bool,
+    /// Human-readable forwarding name.
+    #[serde(default)]
+    pub alias: String,
+    /// Forwarding target number.
+    #[serde(default)]
+    pub destination: String,
+}
+
+/// `POST`/`PUT` parallel-forwarding body (`SetParallelForwardingRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::ParallelForwardingRequest;
+///
+/// let request = ParallelForwardingRequest::new("+4915112345678")?.with_alias("Mobile");
+/// assert_eq!(request.to_json()["alias"], "Mobile");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParallelForwardingRequest {
+    active: bool,
+    alias: String,
+    destination: String,
+}
+
+impl ParallelForwardingRequest {
+    /// Builds the request. The destination is validated as an E.164 number.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ParallelForwardingRequest;
+    ///
+    /// assert!(ParallelForwardingRequest::new("+4915112345678").is_ok());
+    /// assert!(ParallelForwardingRequest::new("123").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a destination that is not E.164.
+    pub fn new(destination: impl Into<String>) -> Result<Self> {
+        let destination = format!("+{}", validate::phone("destination", &destination.into())?);
+        Ok(Self {
+            active: true,
+            alias: String::new(),
+            destination,
+        })
+    }
+
+    /// Sets the forwarding alias.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ParallelForwardingRequest;
+    ///
+    /// assert_eq!(
+    ///     ParallelForwardingRequest::new("+4915112345678")?.with_alias("Home").to_json()["alias"],
+    ///     "Home"
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = alias.into();
+        self
+    }
+
+    /// Sets whether the forwarding is active.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ParallelForwardingRequest;
+    ///
+    /// assert_eq!(
+    ///     ParallelForwardingRequest::new("+4915112345678")?.with_active(false).to_json()["active"],
+    ///     false
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    /// Renders the `SetParallelForwardingRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ParallelForwardingRequest;
+    ///
+    /// assert_eq!(
+    ///     ParallelForwardingRequest::new("+4915112345678")?.to_json()["active"],
+    ///     true
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "active": self.active,
+            "alias": self.alias,
+            "destination": self.destination,
+        })
+    }
+}
+
+/// sipgate.io settings for one phone line.
+///
+/// ```
+/// use sipgate_flow::rest::PhonelineSipgateIo;
+///
+/// let settings: PhonelineSipgateIo = serde_json::from_value(serde_json::json!({
+///     "incomingActive": true,
+///     "incomingUrl": "https://example.com/in",
+///     "outgoingActive": false,
+///     "outgoingUrl": "https://example.com/out",
+///     "allowSelfSigned": false,
+///     "certificate": "-----BEGIN CERTIFICATE-----",
+///     "log": false,
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert!(settings.incoming_active);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // the schema's independent on/off flags
+pub struct PhonelineSipgateIo {
+    /// Whether incoming webhooks are active.
+    #[serde(default, alias = "incoming_active")]
+    pub incoming_active: bool,
+    /// Incoming webhook URL.
+    #[serde(default, alias = "incoming_url")]
+    pub incoming_url: String,
+    /// Whether outgoing webhooks are active.
+    #[serde(default, alias = "outgoing_active")]
+    pub outgoing_active: bool,
+    /// Outgoing webhook URL.
+    #[serde(default, alias = "outgoing_url")]
+    pub outgoing_url: String,
+    /// Whether a self-signed certificate is accepted.
+    #[serde(default, alias = "allow_self_signed")]
+    pub allow_self_signed: bool,
+    /// PEM certificate, when one is configured.
+    #[serde(default)]
+    pub certificate: String,
+    /// Whether request logging is enabled.
+    #[serde(default)]
+    pub log: bool,
+}
+
+impl PhonelineSipgateIo {
+    /// Builds the settings body. Both URLs are required and validated as
+    /// absolute `http(s)` URLs.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineSipgateIo;
+    ///
+    /// assert!(PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out").is_ok());
+    /// assert!(PhonelineSipgateIo::new("", "https://example.com/out").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or non-absolute incoming or outgoing
+    /// URL.
+    pub fn new(incoming_url: impl Into<String>, outgoing_url: impl Into<String>) -> Result<Self> {
+        let incoming_url = incoming_url.into();
+        let outgoing_url = outgoing_url.into();
+        validate::http_url("incoming_url", &incoming_url)?;
+        validate::http_url("outgoing_url", &outgoing_url)?;
+        Ok(Self {
+            incoming_active: false,
+            incoming_url,
+            outgoing_active: false,
+            outgoing_url,
+            allow_self_signed: false,
+            certificate: String::new(),
+            log: false,
+        })
+    }
+
+    /// Enables or disables incoming webhooks.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineSipgateIo;
+    ///
+    /// let settings = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")?
+    ///     .with_incoming_active(true);
+    /// assert_eq!(settings.to_json()["incomingActive"], true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_incoming_active(mut self, active: bool) -> Self {
+        self.incoming_active = active;
+        self
+    }
+
+    /// Enables or disables outgoing webhooks.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineSipgateIo;
+    ///
+    /// let settings = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")?
+    ///     .with_outgoing_active(true);
+    /// assert_eq!(settings.to_json()["outgoingActive"], true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_outgoing_active(mut self, active: bool) -> Self {
+        self.outgoing_active = active;
+        self
+    }
+
+    /// Sets whether a self-signed certificate is accepted.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineSipgateIo;
+    ///
+    /// let settings = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")?
+    ///     .with_allow_self_signed(true);
+    /// assert_eq!(settings.to_json()["allowSelfSigned"], true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_allow_self_signed(mut self, allow_self_signed: bool) -> Self {
+        self.allow_self_signed = allow_self_signed;
+        self
+    }
+
+    /// Sets the PEM certificate.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineSipgateIo;
+    ///
+    /// let settings = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")?
+    ///     .with_certificate("-----BEGIN CERTIFICATE-----");
+    /// assert_eq!(settings.to_json()["certificate"], "-----BEGIN CERTIFICATE-----");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_certificate(mut self, certificate: impl Into<String>) -> Self {
+        self.certificate = certificate.into();
+        self
+    }
+
+    /// Sets whether request logging is enabled.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineSipgateIo;
+    ///
+    /// let settings = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")?
+    ///     .with_log(true);
+    /// assert_eq!(settings.to_json()["log"], true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_log(mut self, log: bool) -> Self {
+        self.log = log;
+        self
+    }
+
+    /// Renders the `SetSipgateIoPhonelineSettingsRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::PhonelineSipgateIo;
+    ///
+    /// let body = PhonelineSipgateIo::new("https://example.com/in", "https://example.com/out")?.to_json();
+    /// assert_eq!(body["incomingActive"], false);
+    /// assert_eq!(body["outgoingActive"], false);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "incomingActive": self.incoming_active,
+            "incomingUrl": self.incoming_url,
+            "outgoingActive": self.outgoing_active,
+            "outgoingUrl": self.outgoing_url,
+            "allowSelfSigned": self.allow_self_signed,
+            "certificate": self.certificate,
+            "log": self.log,
+        })
+    }
+}
+
+/// One sipgate.io debug log entry.
+///
+/// ```
+/// use sipgate_flow::rest::PhonelineSipgateIoLog;
+///
+/// let entry: PhonelineSipgateIoLog = serde_json::from_value(serde_json::json!({
+///     "created": "2015-10-21T19:28:00Z",
+///     "pushApiVersion": 2,
+///     "request": "event=newCall",
+///     "response": "HTTP/1.1 200 OK",
+///     "status": "200",
+///     "url": "https://demo.sipgate.io",
+///     "xmlError": "",
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(entry.push_api_version, 2);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PhonelineSipgateIoLog {
+    /// Creation timestamp.
+    #[serde(default)]
+    pub created: String,
+    /// Push API version used for the request.
+    #[serde(default, alias = "push_api_version")]
+    pub push_api_version: u32,
+    /// Request body, as logged by sipgate.
+    #[serde(default)]
+    pub request: String,
+    /// Response summary, as logged by sipgate.
+    #[serde(default)]
+    pub response: String,
+    /// HTTP status code as a string.
+    #[serde(default)]
+    pub status: String,
+    /// Destination URL.
+    #[serde(default)]
+    pub url: String,
+    /// XML parsing error, when one occurred.
+    #[serde(default, alias = "xml_error")]
+    pub xml_error: String,
+}
+
+/// One voicemail from
+/// `GET /v2/{userId}/phonelines/{phonelineId}/voicemails`.
+///
+/// ```
+/// use sipgate_flow::rest::PhonelineVoicemail;
+///
+/// let voicemail: PhonelineVoicemail = serde_json::from_value(serde_json::json!({
+///     "id": "v0",
+///     "alias": "Voicemail",
+///     "active": true,
+///     "timeout": 20,
+///     "accessNumber": "50000",
+///     "activeGreetingId": "g0",
+///     "activeGreetingAlias": "Default",
+///     "canTranscribe": true,
+///     "transcription": false,
+///     "greetingsUrl": "https://api.sipgate.com/v2/w0/phonelines/p0/voicemails/v0/greetings",
+///     "transcriptionsUrl": "https://api.sipgate.com/v2/w0/phonelines/p0/voicemails/v0/transcriptions",
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert!(voicemail.active);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PhonelineVoicemail {
+    /// Voicemail identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable voicemail name.
+    #[serde(default)]
+    pub alias: String,
+    /// Whether the voicemail is active.
+    #[serde(default)]
+    pub active: bool,
+    /// Ring timeout before voicemail starts.
+    #[serde(default, deserialize_with = "phoneline::u32_or_default")]
+    pub timeout: u32,
+    /// Access number for the mailbox.
+    #[serde(default, alias = "access_number")]
+    pub access_number: String,
+    /// Active greeting identifier.
+    #[serde(default, alias = "active_greeting_id")]
+    pub active_greeting_id: String,
+    /// Active greeting alias.
+    #[serde(default, alias = "active_greeting_alias")]
+    pub active_greeting_alias: String,
+    /// Whether transcription can be enabled for this mailbox.
+    #[serde(default, alias = "can_transcribe")]
+    pub can_transcribe: bool,
+    /// Whether transcription is enabled.
+    #[serde(default)]
+    pub transcription: bool,
+    /// URL for the mailbox's greetings.
+    #[serde(default, alias = "greetings_url")]
+    pub greetings_url: String,
+    /// URL for the mailbox's transcription setting.
+    #[serde(default, alias = "transcriptions_url")]
+    pub transcriptions_url: String,
+}
+
+/// `PUT /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}` body
+/// (`ChangeVoicemailRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::VoicemailSettingsUpdate;
+///
+/// let update = VoicemailSettingsUpdate::new(true, false).with_timeout(20);
+/// assert_eq!(update.to_json()["active"], true);
+/// assert!(update.to_json()["timeout"] == 20);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoicemailSettingsUpdate {
+    active: bool,
+    transcription: bool,
+    timeout: Option<u32>,
+}
+
+impl VoicemailSettingsUpdate {
+    /// Builds the update. `active` and `transcription` are the schema's
+    /// required fields.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailSettingsUpdate;
+    ///
+    /// assert_eq!(VoicemailSettingsUpdate::new(false, true).to_json()["transcription"], true);
+    /// ```
+    #[must_use]
+    pub fn new(active: bool, transcription: bool) -> Self {
+        Self {
+            active,
+            transcription,
+            timeout: None,
+        }
+    }
+
+    /// Sets the ring timeout. Zero is accepted, matching the schema's
+    /// documented minimum.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailSettingsUpdate;
+    ///
+    /// assert_eq!(VoicemailSettingsUpdate::new(true, false).with_timeout(0).to_json()["timeout"], 0);
+    /// ```
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: u32) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Renders the `ChangeVoicemailRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailSettingsUpdate;
+    ///
+    /// let body = VoicemailSettingsUpdate::new(true, false).to_json();
+    /// assert_eq!(body["active"], true);
+    /// assert!(body.get("timeout").is_none());
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = json!({
+            "active": self.active,
+            "transcription": self.transcription,
+        });
+        if let (Some(timeout), Some(object)) = (self.timeout, body.as_object_mut()) {
+            object.insert("timeout".into(), json!(timeout));
+        }
+        body
+    }
+}
+
+/// One voicemail greeting.
+///
+/// ```
+/// use sipgate_flow::rest::VoicemailGreeting;
+///
+/// let greeting: VoicemailGreeting = serde_json::from_value(serde_json::json!({
+///     "id": "g0",
+///     "alias": "Default greeting",
+///     "active": true,
+///     "greetingUrl": "https://example.com/greeting.mp3",
+///     "recordingEnabled": false,
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(greeting.id, "g0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct VoicemailGreeting {
+    /// Greeting identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable greeting name.
+    #[serde(default)]
+    pub alias: String,
+    /// Whether this greeting is active.
+    #[serde(default)]
+    pub active: bool,
+    /// URL to the greeting media.
+    #[serde(default, alias = "greeting_url")]
+    pub greeting_url: String,
+    /// Whether recording is enabled for this greeting.
+    #[serde(default, alias = "recording_enabled")]
+    pub recording_enabled: bool,
+}
+
+/// `POST /v2/{userId}/phonelines/{phonelineId}/voicemails/{voicemailId}/greetings`
+/// body (`AddGreetingRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::VoicemailGreetingRequest;
+///
+/// let request = VoicemailGreetingRequest::new("greeting.mp3", "RG8uIE9yIGRvIG5vdC4=")?;
+/// assert_eq!(request.to_json()["filename"], "greeting.mp3");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoicemailGreetingRequest {
+    filename: String,
+    base64_content: String,
+}
+
+impl VoicemailGreetingRequest {
+    /// Builds the greeting upload. The filename must be a bare name and the
+    /// content must be base64 within the documented 15,000,000-character
+    /// ceiling.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailGreetingRequest;
+    ///
+    /// assert!(VoicemailGreetingRequest::new("greeting.mp3", "RG8uIE9yIGRvIG5vdC4=").is_ok());
+    /// assert!(VoicemailGreetingRequest::new("dir/greeting.mp3", "RG8uIEyZ").is_err());
+    /// assert!(VoicemailGreetingRequest::new("greeting.mp3", "not base64").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty or path-bearing filename, empty or
+    /// oversized content, or content that is not standard base64.
+    pub fn new(filename: impl Into<String>, base64_content: impl Into<String>) -> Result<Self> {
+        let filename = filename.into();
+        validate::non_empty("filename", &filename, validate::MAX_REST_FIELD_BYTES)?;
+        if filename
+            .chars()
+            .any(|character| matches!(character, '/' | '\\') || character.is_control())
+        {
+            return Err(Error::validation(
+                "filename",
+                "must be a bare file name without path separators",
+            ));
+        }
+        let base64_content = base64_content.into();
+        validate::non_empty("base64Content", &base64_content, 15_000_000)?;
+        if !crate::base64::is_valid(&base64_content) {
+            return Err(Error::validation(
+                "base64Content",
+                "must be standard base64 (RFC 4648)",
+            ));
+        }
+        Ok(Self {
+            filename,
+            base64_content,
+        })
+    }
+
+    /// Renders the `AddGreetingRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailGreetingRequest;
+    ///
+    /// let request = VoicemailGreetingRequest::new("greeting.mp3", "RG8uIE9yIGRvIG5vdC4=")?;
+    /// assert_eq!(request.to_json()["base64Content"], "RG8uIE9yIGRvIG5vdC4=");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "filename": self.filename,
+            "base64Content": self.base64_content,
+        })
+    }
+}
+
+/// `PUT` body for a voicemail greeting (`ChangeVoicemailGreetingRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::VoicemailGreetingUpdate;
+///
+/// assert_eq!(VoicemailGreetingUpdate::new(true).to_json()["active"], true);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoicemailGreetingUpdate {
+    active: bool,
+}
+
+impl VoicemailGreetingUpdate {
+    /// Builds the update.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailGreetingUpdate;
+    ///
+    /// assert_eq!(VoicemailGreetingUpdate::new(false).to_json()["active"], false);
+    /// ```
+    #[must_use]
+    pub fn new(active: bool) -> Self {
+        Self { active }
+    }
+
+    /// Renders the `ChangeVoicemailGreetingRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailGreetingUpdate;
+    ///
+    /// assert_eq!(
+    ///     VoicemailGreetingUpdate::new(true).to_json(),
+    ///     serde_json::json!({"active": true})
+    /// );
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "active": self.active })
+    }
+}
+
+/// `PUT` body for voicemail transcription
+/// (`ChangeVoicemailTranscriptionRequest`).
+///
+/// ```
+/// use sipgate_flow::rest::VoicemailTranscriptionUpdate;
+///
+/// assert_eq!(VoicemailTranscriptionUpdate::new(true).to_json()["active"], true);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoicemailTranscriptionUpdate {
+    active: bool,
+}
+
+impl VoicemailTranscriptionUpdate {
+    /// Builds the update.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailTranscriptionUpdate;
+    ///
+    /// assert_eq!(VoicemailTranscriptionUpdate::new(false).to_json()["active"], false);
+    /// ```
+    #[must_use]
+    pub fn new(active: bool) -> Self {
+        Self { active }
+    }
+
+    /// Renders the `ChangeVoicemailTranscriptionRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::VoicemailTranscriptionUpdate;
+    ///
+    /// assert_eq!(
+    ///     VoicemailTranscriptionUpdate::new(true).to_json(),
+    ///     serde_json::json!({"active": true})
+    /// );
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "active": self.active })
+    }
+}
+// END REST v2 phonelines models and requests (#167)
 
 // --- REST v2 history resource (#166) --------------------------------------
 //
