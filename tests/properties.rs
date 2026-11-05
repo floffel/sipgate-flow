@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use sipgate_flow::auth::MAX_TOKEN_LIFETIME;
 use sipgate_flow::{
     base64, classify, parse_retry_after, retry_after_from, wav, Action, Error, Event, EventPayload,
-    Method, OutboundCall, RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
-    MIN_RETRY_DELAY,
+    Method, OutboundCall, Response, RetryOutcome, RetryPolicy, SmsFailureReason, Token,
+    TransferFailedReason, MIN_RETRY_DELAY,
 };
 
 /// A recursive JSON value, bounded in depth and width.
@@ -99,6 +99,28 @@ proptest! {
     #[test]
     fn the_event_parser_never_panics_on_arbitrary_bytes(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
         let _ = Event::parse(&bytes);
+    }
+
+    #[test]
+    fn a_whitespace_only_body_is_empty_except_on_a_body_forbidding_status(
+        status in 100u16..600,
+        whitespace in prop::collection::vec(prop_oneof![Just(b' '), Just(b'\n'), Just(b'\t'), Just(b'\r')], 0..16),
+    ) {
+        let response = Response::new(status, std::iter::empty(), whitespace);
+        let expected_null = matches!(status, 204 | 205);
+        prop_assert_eq!(response.is_no_content(), expected_null);
+        match response.json() {
+            Ok(value) => {
+                // Only `204`/`205` may answer an empty body, and then it is `Null`.
+                prop_assert!(matches!(status, 204 | 205), "status {} parsed {:?}", status, value);
+                prop_assert_eq!(value, Value::Null);
+            }
+            Err(error) => {
+                // Every other status fails closed with the typed error, never a `{}`.
+                prop_assert!(!matches!(status, 204 | 205), "status {} errored {:?}", status, error);
+                prop_assert!(matches!(error, Error::EmptyBody), "{error:?}");
+            }
+        }
     }
 
     #[test]

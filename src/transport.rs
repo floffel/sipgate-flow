@@ -323,7 +323,7 @@ impl Response {
     /// use sipgate_flow::transport::Response;
     ///
     /// let response = Response::new(204, std::iter::empty(), Vec::new());
-    /// assert_eq!(response.json().unwrap(), serde_json::json!({}));
+    /// assert_eq!(response.json().unwrap(), serde_json::Value::Null);
     /// ```
     pub fn new(
         status: u16,
@@ -511,22 +511,66 @@ impl Response {
         (200..300).contains(&self.status)
     }
 
-    /// Parses the body as JSON; an empty body becomes `{}` so callers can index
-    /// the result unconditionally.
+    /// Whether the status forbids a body (`204 No Content` or `205 Reset
+    /// Content`).
+    ///
+    /// These are the only statuses sipgate documents as "no body": every
+    /// successful REST call that answers `204` (SMS, hangup, DTMF, hold, mute,
+    /// recording, announcement, transfer) is expected to arrive empty. A 2xx
+    /// outside this set is documented to carry JSON, so an empty body there is
+    /// a lost payload, not a normal answer.
+    ///
+    /// ```
+    /// use sipgate_flow::transport::Response;
+    /// assert!(Response::new(204, std::iter::empty(), Vec::new()).is_no_content());
+    /// assert!(Response::new(205, std::iter::empty(), Vec::new()).is_no_content());
+    /// assert!(!Response::new(200, std::iter::empty(), Vec::new()).is_no_content());
+    /// ```
+    #[must_use]
+    pub fn is_no_content(&self) -> bool {
+        matches!(self.status, 204 | 205)
+    }
+
+    /// Parses the body as JSON.
+    ///
+    /// A body that is empty or only ASCII whitespace is treated explicitly:
+    ///
+    /// * For a status that forbids a body ([`Response::is_no_content`], i.e.
+    ///   `204`/`205`) it becomes `Value::Null`, the idiomatic "no value" rather
+    ///   than a synthesised empty object.
+    /// * For every other status it is [`Error::EmptyBody`]: a truncated or
+    ///   proxy-stripped `200` must not look like a successful `{}` whose every
+    ///   field lookup yields `Null`.
+    ///
+    /// Callers that genuinely accept an empty body on a success status should
+    /// check [`Response::is_no_content`] (or the raw [`Response::body`]) before
+    /// calling this.
     ///
     /// ```
     /// use sipgate_flow::transport::Response;
     ///
     /// let response = Response::new(200, std::iter::empty(), br#"{"sessionId":"s0"}"#.to_vec());
     /// assert_eq!(response.json().unwrap()["sessionId"], "s0");
+    ///
+    /// let empty = Response::new(204, std::iter::empty(), Vec::new());
+    /// assert_eq!(empty.json().unwrap(), serde_json::Value::Null);
+    ///
+    /// let lost = Response::new(200, std::iter::empty(), b"\n\t".to_vec());
+    /// assert!(matches!(lost.json(), Err(sipgate_flow::Error::EmptyBody)));
     /// ```
     ///
     /// # Errors
     ///
-    /// [`Error::Json`] when the body is not valid JSON.
+    /// [`Error::EmptyBody`] when a non-`204`/`205` response has an empty or
+    /// whitespace-only body, and [`Error::Json`] when a non-empty body is not
+    /// valid JSON (including a leading UTF-8 BOM, which `serde_json` rejects).
     pub fn json(&self) -> Result<Value> {
         if self.body.iter().all(u8::is_ascii_whitespace) {
-            return Ok(serde_json::json!({}));
+            return if self.is_no_content() {
+                Ok(Value::Null)
+            } else {
+                Err(Error::EmptyBody)
+            };
         }
         serde_json::from_slice(&self.body).map_err(Error::json_parse)
     }
