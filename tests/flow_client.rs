@@ -208,7 +208,16 @@ async fn base_url_and_timeout_are_configurable() {
         recorded.url,
         format!("http://localhost:8080/v3/ai-flows/{FLOW_ID}/call")
     );
-    assert_eq!(recorded.timeout, Some(Duration::from_secs(2)));
+    // The per-request timeout is a budget: the attempt gets what is left of it.
+    let timeout = recorded.timeout.expect("timeout applied");
+    assert!(
+        timeout <= Duration::from_secs(2),
+        "attempt exceeded the configured timeout: {timeout:?}"
+    );
+    assert!(
+        timeout > Duration::from_millis(1900),
+        "attempt was handed a drastically short budget: {timeout:?}"
+    );
 }
 
 #[test]
