@@ -7,8 +7,8 @@ use proptest::prelude::*;
 use serde_json::{json, Value};
 use sipgate_flow::auth::MAX_TOKEN_LIFETIME;
 use sipgate_flow::{
-    base64, classify, parse_retry_after, wav, Action, Error, Event, EventPayload, Method,
-    OutboundCall, RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
+    base64, classify, parse_retry_after, retry_after_from, wav, Action, Error, Event, EventPayload,
+    Method, OutboundCall, RetryOutcome, RetryPolicy, SmsFailureReason, Token, TransferFailedReason,
     MIN_RETRY_DELAY,
 };
 
@@ -237,6 +237,12 @@ proptest! {
             parse_retry_after(&seconds.to_string()),
             Some(std::time::Duration::from_secs(seconds))
         );
+    }
+
+    #[test]
+    fn a_present_retry_after_never_falls_back_to_no_hint(value in ".{0,32}") {
+        let headers = |name: &str| (name == "retry-after").then_some(value.as_str());
+        prop_assert!(retry_after_from(headers).is_some());
     }
 
     #[test]

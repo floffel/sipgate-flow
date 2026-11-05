@@ -4,7 +4,9 @@
 //! [`crate::RestClient`] stays a thin shell. Locally computed backoff uses equal
 //! jitter in `[d/2, d]` to avoid fleet-wide lockstep; a server-provided
 //! `Retry-After` is honoured exactly (after clamping) because it is already the
-//! peer's pacing instruction.
+//! peer's pacing instruction. Both documented forms are accepted: delta-seconds
+//! and HTTP-date. A present but unusable header fails closed to the caller's
+//! ceiling instead of silently falling back to the shortest backoff step.
 //!
 //! This crate never sleeps: the loop awaits a caller-supplied [`Sleeper`], so
 //! pacing (and therefore cancellation) stays under the caller's control.
@@ -31,8 +33,11 @@
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
+use httpdate::parse_http_date;
+
+use crate::auth::{Clock, SystemClock};
 use crate::error::Error;
 use crate::transport::Method;
 
@@ -335,11 +340,12 @@ where
     }
 }
 
-/// Parses a `Retry-After` header value in its delta-seconds form.
+/// Parses a `Retry-After` header value in either documented form.
 ///
-/// The HTTP-date form is deliberately not converted here: it needs a clock,
-/// and sipgate sends delta-seconds. An unparseable value returns `None` so the
-/// caller falls back to exponential backoff instead of failing the request.
+/// Delta-seconds are returned directly. HTTP-date values are converted with
+/// [`SystemClock`], saturating at zero when the date is in the past. A value
+/// this parser cannot read returns `None`; [`retry_after_from`] turns a present
+/// but unreadable header into a maximal hint so a retry loop fails closed.
 ///
 /// ```
 /// use std::time::Duration;
@@ -347,19 +353,41 @@ where
 ///
 /// assert_eq!(parse_retry_after("3"), Some(Duration::from_secs(3)));
 /// assert_eq!(parse_retry_after(" 0 "), Some(Duration::ZERO));
-/// assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), None);
+/// assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), Some(Duration::ZERO));
 /// ```
 #[must_use]
 pub fn parse_retry_after(value: &str) -> Option<Duration> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    trimmed.parse::<u64>().ok().map(Duration::from_secs)
+    parse_retry_after_with_clock(value, &SystemClock)
 }
 
-/// Reads `Retry-After` through any header lookup function, mapping a missing or
-/// unparseable header to `None`.
+fn parse_retry_after_with_clock<C: Clock>(value: &str, clock: &C) -> Option<Duration> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        // A value above `u64::MAX` is absurd but present. Keep it as a
+        // maximal hint; `parse_retry_after` preserves the value and callers
+        // clamp it to their own ceiling.
+        return Some(
+            trimmed
+                .parse::<u64>()
+                .map_or(Duration::MAX, Duration::from_secs),
+        );
+    }
+
+    let deadline = parse_http_date(trimmed).ok()?;
+    let now = UNIX_EPOCH.checked_add(clock.now().ok()?)?;
+    Some(deadline.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
+/// Reads `Retry-After` through any header lookup function, failing closed when
+/// the header is present but unusable.
+///
+/// A missing header yields `None`, so the caller's exponential backoff applies.
+/// A present but unreadable header yields [`Duration::MAX`], which the retry
+/// policy and error constructors clamp to their configured ceilings: a server
+/// asking for pacing is never retried sooner because its hint was malformed.
 ///
 /// ```
 /// use std::time::Duration;
@@ -367,9 +395,44 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
 ///
 /// let headers = |name: &str| (name == "retry-after").then_some("4");
 /// assert_eq!(retry_after_from(headers), Some(Duration::from_secs(4)));
+/// assert_eq!(retry_after_from(|_| None), None);
+/// assert_eq!(retry_after_from(|_| Some("not a date")), Some(Duration::MAX));
 /// ```
 pub fn retry_after_from<'a>(header: impl Fn(&str) -> Option<&'a str>) -> Option<Duration> {
-    header("retry-after").and_then(parse_retry_after)
+    retry_after_from_with_clock(header, &SystemClock)
+}
+
+/// Reads `Retry-After` with an explicit clock for the HTTP-date form.
+///
+/// This is the clock-injectable form of [`retry_after_from`], useful when a
+/// caller already owns a deterministic or custom [`Clock`].
+///
+/// ```
+/// use std::time::Duration;
+/// use sipgate_flow::{retry_after_from_with_clock, Clock, Result};
+///
+/// struct Fixed;
+/// impl Clock for Fixed {
+///     fn now(&self) -> Result<Duration> {
+///         Ok(Duration::from_secs(1_700_000_000))
+///     }
+/// }
+///
+/// let headers = |name: &str| {
+///     name.eq_ignore_ascii_case("retry-after")
+///         .then_some("Tue, 14 Nov 2023 22:15:20 GMT")
+/// };
+/// assert_eq!(
+///     retry_after_from_with_clock(headers, &Fixed),
+///     Some(Duration::from_secs(120))
+/// );
+/// ```
+pub fn retry_after_from_with_clock<'a, C: Clock>(
+    header: impl Fn(&str) -> Option<&'a str>,
+    clock: &C,
+) -> Option<Duration> {
+    let value = header("retry-after")?;
+    Some(parse_retry_after_with_clock(value, clock).unwrap_or(Duration::MAX))
 }
 
 /// What a failed attempt means for a retry loop.
