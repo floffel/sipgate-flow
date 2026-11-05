@@ -50,6 +50,14 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `thirty_two_tasks_share_one_token_cache_without_corruption` test, whose bound
   is now tightened to exactly one request.
 * The crate-root "Calling the REST API" section now ships a runnable example. An in-memory `Transport` drives `RestClient::send_sms` and asserts the URL that goes out, so the renderer-free path is executed by the doctest runner (including under `--no-default-features`); the `reqwest` half is split out so only the `ReqwestTransport` lines sit behind the `http` feature instead of the whole example compiling away.
+* The `reqwest` transport now bounds the response body instead of reading it
+  whole and cloning it. `ReqwestTransport` refuses an oversized
+  `Content-Length` before reading, streams a body without one through
+  `reqwest::Response::chunk`, and returns the typed `Error::BodyTooLarge` once
+  the ceiling is crossed, so a hostile or broken endpoint can no longer choose
+  the transport's allocation. The default is
+  `DEFAULT_MAX_RESPONSE_BODY_BYTES` (1 MiB, mirroring the webhook ceiling) and a
+  caller can tighten it with `ReqwestTransport::with_max_body_bytes`.
 * `RetryPolicy::delay(0, ...)` no longer schedules a full backoff step. The
   parameter is documented as completed *failures*, so zero completed failures
   now returns `None` instead of treating the first caller attempt index as an

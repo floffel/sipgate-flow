@@ -626,6 +626,27 @@ pub trait Transport: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Response>> + Send;
 }
 
+/// Default largest response body [`ReqwestTransport`] will read, in bytes.
+///
+/// This mirrors the webhook body ceiling: a well-behaved sipgate response is a
+/// few KiB, so a megabyte is generous while still refusing an endpoint that
+/// tries to exhaust memory. Tighten it per transport with
+/// [`ReqwestTransport::with_max_body_bytes`].
+///
+/// ```
+/// # #[cfg(feature = "http")]
+/// # fn main() {
+/// assert_eq!(
+///     sipgate_flow::transport::DEFAULT_MAX_RESPONSE_BODY_BYTES,
+///     1024 * 1024
+/// );
+/// # }
+/// # #[cfg(not(feature = "http"))]
+/// # fn main() {}
+/// ```
+#[cfg(feature = "http")]
+pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+
 /// `reqwest`-based transport, enabled by default via the `http` feature.
 ///
 /// The inner client is cheap to clone and safe to share across tasks.
@@ -633,6 +654,13 @@ pub trait Transport: Send + Sync {
 /// a normal response so it can classify the redirect. Use
 /// [`ReqwestTransport::from_client`] when redirect-following is deliberately
 /// configured by the caller.
+///
+/// Response bodies are bounded by [`DEFAULT_MAX_RESPONSE_BODY_BYTES`]. An
+/// oversized `Content-Length` is refused before the body is read, and a body
+/// without a length is streamed through [`reqwest::Response::chunk`] until the
+/// ceiling is crossed, at which point the call fails with
+/// [`Error::BodyTooLarge`]. Callers can tighten the ceiling with
+/// [`ReqwestTransport::with_max_body_bytes`].
 ///
 /// ```no_run
 /// # #[cfg(feature = "http")]
@@ -648,6 +676,7 @@ pub trait Transport: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: std::result::Result<reqwest::Client, String>,
+    max_body_bytes: usize,
 }
 
 #[cfg(feature = "http")]
@@ -667,6 +696,7 @@ impl ReqwestTransport {
             Ok(client) => Self::from_client(client),
             Err(error) => Self {
                 client: Err(format!("reqwest client construction failed: {error}")),
+                max_body_bytes: DEFAULT_MAX_RESPONSE_BODY_BYTES,
             },
         }
     }
@@ -693,7 +723,80 @@ impl ReqwestTransport {
     /// ```
     #[must_use]
     pub fn from_client(client: reqwest::Client) -> Self {
-        Self { client: Ok(client) }
+        Self {
+            client: Ok(client),
+            max_body_bytes: DEFAULT_MAX_RESPONSE_BODY_BYTES,
+        }
+    }
+
+    /// Tightens the largest response body this transport will read.
+    ///
+    /// The accepted range is `1..=DEFAULT_MAX_RESPONSE_BODY_BYTES`. `0` is
+    /// rejected because it would refuse every response, and values above the
+    /// default are rejected so the transport's own ceiling stays bounded even
+    /// when the caller tightens nothing.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # fn main() -> Result<(), sipgate_flow::Error> {
+    /// use sipgate_flow::transport::DEFAULT_MAX_RESPONSE_BODY_BYTES;
+    /// use sipgate_flow::ReqwestTransport;
+    ///
+    /// let transport = ReqwestTransport::new().with_max_body_bytes(4096)?;
+    /// assert_eq!(transport.max_body_bytes(), 4096);
+    /// assert!(ReqwestTransport::new().with_max_body_bytes(1).is_ok());
+    /// assert!(
+    ///     ReqwestTransport::new()
+    ///         .with_max_body_bytes(DEFAULT_MAX_RESPONSE_BODY_BYTES)
+    ///         .is_ok()
+    /// );
+    ///
+    /// assert!(ReqwestTransport::new().with_max_body_bytes(0).is_err());
+    /// assert!(
+    ///     ReqwestTransport::new()
+    ///         .with_max_body_bytes(DEFAULT_MAX_RESPONSE_BODY_BYTES + 1)
+    ///         .is_err()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(feature = "http"))]
+    /// # fn main() {}
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] with field `max_body_bytes` when `limit` is `0`
+    /// or above [`DEFAULT_MAX_RESPONSE_BODY_BYTES`].
+    pub fn with_max_body_bytes(mut self, limit: usize) -> Result<Self> {
+        if !(1..=DEFAULT_MAX_RESPONSE_BODY_BYTES).contains(&limit) {
+            return Err(Error::validation(
+                "max_body_bytes",
+                format!("must be between 1 and {DEFAULT_MAX_RESPONSE_BODY_BYTES} bytes"),
+            ));
+        }
+        self.max_body_bytes = limit;
+        Ok(self)
+    }
+
+    /// The configured response-body ceiling, in bytes.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # fn main() {
+    /// use sipgate_flow::transport::DEFAULT_MAX_RESPONSE_BODY_BYTES;
+    /// use sipgate_flow::ReqwestTransport;
+    ///
+    /// assert_eq!(
+    ///     ReqwestTransport::new().max_body_bytes(),
+    ///     DEFAULT_MAX_RESPONSE_BODY_BYTES
+    /// );
+    /// # }
+    /// # #[cfg(not(feature = "http"))]
+    /// # fn main() {}
+    /// ```
+    #[must_use]
+    pub fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes
     }
 }
 
@@ -742,7 +845,7 @@ impl Transport for ReqwestTransport {
         }
 
         let method = request.method;
-        let response = builder
+        let mut response = builder
             .send()
             .await
             .map_err(|error| describe_reqwest_error(error, method))?;
@@ -752,14 +855,49 @@ impl Transport for ReqwestTransport {
             .iter()
             .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
             .collect::<Vec<_>>();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| describe_reqwest_error(error, method))?
-            .to_vec();
+        let body = read_bounded_body(&mut response, self.max_body_bytes, method).await?;
 
         Ok(Response::with_raw_headers(status, headers, body))
     }
+}
+
+#[cfg(feature = "http")]
+async fn read_bounded_body(
+    response: &mut reqwest::Response,
+    limit: usize,
+    method: Method,
+) -> Result<Vec<u8>> {
+    let announced = response.content_length();
+    if let Some(size) = announced {
+        let limit_u64 = u64::try_from(limit).unwrap_or(u64::MAX);
+        if size > limit_u64 {
+            return Err(Error::BodyTooLarge {
+                size: usize::try_from(size).unwrap_or(usize::MAX),
+                limit,
+            });
+        }
+    }
+
+    let capacity = announced
+        .and_then(|size| usize::try_from(size).ok())
+        .map_or(0, |size| size.min(limit));
+    let mut body = Vec::with_capacity(capacity);
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => return Err(describe_reqwest_error(error, method)),
+        };
+        let remaining = limit - body.len();
+        if chunk.len() > remaining {
+            return Err(Error::BodyTooLarge {
+                size: body.len().saturating_add(chunk.len()),
+                limit,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Maps a `reqwest` failure to the closest of the two transport outcomes

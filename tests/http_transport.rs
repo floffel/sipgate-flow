@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use sipgate_flow::transport::{Method, Request, RequestBody, Response, Security, Transport};
 use sipgate_flow::{Error, ReqwestTransport};
+use wiremock::matchers::method as method_matcher;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// A one-shot HTTP server: it answers with `response` and records the request.
 struct TestServer {
@@ -636,6 +638,187 @@ fn a_single_clean_header_still_reads_back() {
     assert_eq!(response.header("Retry-After"), Some("3"));
     assert_eq!(response.header_all("RETRY-AFTER"), ["3"]);
     assert_eq!(response.headers(), [("retry-after", "3")]);
+}
+
+/// A body of exactly `limit` bytes is accepted.
+#[tokio::test]
+async fn a_response_body_at_the_ceiling_is_accepted() {
+    let server = MockServer::start().await;
+    let body = vec![b'x'; 64];
+    Mock::given(method_matcher("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/v2/calls", server.uri());
+    let request = Request::empty(Method::Get, &url, Security::Bearer("t"));
+    let response = ReqwestTransport::new()
+        .with_max_body_bytes(64)
+        .expect("64 is inside the accepted range")
+        .execute(request)
+        .await
+        .expect("a body exactly at the ceiling is fine");
+    assert_eq!(response.body(), body.as_slice());
+}
+
+/// A body of `limit + 1` bytes is refused with the typed ceiling error.
+#[tokio::test]
+async fn a_response_body_one_byte_over_the_ceiling_is_rejected() {
+    let server = MockServer::start().await;
+    let body = vec![b'x'; 65];
+    Mock::given(method_matcher("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/v2/calls", server.uri());
+    let request = Request::empty(Method::Get, &url, Security::Bearer("t"));
+    let error = ReqwestTransport::new()
+        .with_max_body_bytes(64)
+        .expect("64 is inside the accepted range")
+        .execute(request)
+        .await
+        .expect_err("one byte over the ceiling is refused");
+    assert!(
+        matches!(
+            error,
+            Error::BodyTooLarge {
+                size: 65,
+                limit: 64
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(!error.is_retryable(), "{error:?}");
+    assert!(!error.is_ambiguous(), "{error:?}");
+}
+
+/// An oversized `Content-Length` is refused before the body is read, so the
+/// reported size is the announced one even though no byte of it arrived.
+#[tokio::test]
+async fn an_oversized_content_length_is_refused_before_reading() {
+    let server = TestServer::start(
+        "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n",
+        Duration::ZERO,
+    );
+    let url = server.url("/v2/calls");
+    let request = Request::empty(Method::Get, &url, Security::Bearer("t"));
+    let error = ReqwestTransport::new()
+        .with_max_body_bytes(64)
+        .expect("64 is inside the accepted range")
+        .execute(request)
+        .await
+        .expect_err("the announced body is over the ceiling");
+    assert!(
+        matches!(
+            error,
+            Error::BodyTooLarge {
+                size: 4096,
+                limit: 64
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+/// Builds a chunked HTTP/1.1 response, so no `Content-Length` is available and
+/// the transport must bound the stream as it arrives.
+fn chunked_wire(chunks: &[&[u8]]) -> Vec<u8> {
+    let mut wire =
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+    for chunk in chunks {
+        wire.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+        wire.extend_from_slice(chunk);
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"0\r\n\r\n");
+    wire
+}
+
+/// Without a `Content-Length`, a streamed body exactly at the ceiling is kept.
+#[tokio::test]
+async fn a_streamed_body_at_the_ceiling_is_accepted() {
+    let server = TestServer::start_raw(chunked_wire(&[b"abcd", b"efghij"]), Duration::ZERO);
+    let url = server.url("/v2/calls");
+    let request = Request::empty(Method::Get, &url, Security::Bearer("t"));
+    let response = ReqwestTransport::new()
+        .with_max_body_bytes(10)
+        .expect("10 is inside the accepted range")
+        .execute(request)
+        .await
+        .expect("exactly ten streamed bytes are fine");
+    assert_eq!(response.body(), b"abcdefghij");
+}
+
+/// Without a `Content-Length`, the stream is stopped once it crosses the cap.
+#[tokio::test]
+async fn a_streamed_body_over_the_ceiling_is_rejected_without_buffering_it() {
+    let server = TestServer::start_raw(chunked_wire(&[b"abcd", b"efghijk"]), Duration::ZERO);
+    let url = server.url("/v2/calls");
+    let request = Request::empty(Method::Get, &url, Security::Bearer("t"));
+    let error = ReqwestTransport::new()
+        .with_max_body_bytes(10)
+        .expect("10 is inside the accepted range")
+        .execute(request)
+        .await
+        .expect_err("the streamed body crosses the ceiling");
+    assert!(
+        matches!(
+            error,
+            Error::BodyTooLarge {
+                size: 11,
+                limit: 10
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+/// The configurable ceiling accepts the documented range and refuses outside it.
+#[test]
+fn the_response_body_ceiling_is_validated_boundaries_and_all() {
+    use sipgate_flow::transport::DEFAULT_MAX_RESPONSE_BODY_BYTES;
+
+    assert_eq!(
+        ReqwestTransport::new()
+            .with_max_body_bytes(1)
+            .expect("one byte is the smallest accepted ceiling")
+            .max_body_bytes(),
+        1
+    );
+    assert_eq!(
+        ReqwestTransport::new()
+            .with_max_body_bytes(DEFAULT_MAX_RESPONSE_BODY_BYTES)
+            .expect("the default is the largest accepted ceiling")
+            .max_body_bytes(),
+        DEFAULT_MAX_RESPONSE_BODY_BYTES
+    );
+    assert_eq!(
+        ReqwestTransport::new().max_body_bytes(),
+        DEFAULT_MAX_RESPONSE_BODY_BYTES
+    );
+
+    let zero = ReqwestTransport::new()
+        .with_max_body_bytes(0)
+        .expect_err("zero would refuse every response");
+    assert!(matches!(
+        zero,
+        Error::Validation {
+            field: "max_body_bytes",
+            ..
+        }
+    ));
+
+    let too_large = ReqwestTransport::new()
+        .with_max_body_bytes(DEFAULT_MAX_RESPONSE_BODY_BYTES + 1)
+        .expect_err("the transport ceiling must stay bounded");
+    assert!(matches!(
+        too_large,
+        Error::Validation {
+            field: "max_body_bytes",
+            ..
+        }
+    ));
 }
 
 /// End to end through `ReqwestTransport`: a real socket sends a repeated header
