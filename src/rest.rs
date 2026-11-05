@@ -295,14 +295,17 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
         let response = exchange::authorized(
             &self.transport,
             &self.auth,
-            &self.base_url,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: true,
+                path,
+            },
             exchange::Pacing {
                 timeout: self.timeout,
                 retry: &self.retry,
                 sleeper: &self.sleeper,
             },
             method,
-            path,
             body,
         )
         .await?;

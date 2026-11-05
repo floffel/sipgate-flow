@@ -19,6 +19,7 @@
 
 use serde_json::Value;
 use std::time::{Duration, Instant};
+use url::Url;
 
 use crate::auth::TokenSource;
 use crate::error::{Error, Result};
@@ -39,9 +40,18 @@ pub(crate) struct Pacing<'a, S> {
     pub sleeper: &'a S,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Target<'a> {
+    pub base_url: &'a str,
+    pub allow_http_base_url: bool,
+    pub path: &'a str,
+}
+
 /// Sends `method path` with the credential's scheme, refreshing once on 401.
 ///
-/// `base_url` is joined without a trailing slash; `path` must start with `/`.
+/// `base_url` must be an absolute `https://` URL. `path` must start with a
+/// single `/` and must not contain `//`, `..`, `@`, CR or LF; the joined URL is
+/// checked again before the credential is attached.
 ///
 /// `pacing.timeout` is the total budget for this exchange: both attempts and
 /// the pause between them draw from the same deadline, so a 401 can never take
@@ -52,10 +62,9 @@ pub(crate) struct Pacing<'a, S> {
 pub(crate) async fn authorized<T, A, S>(
     transport: &T,
     auth: &A,
-    base_url: &str,
+    target: Target<'_>,
     pacing: Pacing<'_, S>,
     method: Method,
-    path: &str,
     body: Option<&Value>,
 ) -> Result<Response>
 where
@@ -69,14 +78,14 @@ where
         sleeper,
     } = pacing;
     let deadline = exchange_deadline(timeout, Instant::now());
+    let url = request_url(target.base_url, target.allow_http_base_url, target.path)?;
 
     let token = auth.access_token(false).await?;
     let response = send_once(
         transport,
-        base_url,
+        &url,
         remaining_budget(deadline, Instant::now()),
         method,
-        path,
         body,
         token.security(),
     )
@@ -93,10 +102,9 @@ where
     let token = auth.refresh_after(&token).await?;
     let response = send_once(
         transport,
-        base_url,
+        &url,
         remaining_budget(deadline, Instant::now()),
         method,
-        path,
         body,
         token.security(),
     )
@@ -142,27 +150,251 @@ fn retry_pause(
 
 async fn send_once<T: Transport>(
     transport: &T,
-    base_url: &str,
+    url: &str,
     timeout: Option<Duration>,
     method: Method,
-    path: &str,
     body: Option<&Value>,
     security: Security<'_>,
 ) -> Result<Response> {
-    let url = format!("{}{path}", base_url.trim_end_matches('/'));
     let request = match body {
-        Some(body) => Request::json(method, &url, security, body),
-        None => Request::empty(method, &url, security),
+        Some(body) => Request::json(method, url, security, body),
+        None => Request::empty(method, url, security),
     }
     .with_timeout(timeout);
     transport.execute(request).await
 }
 
+/// Builds the final URL after checking both halves before a credential exists.
+fn request_url(base_url: &str, allow_http_base_url: bool, path: &str) -> Result<String> {
+    let base = Url::parse(base_url)
+        .map_err(|error| Error::invalid_request("base_url", format!("must be a URL: {error}")))?;
+    if !(base.scheme() == "https" || (allow_http_base_url && base.scheme() == "http")) {
+        return Err(Error::invalid_request("base_url", "must use https://"));
+    }
+    if base.host_str().is_none() {
+        return Err(Error::invalid_request("base_url", "must include a host"));
+    }
+    if !base.username().is_empty() || base.password().is_some() {
+        return Err(Error::invalid_request(
+            "base_url",
+            "must not include credentials",
+        ));
+    }
+    validate_path(path)?;
+
+    let base = base.as_str().trim_end_matches('/');
+    let url = format!("{base}{path}");
+    let parsed = Url::parse(&url).map_err(|error| {
+        Error::invalid_request("path", format!("must build an absolute URL: {error}"))
+    })?;
+    if !(parsed.scheme() == "https" || (allow_http_base_url && parsed.scheme() == "http"))
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(Error::invalid_request(
+            "path",
+            "must not retarget the base URL",
+        ));
+    }
+    Ok(url)
+}
+
+fn validate_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') {
+        return Err(Error::invalid_request("path", "must start with /"));
+    }
+    if path.starts_with("//") {
+        return Err(Error::invalid_request("path", "must not start with //"));
+    }
+    if path.contains('\r') || path.contains('\n') {
+        return Err(Error::invalid_request("path", "must not contain CR or LF"));
+    }
+    let (path_only, query) = path
+        .split_once('?')
+        .map_or((path, None), |(path, query)| (path, Some(query)));
+    if path_only.starts_with("//") {
+        return Err(Error::invalid_request("path", "must not start with //"));
+    }
+    if query.is_some_and(|query| {
+        query.contains('?') || query.contains('@') || query.contains('\r') || query.contains('\n')
+    }) {
+        return Err(Error::invalid_request(
+            "path",
+            "query must not contain ? or @",
+        ));
+    }
+    let segments = path_only[1..].split('/').collect::<Vec<_>>();
+    let last = segments.len().saturating_sub(1);
+    for (index, segment) in segments.into_iter().enumerate() {
+        if segment.is_empty() && index < last {
+            return Err(Error::invalid_request(
+                "path",
+                "must not contain empty path segments",
+            ));
+        }
+        if segment == ".." {
+            return Err(Error::invalid_request(
+                "path",
+                "must not contain .. path segments",
+            ));
+        }
+        if segment.starts_with('@') {
+            return Err(Error::invalid_request(
+                "path",
+                "must not contain @ path segments",
+            ));
+        }
+        if segment.contains('@') {
+            return Err(Error::invalid_request(
+                "path",
+                "must not contain @ after the first segment",
+            ));
+        }
+        if segment.contains(':') && index > 0 {
+            return Err(Error::invalid_request(
+                "path",
+                "must not contain a scheme-like path segment",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{exchange_deadline, remaining_budget, retry_pause};
+    use super::{
+        authorized, exchange_deadline, remaining_budget, request_url, retry_pause, Pacing, Target,
+    };
+    use crate::auth::{Token, TokenSource};
+    use crate::error::Error;
     use crate::retry::RetryPolicy;
+    use crate::transport::{Method, Request, Response, Transport};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct CountingAuth {
+        calls: AtomicUsize,
+    }
+
+    impl TokenSource for CountingAuth {
+        fn access_token(
+            &self,
+            _force_refresh: bool,
+        ) -> impl std::future::Future<Output = crate::Result<Token>> + Send {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Token::from_json(&serde_json::json!({"access_token": "t"})))
+        }
+
+        fn invalidate(&self) {}
+    }
+
+    struct NeverTransport;
+
+    impl Transport for NeverTransport {
+        fn execute(
+            &self,
+            _: Request<'_>,
+        ) -> impl std::future::Future<Output = crate::Result<Response>> {
+            std::future::ready(Err(Error::transport_terminal(
+                "transport must not be reached",
+            )))
+        }
+    }
+
+    #[test]
+    fn request_urls_reject_paths_that_do_not_start_with_slash() {
+        let error = request_url("https://api.sipgate.com", false, "v2/users")
+            .expect_err("relative paths must not swallow the host");
+        assert!(matches!(error, Error::InvalidRequest { field: "path", .. }));
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn request_urls_reject_retargeting_paths() {
+        for path in [
+            "@evil.example/x",
+            "/@evil.example/x",
+            "//evil.example/x",
+            "/v2/../users",
+            "/v2/users?x=1?y=2",
+            "/v2/users?@evil.example/x",
+        ] {
+            let error = request_url("https://api.sipgate.com", false, path).expect_err(path);
+            assert!(
+                matches!(error, Error::InvalidRequest { field: "path", .. }),
+                "{path:?} produced {error:?}"
+            );
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[test]
+    fn request_urls_require_an_absolute_https_base() {
+        for base_url in [
+            "",
+            "api.sipgate.com",
+            "http://api.sipgate.com",
+            "file:///tmp/x",
+        ] {
+            let error = request_url(base_url, false, "/v2/users").expect_err(base_url);
+            assert!(
+                matches!(
+                    error,
+                    Error::InvalidRequest {
+                        field: "base_url",
+                        ..
+                    }
+                ),
+                "{base_url:?} produced {error:?}"
+            );
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[test]
+    fn request_urls_keep_the_same_shape_for_legitimate_paths_and_queries() {
+        assert_eq!(
+            request_url("https://api.sipgate.com/", false, "/v2/users").expect("valid"),
+            "https://api.sipgate.com/v2/users"
+        );
+        assert_eq!(
+            request_url("https://api.sipgate.com", false, "/v2/users?limit=10").expect("valid"),
+            "https://api.sipgate.com/v2/users?limit=10"
+        );
+        assert_eq!(
+            request_url("http://localhost:8080/", true, "/v2/users").expect("local testing"),
+            "http://localhost:8080/v2/users"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_request_urls_are_rejected_before_the_credential_is_fetched() {
+        let auth = CountingAuth::default();
+        let error = authorized(
+            &NeverTransport,
+            &auth,
+            Target {
+                base_url: "https://api.sipgate.com",
+                allow_http_base_url: false,
+                path: "@evil.example/x",
+            },
+            Pacing {
+                timeout: None,
+                retry: &RetryPolicy::none(),
+                sleeper: &crate::retry::NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await
+        .expect_err("invalid request URL");
+
+        assert!(matches!(error, Error::InvalidRequest { field: "path", .. }));
+        assert!(!error.is_retryable());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn a_missing_timeout_leaves_the_transport_default_in_place() {
