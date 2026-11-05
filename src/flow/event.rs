@@ -567,6 +567,12 @@ impl Event {
     /// `session.id` does not fail the parse (it yields an empty id that
     /// [`Action`](crate::Action) constructors then refuse).
     ///
+    /// Advisory metadata fields tolerate type drift: `barged_in` degrades to
+    /// `false`, and `duration_ms` plus `speech_started_at` degrade to `None`
+    /// when upstream sends an unexpected JSON type. Control-flow fields stay
+    /// strict: `type` chooses the payload and response capability, and
+    /// `session`/`session.id` carry the identifier returned actions must echo.
+    ///
     /// ```
     /// use sipgate_flow::{Event, EventPayload};
     ///
@@ -575,11 +581,28 @@ impl Event {
     /// # Ok::<(), sipgate_flow::Error>(())
     /// ```
     ///
+    /// ```
+    /// use sipgate_flow::{Event, EventPayload};
+    ///
+    /// let event = Event::parse(
+    ///     br#"{"type":"assistant_speak","duration_ms":"1200","speech_started_at":1.5,"session":{"id":"s"}}"#,
+    /// )?;
+    /// assert!(matches!(
+    ///     event.payload(),
+    ///     EventPayload::AssistantSpeak {
+    ///         duration_ms: None,
+    ///         speech_started_at: None,
+    ///         ..
+    ///     }
+    /// ));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// * [`Error::EmptyBody`] when the body is empty or only whitespace.
     /// * [`Error::Json`] when the body is not JSON, is not an object, has a
-    ///   documented field of the wrong type, or repeats a known key.
+    ///   strict field of the wrong type, or repeats a known key.
     pub fn parse(body: &[u8]) -> Result<Self> {
         if body.iter().all(u8::is_ascii_whitespace) {
             return Err(Error::EmptyBody);
@@ -623,7 +646,11 @@ impl Event {
             Some("user_speech_started") => EventPayload::UserSpeechStarted,
             Some("user_speak") => EventPayload::UserSpeak {
                 text: raw.text.unwrap_or_default(),
-                barged_in: raw.barged_in.unwrap_or(false),
+                barged_in: raw
+                    .barged_in
+                    .as_ref()
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 language: raw.language,
             },
             Some("user_barge_in") => EventPayload::UserBargeIn {
@@ -636,8 +663,8 @@ impl Event {
             Some("assistant_speak") => EventPayload::AssistantSpeak {
                 text: raw.text,
                 ssml: raw.ssml,
-                duration_ms: raw.duration_ms,
-                speech_started_at: raw.speech_started_at,
+                duration_ms: raw.duration_ms.as_ref().and_then(Value::as_u64),
+                speech_started_at: raw.speech_started_at.as_ref().and_then(Value::as_i64),
             },
             Some("assistant_speech_ended") => EventPayload::AssistantSpeechEnded,
             Some("user_input_timeout") => EventPayload::UserInputTimeout,
@@ -994,13 +1021,13 @@ struct RawEvent {
     #[serde(default)]
     digits: Option<String>,
     #[serde(default, alias = "bargedIn")]
-    barged_in: Option<bool>,
+    barged_in: Option<Value>,
     #[serde(default)]
     language: Option<String>,
     #[serde(default, alias = "durationMs")]
-    duration_ms: Option<u64>,
+    duration_ms: Option<Value>,
     #[serde(default, alias = "speechStartedAt")]
-    speech_started_at: Option<i64>,
+    speech_started_at: Option<Value>,
     #[serde(default, alias = "transferFailedReason")]
     transfer_failed_reason: Option<String>,
     #[serde(default)]

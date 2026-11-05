@@ -394,9 +394,87 @@ fn a_wrongly_typed_known_field_is_rejected() {
     let error = Event::parse(br#"{"type":"user_speak","text":42,"session":{"id":"s"}}"#)
         .expect_err("number where a string is documented");
     assert!(matches!(error, Error::Json { .. }));
-    let error = Event::parse(br#"{"type":"user_speak","text":"hi","barged_in":"yes"}"#)
-        .expect_err("string where a bool is documented");
-    assert!(matches!(error, Error::Json { .. }));
+}
+
+#[test]
+fn advisory_field_type_drift_degrades_to_none_without_dropping_the_event() {
+    for body in [
+        r#"{"type":"user_speak","text":"hi","barged_in":"yes","session":{"id":"s"}}"#,
+        r#"{"type":"user_speak","text":"hi","bargedIn":1,"session":{"id":"s"}}"#,
+    ] {
+        let event = parse(body);
+        assert!(matches!(
+            event.payload(),
+            EventPayload::UserSpeak {
+                text,
+                barged_in: false,
+                ..
+            } if text == "hi"
+        ));
+    }
+
+    for (body, duration_ms, speech_started_at) in [
+        (
+            r#"{"type":"assistant_speak","duration_ms":"1200","speech_started_at":1234567890,"session":{"id":"s"}}"#,
+            None,
+            Some(1_234_567_890),
+        ),
+        (
+            r#"{"type":"assistant_speak","duration_ms":12.5,"speech_started_at":"later","session":{"id":"s"}}"#,
+            None,
+            None,
+        ),
+        (
+            r#"{"type":"assistant_speak","durationMs":-1,"speechStartedAt":-1,"session":{"id":"s"}}"#,
+            None,
+            Some(-1),
+        ),
+        (
+            r#"{"type":"assistant_speak","duration_ms":null,"speech_started_at":null,"session":{"id":"s"}}"#,
+            None,
+            None,
+        ),
+    ] {
+        let event = parse(body);
+        assert!(
+            matches!(
+                event.payload(),
+                EventPayload::AssistantSpeak {
+                    duration_ms: actual_duration,
+                    speech_started_at: actual_started,
+                    ..
+                } if *actual_duration == duration_ms && *actual_started == speech_started_at
+            ),
+            "for {body}"
+        );
+    }
+
+    let valid = parse(
+        r#"{"type":"assistant_speak","duration_ms":0,"speech_started_at":-1,"session":{"id":"s"}}"#,
+    );
+    assert!(matches!(
+        valid.payload(),
+        EventPayload::AssistantSpeak {
+            duration_ms: Some(0),
+            speech_started_at: Some(-1),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn control_flow_fields_remain_strict() {
+    for body in [
+        br#"{"type":42,"session":{"id":"s"}}"#.as_slice(),
+        br#"{"type":"user_speak","session":42}"#.as_slice(),
+        br#"{"type":"user_speak","session":{"id":42}}"#.as_slice(),
+    ] {
+        let error = Event::parse(body).expect_err("control-flow field has the wrong type");
+        assert!(matches!(error, Error::Json { .. }), "{error:?}");
+    }
+
+    let event = parse(r#"{"type":"user_speak","text":"hi","session":{"id":"s"}}"#);
+    assert_eq!(event.session_id(), Some("s"));
 }
 
 #[test]
