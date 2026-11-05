@@ -15,9 +15,28 @@
 //! `base_delay`, zero `max_delay` or zero `Retry-After` hint cannot turn the
 //! loop into an unthrottled hammer.
 //!
-//! A maintained backoff crate is not used here because [`RetryPolicy`] and
-//! [`Sleeper`] must stay runtime-free and source-compatible; the jitter uses
-//! the standard library's cheap randomized hasher seed instead.
+//! `httpdate` is already the Retry-After parser for HTTP-date values, so the
+//! only remaining reuse question is the budgeting loop.
+//!
+//! This module intentionally does not depend on `backoff` (the crate named by
+//! the reinvention audit). `backoff` 0.4 is unmaintained (RUSTSEC-2025-0012)
+//! and pulls in the unmaintained `instant` crate (RUSTSEC-2024-0384), so it
+//! cannot pass `cargo deny check` without an advisory ignore, which this
+//! repository forbids. Even ignoring the advisory, its async helpers require a
+//! caller-supplied runtime or feature-gated `futures`/`tokio` adapters, while
+//! this crate's [`Sleeper`] must let the caller await any cancellation-safe
+//! future without adding a runtime dependency to the public surface.
+//!
+//! The public shape also matters: [`RetryPolicy::delay`] is a pure `&self`
+//! decision function (`Send + Sync`, no clock, no `&mut self`, no wall-clock
+//! state), while `backoff::ExponentialBackoff` is stateful and advances through
+//! `&mut self`. Keeping the decision pure is what lets the REST loop and
+//! [`crate::flow::socket::AcceptBackoff`] share one policy while preserving the
+//! `max_attempts`, `MIN_RETRY_DELAY`, `max_delay`, and fail-closed `Retry-After`
+//! contract. The local jitter uses the standard library's cheap randomized
+//! hasher seed to produce the documented equal-jitter window `[d/2, d]`; no
+//! maintained retry crate found here preserves that window and the existing
+//! source-compatible API while also staying gate-clean.
 //!
 //! ```
 //! use std::time::Duration;
