@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +15,8 @@ use sipgate_flow::rest::{
     ResendFax, Sms, TransferRequest,
 };
 use sipgate_flow::{
-    Error, RestClient, Result, RetryPolicy, RetryPolicy as Policy, StaticToken, Token, TokenSource,
+    ClientCredentials, Error, OAuth2Client, RestClient, Result, RetryPolicy, RetryPolicy as Policy,
+    StaticToken, Token, TokenSource,
 };
 
 type TestClient = RestClient<MockTransport, StaticToken, RecordingSleeper>;
@@ -547,6 +548,157 @@ async fn the_refresh_is_requested_forcefully() {
 
     client.hangup("c1").await.expect("ok");
     assert_eq!(auth.forced(), [false, true]);
+}
+
+#[derive(Clone)]
+struct SlowTokenEndpoint {
+    api: MockTransport,
+    token: MockTransport,
+    api_started: Arc<AtomicUsize>,
+    token_started: Arc<AtomicBool>,
+    release_api: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+    refreshed: Arc<AtomicBool>,
+}
+
+impl SlowTokenEndpoint {
+    fn new() -> Self {
+        Self {
+            api: MockTransport::new(),
+            token: MockTransport::new(),
+            api_started: Arc::new(AtomicUsize::new(0)),
+            token_started: Arc::new(AtomicBool::new(false)),
+            release_api: Arc::new(AtomicBool::new(false)),
+            release: Arc::new(AtomicBool::new(false)),
+            refreshed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl sipgate_flow::Transport for SlowTokenEndpoint {
+    async fn execute(
+        &self,
+        request: sipgate_flow::transport::Request<'_>,
+    ) -> Result<sipgate_flow::transport::Response> {
+        if request.url == sipgate_flow::auth::DEFAULT_TOKEN_URL {
+            self.token_started.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            return self.token.execute(request).await;
+        }
+        let attempt = self.api_started.fetch_add(1, Ordering::SeqCst);
+        if attempt >= 8 {
+            while !self.refreshed.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            self.api.execute(request).await?;
+            return Ok(response(200, &[], b"{}"));
+        }
+        while !self.release_api.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        self.api.execute(request).await?;
+        Ok(response(401, &[], b"expired"))
+    }
+}
+
+impl SlowTokenEndpoint {
+    fn api_calls(&self) -> Vec<common::Call> {
+        self.api.calls()
+    }
+
+    fn api_started(&self) -> usize {
+        self.api_started.load(Ordering::SeqCst)
+    }
+
+    fn token_calls(&self) -> Vec<common::Call> {
+        self.token.calls()
+    }
+}
+
+struct OAuthHandle(Arc<OAuth2Client<SlowTokenEndpoint>>);
+
+impl TokenSource for OAuthHandle {
+    fn access_token(
+        &self,
+        force_refresh: bool,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
+        self.0.access_token(force_refresh)
+    }
+
+    fn refresh_after(
+        &self,
+        stale: &Token,
+    ) -> impl std::future::Future<Output = Result<Token>> + Send {
+        self.0.refresh_after(stale)
+    }
+
+    fn invalidate(&self) {
+        self.0.invalidate();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_401s_trigger_one_single_flight_token_refresh() {
+    let transport = SlowTokenEndpoint::new();
+    for token in ["stale", "fresh"] {
+        transport
+            .token
+            .push_response(json_response(&serde_json::json!({
+                "access_token": token,
+                "expires_in": 300,
+            })));
+    }
+    transport.release.store(true, Ordering::SeqCst);
+    let auth = Arc::new(
+        OAuth2Client::new(
+            transport.clone(),
+            ClientCredentials::new("client-id", "hunter2").expect("credentials"),
+        )
+        .with_token_url(sipgate_flow::auth::DEFAULT_TOKEN_URL),
+    );
+    let stale = auth.access_token(false).await.expect("cached stale token");
+    assert_eq!(stale.access_token(), "stale");
+    let token_calls_before_refresh = transport.token_calls().len();
+    transport.release.store(false, Ordering::SeqCst);
+    transport.token_started.store(false, Ordering::SeqCst);
+    transport.api_started.store(0, Ordering::SeqCst);
+    transport.release_api.store(false, Ordering::SeqCst);
+    transport.refreshed.store(false, Ordering::SeqCst);
+    let client = Arc::new(
+        RestClient::new(transport.clone(), OAuthHandle(auth)).with_sleeper(RecordingSleeper::new()),
+    );
+
+    let mut handles = Vec::new();
+    for task in 0..8 {
+        let client = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            client.hangup(&format!("call-{task}")).await
+        }));
+    }
+    while transport.api_started.load(Ordering::SeqCst) < 8 {
+        tokio::task::yield_now().await;
+    }
+    transport.release_api.store(true, Ordering::SeqCst);
+    for _ in 0..10_000 {
+        if transport.token_started.load(Ordering::SeqCst) || transport.api_started() >= 16 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    transport.release.store(true, Ordering::SeqCst);
+    transport.refreshed.store(true, Ordering::SeqCst);
+    for handle in handles {
+        handle.await.expect("task").expect("hung up");
+    }
+
+    assert_eq!(
+        transport.token_calls().len(),
+        token_calls_before_refresh + 1,
+        "one token POST for all concurrent 401s"
+    );
+    assert_eq!(transport.api_calls().len(), 16);
 }
 
 /// A newtype so the test can keep a handle on the same token source.

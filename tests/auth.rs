@@ -328,6 +328,40 @@ async fn a_slower_force_refresh_cannot_clobber_a_newer_cached_token() {
 }
 
 #[tokio::test]
+async fn refresh_after_reuses_a_peer_token_that_replaced_the_stale_one() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&token_value("stale")));
+    transport.push_response(json_response(&token_value("fresh")));
+    let auth = client(transport.clone());
+
+    let stale = auth.access_token(false).await.expect("stale token");
+    let fresh = auth.access_token(true).await.expect("fresh token");
+    assert_eq!(fresh.access_token(), "fresh");
+
+    let reused = auth.refresh_after(&stale).await.expect("peer token reused");
+    assert_eq!(reused.access_token(), "fresh");
+    assert_eq!(transport.call_count(), 2, "no third token request");
+}
+
+#[tokio::test]
+async fn refresh_after_replaces_a_genuinely_stale_token_once() {
+    let transport = MockTransport::new();
+    for token in ["stale", "fresh"] {
+        transport.push_response(json_response(&token_value(token)));
+    }
+    let auth = client(transport.clone());
+
+    let stale = auth.access_token(false).await.expect("stale token");
+    let fresh = auth.refresh_after(&stale).await.expect("replacement token");
+    assert_eq!(fresh.access_token(), "fresh");
+    assert_eq!(transport.call_count(), 2);
+
+    let reused = auth.access_token(false).await.expect("cached replacement");
+    assert_eq!(reused.access_token(), "fresh");
+    assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
 async fn a_rejected_credential_pair_is_a_terminal_error_with_the_status() {
     let transport = MockTransport::new();
     transport.push_response(response(
