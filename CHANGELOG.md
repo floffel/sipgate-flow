@@ -16,6 +16,11 @@ with the pre-1.0 reading described in the README section *Versioning*.
   to `ReqwestTransport` are plain code spans, so `cargo doc` no longer fails on
   an unresolvable link when the feature is off. Both defects were invisible to
   CI, which only ran clippy and rustdoc for the full feature set.
+* The crate-root tolerance contract (unknown fields, unknown event types,
+  camelCase and snake_case keys, and "validate before sending") now has
+  executable proof. Runnable doctests on the crate root pin each claim, and a
+  property test drives arbitrary unknown fields through a known event to prove
+  they survive in `Event::extra` and round-trip unchanged.
 * The flagship crate example no longer teaches failure-to-default. It used
   `event.session_id().unwrap_or_default()`, silently substituting an empty
   session id and returning `200` as if the action were valid. The example now

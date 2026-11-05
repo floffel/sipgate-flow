@@ -19,6 +19,100 @@
 //! (unknown fields, unknown event types, unknown enum values, camelCase **and**
 //! `snake_case`), while everything sent is validated first.
 //!
+//! # What "tolerant" means here
+//!
+//! Unknown *fields* on a known event survive in [`Event::extra`] and come back
+//! out of [`Event::to_json`], so a field sipgate adds tomorrow still reaches a
+//! caller that inspects the remainder:
+//!
+//! ```
+//! use sipgate_flow::Event;
+//!
+//! let event = Event::parse(
+//!     br#"{"type":"user_speak","text":"hi","confidence":0.97,"session":{"id":"s"}}"#,
+//! )?;
+//! assert_eq!(event.extra()["confidence"], 0.97);
+//! assert_eq!(event.to_json()["confidence"], 0.97);
+//! # Ok::<(), sipgate_flow::Error>(())
+//! ```
+//!
+//! An unknown event *type* becomes the catch-all [`EventPayload::Unknown`] with
+//! the raw JSON preserved, instead of failing the parse:
+//!
+//! ```
+//! use sipgate_flow::{Event, EventPayload};
+//!
+//! let event = Event::parse(
+//!     br#"{"type":"call_transferred","detail":{"to":"4915112345678"},"session":{"id":"s"}}"#,
+//! )?;
+//! let EventPayload::Unknown(raw) = event.payload() else {
+//!     unreachable!("an unmodelled type must fall back to Unknown");
+//! };
+//! assert!(raw.get().contains("call_transferred"));
+//! # Ok::<(), sipgate_flow::Error>(())
+//! ```
+//!
+//! Both `camelCase` and `snake_case` keys are accepted for the event fields
+//! where sipgate uses either, for example `bargedIn` and `durationMs`:
+//!
+//! ```
+//! use sipgate_flow::{Event, EventPayload};
+//!
+//! let barged = Event::parse(
+//!     br#"{"type":"user_speak","text":"Wait","bargedIn":true,"session":{"id":"s"}}"#,
+//! )?;
+//! assert!(matches!(
+//!     barged.payload(),
+//!     EventPayload::UserSpeak { barged_in: true, .. }
+//! ));
+//!
+//! let speak = Event::parse(
+//!     br#"{"type":"assistant_speak","durationMs":1200,"session":{"id":"s"}}"#,
+//! )?;
+//! assert!(matches!(
+//!     speak.payload(),
+//!     EventPayload::AssistantSpeak { duration_ms: Some(1200), .. }
+//! ));
+//! # Ok::<(), sipgate_flow::Error>(())
+//! ```
+//!
+//! Unknown enum *values* are carried verbatim instead of being rejected, so a
+//! new severity or failure reason still reaches the caller:
+//!
+//! ```
+//! use sipgate_flow::{Severity, SmsFailureReason};
+//!
+//! assert_eq!(Severity::from_wire("notice"), Severity::Other("notice".into()));
+//! assert_eq!(
+//!     SmsFailureReason::from_wire("provider_quirk"),
+//!     SmsFailureReason::Other("provider_quirk".into())
+//! );
+//! # Ok::<(), sipgate_flow::Error>(())
+//! ```
+//!
+//! "Everything sent is validated first" is the other half of the contract:
+//! parsing stays permissive, but an outgoing [`Action`] refuses a value sipgate
+//! would reject. A session id an event may still carry parses, yet the action
+//! constructor that would interpolate it refuses it with a typed error:
+//!
+//! ```
+//! use sipgate_flow::{Action, Error, Event};
+//!
+//! // The event parses even without a usable session id: the field is present
+//! // but empty, so the event is simply unaddressable ...
+//! let event = Event::parse(br#"{"type":"user_speak","text":"hi","session":{"id":""}}"#)?;
+//! assert_eq!(event.session().expect("session object").id, "");
+//! assert_eq!(event.session_id(), None);
+//!
+//! // ... but the action that would address it does not.
+//! let error = Action::speak("", "hi").expect_err("an empty session id is refused");
+//! assert!(matches!(
+//!     error,
+//!     Error::Validation { field: "session_id", .. }
+//! ));
+//! # Ok::<(), sipgate_flow::Error>(())
+//! ```
+//!
 //! # Receiving an event and answering it
 //!
 //! ```
