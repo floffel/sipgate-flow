@@ -115,9 +115,11 @@ pub fn decode(input: &str) -> Result<Vec<u8>> {
 
 /// Whether `input` is well-formed, canonical standard base64.
 ///
-/// The check *is* a decode (the engine exposes no cheaper validation entry
-/// point), so it costs one output-sized buffer. Callers that need the bytes
-/// should call [`decode`] once instead of validating and decoding.
+/// The check *is* a decode, but it uses `Engine::decode_slice` with a
+/// fixed-size scratch buffer instead of allocating a decoded payload
+/// proportional to `input`. Inputs above the same size ceiling as [`decode`]
+/// are rejected before decoding. Callers that need the bytes should still call
+/// [`decode`] once instead of validating and decoding.
 ///
 /// ```
 /// use sipgate_flow::base64;
@@ -133,7 +135,35 @@ pub fn is_valid(input: &str) -> bool {
     if check_encoded_len(input.len()).is_err() {
         return false;
     }
-    STANDARD.decode(input.as_bytes()).is_ok()
+    decode_slice_is_valid(input.as_bytes())
+}
+
+/// The largest encoded chunk passed to `decode_slice` by [`is_valid`].
+///
+/// This is a whole number of four-character groups, so decoding any non-final
+/// chunk cannot encounter padding or a partial last group.
+const VALIDATION_CHUNK_ENCODED_BYTES: usize = 4096;
+
+/// Scratch output for one [`VALIDATION_CHUNK_ENCODED_BYTES`] chunk.
+const VALIDATION_CHUNK_DECODED_BYTES: usize = VALIDATION_CHUNK_ENCODED_BYTES / 4 * 3;
+
+/// Validates with `Engine::decode_slice` into a fixed stack buffer.
+///
+/// Padding is only legal in the final input group. Rejecting `=` in any earlier
+/// chunk prevents chunked validation from accepting strings like
+/// `"AA==AAAA"`, which are invalid as a whole and rejected by [`decode`].
+fn decode_slice_is_valid(mut input: &[u8]) -> bool {
+    let mut scratch = [0_u8; VALIDATION_CHUNK_DECODED_BYTES];
+
+    while input.len() > VALIDATION_CHUNK_ENCODED_BYTES {
+        let (chunk, remaining) = input.split_at(VALIDATION_CHUNK_ENCODED_BYTES);
+        if chunk.contains(&b'=') || STANDARD.decode_slice(chunk, &mut scratch).is_err() {
+            return false;
+        }
+        input = remaining;
+    }
+
+    STANDARD.decode_slice(input, &mut scratch).is_ok()
 }
 
 /// Rejects an input length above the size ceiling without touching the input
@@ -165,6 +195,7 @@ const fn reason(err: &DecodeError) -> &'static str {
 mod tests {
     use super::{
         check_encoded_len, decode, encode, encoded_len, is_valid, reason, MAX_ENCODED_LEN,
+        VALIDATION_CHUNK_ENCODED_BYTES,
     };
     use crate::Error;
     use base64::DecodeError;
@@ -255,6 +286,35 @@ mod tests {
                     panic!("{input:?} should decode to {expected:?}, got {error:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn chunked_validation_agrees_with_decode_across_scratch_boundaries() {
+        let prefix = "A".repeat(VALIDATION_CHUNK_ENCODED_BYTES);
+        let cases = [
+            prefix.clone(),
+            format!("{prefix}A"),
+            format!("{prefix}AA"),
+            format!("{prefix}AAA"),
+            format!("{prefix}AAAA"),
+            format!("{prefix}AAA="),
+            format!("{prefix}AA=="),
+            format!("{prefix}AB=="),
+            format!("{prefix}===="),
+            format!("{prefix}!AAA"),
+            format!("{prefix}A==="),
+            format!("AA=={prefix}"),
+            format!("{prefix}AA==AAAA"),
+        ];
+
+        for input in cases {
+            assert_eq!(
+                is_valid(&input),
+                decode(&input).is_ok(),
+                "length {}",
+                input.len()
+            );
         }
     }
 
