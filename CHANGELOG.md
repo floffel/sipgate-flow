@@ -14,6 +14,13 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `with_max_delay`, local backoff and `Retry-After` values can no longer produce
   a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer
   that is already rate-limiting the caller.
+* `Error::Ambiguous` now keeps the response evidence that resolves the
+  ambiguity: `Error::ambiguous_with_response` stores the bounded, sanitised
+  body and headers (minus `Authorization`, `Cookie` and `Set-Cookie`), and
+  `Error::ambiguous_body` / `Error::ambiguous_header` expose them. A caller
+  handed a 5xx or timeout after a `POST` can now check whether sipgate already
+  created the SMS or call instead of guessing. The crate docs describe the
+  concrete check.
 * Event parsing now rejects bodies above `MAX_EVENT_BODY_BYTES` before
   deserialising, and unknown event types keep their raw JSON without building
   the duplicate `Value` trees that the old parser materialised.

@@ -81,6 +81,14 @@
 //! assert_eq!(classify(Method::Post, 503), RetryOutcome::Ambiguous);
 //! assert_eq!(classify(Method::Delete, 503), RetryOutcome::Retry);
 //! ```
+//!
+//! The caller is not left with a coin flip: when the server answered before
+//! the failure, the response evidence that decides the question is kept on the
+//! error. [`Error::ambiguous_body`] returns the body and
+//! [`Error::ambiguous_header`] returns an identifier header such as an SMS id,
+//! a call id or a request id, so the caller can check whether sipgate already
+//! created the resource instead of guessing. A timeout or reset with no
+//! response at all leaves both empty, which is the genuine "unknown" case.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

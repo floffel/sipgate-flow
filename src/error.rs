@@ -93,6 +93,21 @@ fn safe_body(body: &str) -> Vec<u8> {
     safe_text(&crate::retry::truncate_body(body)).into_bytes()
 }
 
+/// Bounds and sanitises response headers before they reach an error.
+///
+/// The value is truncated to [`SAFE_TEXT_BYTES`] and control characters are
+/// replaced, mirroring [`safe_body`]. `Authorization`, `Cookie` and
+/// `Set-Cookie` are dropped because an error is routinely logged and those
+/// headers carry credentials or session material.
+fn safe_headers(headers: &[(&str, &str)]) -> Vec<(String, String)> {
+    const SENSITIVE: [&str; 3] = ["authorization", "cookie", "set-cookie"];
+    headers
+        .iter()
+        .filter(|(name, _)| !SENSITIVE.contains(&name.to_ascii_lowercase().as_str()))
+        .map(|(name, value)| (safe_text(name), safe_text(value)))
+        .collect()
+}
+
 /// Renders a sanitised response body held as bytes.
 fn display_body(body: &[u8]) -> String {
     String::from_utf8_lossy(body).into_owned()
@@ -437,14 +452,37 @@ pub enum Error {
     },
 
     /// The request reached the point where the server could act on it, but no
-    /// usable response came back - a 5xx on a `POST`, or a timeout/reset while
-    /// waiting. The operation **may** have happened.
+    /// usable success response came back - a 5xx on a `POST`, or a
+    /// timeout/reset while waiting. The operation **may** have happened.
     ///
     /// This is not an error the library can retry: repeating it duplicates an
     /// SMS, a fax, a recording or an outbound call, and sipgate documents no
-    /// idempotency key. [`Error::is_retryable`] is therefore `false`; the
-    /// caller decides, usually by checking its own ledger against
-    /// [`Error::status`] and the correlation id it stored before the call.
+    /// idempotency key. [`Error::is_retryable`] is therefore `false` and the
+    /// decision stays with the caller.
+    ///
+    /// The information that decides it is kept on the variant: when the
+    /// server answered with a body or an identifier header before failing,
+    /// [`Error::ambiguous_body`] and [`Error::ambiguous_header`] expose them
+    /// so the caller can tell a completed request from one that never
+    /// happened. A timeout or reset that arrived with no response at all
+    /// leaves both empty, which is the genuine "unknown" case.
+    ///
+    /// Build this variant with [`Error::ambiguous`] or
+    /// [`Error::ambiguous_with_response`].
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::ambiguous_with_response(
+    ///     Some(502),
+    ///     "bad gateway after POST /v2/sessions/sms",
+    ///     "{\"ok\":false}",
+    ///     [("x-request-id", "req_123")],
+    /// );
+    /// assert!(err.is_ambiguous());
+    /// assert_eq!(err.ambiguous_body(), Some("{\"ok\":false}"));
+    /// assert_eq!(err.ambiguous_header("X-Request-Id"), Some("req_123"));
+    /// ```
     #[error("ambiguous outcome: {message}")]
     Ambiguous {
         /// The status that arrived, if one did: a 5xx. `None` when the
@@ -453,6 +491,13 @@ pub enum Error {
         status: Option<u16>,
         /// What happened, without the request body or any credential.
         message: String,
+        /// Response body observed before the failure, bounded and sanitised,
+        /// when the server sent one. Empty when no response body existed.
+        body: Vec<u8>,
+        /// Response headers observed before the failure, bounded, sanitised
+        /// and stripped of credential-bearing names. Empty when no response
+        /// existed.
+        headers: Vec<(String, String)>,
     },
 }
 
@@ -872,7 +917,10 @@ impl Error {
     /// non-idempotent request, or a connection that died after the write.
     ///
     /// `status` is the HTTP status when one arrived, `None` when the request
-    /// was cut off without an answer.
+    /// was cut off without an answer. This constructor carries no response
+    /// body or headers; use [`Error::ambiguous_with_response`] when the
+    /// server answered before the failure and the caller could use that
+    /// evidence to resolve the ambiguity.
     ///
     /// ```
     /// use sipgate_flow::Error;
@@ -881,12 +929,129 @@ impl Error {
     /// assert!(err.is_ambiguous());
     /// assert!(!err.is_retryable(), "a retry would send the SMS a second time");
     /// assert_eq!(err.status(), Some(502));
+    /// assert_eq!(err.ambiguous_body(), None);
     /// ```
     #[must_use]
     pub fn ambiguous(status: Option<u16>, message: impl Into<String>) -> Self {
         Self::Ambiguous {
             status,
             message: message.into(),
+            body: Vec::new(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// Builds the "it may already have happened" outcome while keeping the
+    /// response evidence that resolves it.
+    ///
+    /// The server answered with a status, and possibly a body or identifier
+    /// headers, but the request may still have had an effect. An SMS id or a
+    /// call id in this response tells the caller the request completed, so the
+    /// decision the crate hands back is an informed one rather than a coin
+    /// flip.
+    ///
+    /// The body is truncated to at most 512 bytes at a UTF-8 boundary and
+    /// control characters are replaced by `U+FFFD`; header values are bounded
+    /// the same way, and `Authorization`, `Cookie` and `Set-Cookie` are
+    /// dropped before they are stored.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::ambiguous_with_response(
+    ///     Some(503),
+    ///     "5xx after POST /v2/sessions/sms",
+    ///     "{\"id\":\"sms-42\"}",
+    ///     [("x-request-id", "req_9")],
+    /// );
+    /// assert!(err.is_ambiguous());
+    /// assert!(!err.is_retryable());
+    /// assert_eq!(err.status(), Some(503));
+    /// assert_eq!(err.ambiguous_body(), Some("{\"id\":\"sms-42\"}"));
+    /// assert_eq!(err.ambiguous_header("X-Request-Id"), Some("req_9"));
+    /// assert_eq!(err.ambiguous_header("x-missing"), None);
+    /// ```
+    #[must_use]
+    pub fn ambiguous_with_response(
+        status: Option<u16>,
+        message: impl Into<String>,
+        body: impl AsRef<[u8]>,
+        headers: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        let body = safe_body(&String::from_utf8_lossy(body.as_ref()));
+        let owned = headers
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect::<Vec<(String, String)>>();
+        let borrowed = owned
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<(&str, &str)>>();
+        let headers = safe_headers(&borrowed);
+        Self::Ambiguous {
+            status,
+            message: message.into(),
+            body,
+            headers,
+        }
+    }
+
+    /// The response body observed before an [`Error::Ambiguous`] failure, when
+    /// the server sent one.
+    ///
+    /// Returns `None` for every other variant and for an ambiguous failure
+    /// where no response body existed (a timeout or reset after the write).
+    /// The bytes are bounded and sanitised the same way as
+    /// [`Error::ambiguous_with_response`] stores them.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::ambiguous_with_response(
+    ///     Some(500),
+    ///     "lost the response",
+    ///     "boom",
+    ///     std::iter::empty::<(&str, &str)>(),
+    /// );
+    /// assert_eq!(err.ambiguous_body(), Some("boom"));
+    /// assert_eq!(Error::transport("reset").ambiguous_body(), None);
+    /// ```
+    #[must_use]
+    pub fn ambiguous_body(&self) -> Option<&str> {
+        match self {
+            Self::Ambiguous { body, .. } if !body.is_empty() => std::str::from_utf8(body).ok(),
+            _ => None,
+        }
+    }
+
+    /// A response header observed before an [`Error::Ambiguous`] failure,
+    /// selected by case-insensitive name.
+    ///
+    /// Returns `None` for every other variant, for an ambiguous failure with
+    /// no response, and when the header was absent. `Authorization`,
+    /// `Cookie` and `Set-Cookie` are never retained, so they can never be
+    /// returned here.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::ambiguous_with_response(
+    ///     Some(500),
+    ///     "lost the response",
+    ///     "",
+    ///     [("x-sipgate-sms-id", "sms-7")],
+    /// );
+    /// assert_eq!(err.ambiguous_header("X-Sipgate-Sms-Id"), Some("sms-7"));
+    /// assert_eq!(err.ambiguous_header("retry-after"), None);
+    /// ```
+    #[must_use]
+    pub fn ambiguous_header(&self, name: &str) -> Option<&str> {
+        match self {
+            Self::Ambiguous { headers, .. } => headers
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str()),
+            _ => None,
         }
     }
 
