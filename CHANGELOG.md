@@ -82,6 +82,18 @@ with the pre-1.0 reading described in the README section *Versioning*.
   remains permissive, including `total_count`/`totalCount`, while single-entry
   and bulk write requests carry typed bodies.
 
+* The **REST v2 `devices` resource** (#164, split from #12): typed models and
+  `RestClient` methods for the documented `/devices` surface — the device
+  list with its `type` filter, the create-family endpoints for register,
+  mobile and external devices, the settings writes (alias, DND/emergency
+  address, caller ID, password reset, external display/target number, local
+  prefix, single-row display, tariff announcement), the contingents read and
+  the SIM activate/deactivate/order operations. Path and query parameters and
+  every body field run through the crate's `validate::` gates before the
+  wire, response models decode camelCase and snake_case with unknown fields
+  ignored and unknown enum values carried verbatim, and request builders
+  refuse values the schema does not document instead of sending them.
+
 ### Fixed
 
 * The retry module now records the exact reuse audit decision: `httpdate` already

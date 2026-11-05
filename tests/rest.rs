@@ -1663,3 +1663,613 @@ async fn a_call_without_participants_still_parses() {
     assert!(calls[0].hold);
     assert_eq!(calls[0].participants.len(), 0);
 }
+
+// ===================================================================
+// Issue #164 — REST v2 `devices` resource. Self-contained so the sibling
+// resource PRs can each add their own block without conflicts.
+// ===================================================================
+mod devices_164 {
+    use super::*;
+    use sipgate_flow::rest::{
+        ActivateSim, ChangeDevice, Contingent, CreateDevice, CreateExternalDevice,
+        CreateMobileDevice, CreateRegisterDevice, DeviceAlias, DeviceCallerId, DeviceContingents,
+        DeviceFilter, DeviceKind, DevicePassword, ExternalDevice, ExternalTargetNumber,
+        IncomingCallDisplay, Localprefix, MobileCredentials, MobileDevice, OrderSim,
+        RegisterCredentials, RegisterDevice, RegisteredEndpoint, SimState, SingleRowDisplay,
+        TariffAnnouncement,
+    };
+
+    #[tokio::test]
+    async fn list_devices_filters_by_type_in_the_query() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "items": [{"id": "e0", "alias": "Desk", "type": "REGISTER", "futureField": 1}]
+        })));
+        let devices = client
+            .user_devices("w0", &[DeviceFilter::Register, DeviceFilter::Mobile])
+            .await
+            .expect("listed");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "e0");
+        assert_eq!(devices[0].kind, Some(DeviceKind::Register));
+
+        let call = transport.only_call();
+        assert_eq!(call.method.as_str(), "GET");
+        assert_eq!(
+            call.url,
+            "https://api.sipgate.com/v2/w0/devices?type=register,mobile"
+        );
+        assert_eq!(call.body, Body::Empty);
+    }
+
+    #[tokio::test]
+    async fn list_devices_without_filter_omits_the_query() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({"items": []})));
+        assert_eq!(client.user_devices("w0", &[]).await.expect("listed"), []);
+        assert_eq!(
+            transport.only_call().url,
+            "https://api.sipgate.com/v2/w0/devices"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_devices_refuses_an_undocumented_filter() {
+        let (transport, _, client) = harness();
+        let error = client
+            .user_devices("w0", &[DeviceFilter::Other("future".into())])
+            .await
+            .expect_err("undocumented filter");
+        assert!(matches!(error, Error::Validation { field: "type", .. }));
+        assert_eq!(transport.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_update_delete_hit_the_documented_paths_and_bodies() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "id": "e0", "alias": "Desk", "type": "REGISTER"
+        })));
+        transport.push_response(no_content());
+        transport.push_response(no_content());
+        transport.push_response(no_content());
+
+        let created = client
+            .create_device(
+                "w0",
+                &CreateDevice::new(DeviceKind::Register)
+                    .unwrap()
+                    .with_alias("Desk")
+                    .unwrap(),
+            )
+            .await
+            .expect("created");
+        assert_eq!(created.id, "e0");
+
+        client
+            .update_device(
+                "e0",
+                &ChangeDevice::new()
+                    .with_dnd(true)
+                    .with_emergency_address_id(42),
+            )
+            .await
+            .expect("updated");
+        client
+            .update_device_alias("e0", &DeviceAlias::new("New name").expect("alias"))
+            .await
+            .expect("renamed");
+        client.delete_device("e0").await.expect("deleted");
+
+        let calls = transport.calls();
+        assert_eq!(calls[0].method.as_str(), "POST");
+        assert_eq!(calls[0].url, "https://api.sipgate.com/v2/w0/devices");
+        assert_eq!(
+            json_body(&calls[0].body),
+            serde_json::json!({"type": "register", "alias": "Desk"})
+        );
+        assert_eq!(calls[1].method.as_str(), "PUT");
+        assert_eq!(calls[1].url, "https://api.sipgate.com/v2/devices/e0");
+        assert_eq!(
+            json_body(&calls[1].body),
+            serde_json::json!({"dnd": true, "emergencyAddressId": 42})
+        );
+        assert_eq!(calls[2].url, "https://api.sipgate.com/v2/devices/e0/alias");
+        assert_eq!(
+            json_body(&calls[2].body),
+            serde_json::json!({"value": "New name"})
+        );
+        assert_eq!(calls[3].method.as_str(), "DELETE");
+        assert_eq!(calls[3].url, "https://api.sipgate.com/v2/devices/e0");
+        assert_eq!(calls[3].body, Body::Empty);
+    }
+
+    #[tokio::test]
+    async fn create_kind_specific_devices_decode_their_responses() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "id": "x0", "alias": "Home", "number": "+4915112345678",
+            "incomingCallDisplayState": "CALLER_NUMBER"
+        })));
+        transport.push_response(json_response(&serde_json::json!({
+            "id": "m0", "esim": true, "simState": "ACTIVE",
+            "credentials": {"simId": "1234567", "puk1": "1", "puk2": "2"}
+        })));
+        transport.push_response(json_response(&serde_json::json!({
+            "id": "e0", "addressUrl": "/addresses/1", "emergencyAddressId": "1",
+            "registered": [{"ip": "10.0.0.1", "port": "5060", "userAgent": "ua"}],
+            "credentials": {"username": "u", "sipServer": "sip.example"}
+        })));
+
+        let external: ExternalDevice = client
+            .create_external_device(
+                "w0",
+                &CreateExternalDevice::new("4915112345678").expect("number"),
+            )
+            .await
+            .expect("external");
+        assert_eq!(
+            external.incoming_call_display,
+            Some(IncomingCallDisplay::CallerNumber)
+        );
+        assert_eq!(external.number, "+4915112345678");
+
+        let mobile: MobileDevice = client
+            .create_mobile_device("w0", &CreateMobileDevice::new())
+            .await
+            .expect("mobile");
+        assert!(mobile.esim);
+        assert_eq!(mobile.sim_state, Some(SimState::Active));
+        assert_eq!(
+            mobile.credentials.as_ref().map(|c| c.sim_id.as_str()),
+            Some("1234567")
+        );
+
+        let registered: RegisterDevice = client
+            .create_register_device("w0", &CreateRegisterDevice::new())
+            .await
+            .expect("registered");
+        assert_eq!(registered.registered[0].port, "5060");
+        assert_eq!(
+            registered
+                .credentials
+                .as_ref()
+                .map(|c| c.sip_server.as_str()),
+            Some("sip.example")
+        );
+
+        let calls = transport.calls();
+        assert_eq!(
+            calls[0].url,
+            "https://api.sipgate.com/v2/w0/devices/external"
+        );
+        assert_eq!(calls[1].url, "https://api.sipgate.com/v2/w0/devices/mobile");
+        assert_eq!(
+            calls[2].url,
+            "https://api.sipgate.com/v2/w0/devices/register"
+        );
+        for call in calls {
+            assert_eq!(call.method.as_str(), "POST");
+            assert_eq!(call.auth.bearer(), Some("access-token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn caller_id_and_password_endpoints_round_trip() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(
+            &serde_json::json!({"value": "+4915112345678"}),
+        ));
+        transport.push_response(no_content());
+        transport.push_response(json_response(&serde_json::json!({"password": "generated"})));
+
+        let caller_id = client.device_caller_id("e0").await.expect("read");
+        assert_eq!(caller_id.value, "+4915112345678");
+        client
+            .update_device_caller_id("e0", &DeviceCallerId::new("4915112345678").expect("number"))
+            .await
+            .expect("written");
+        let rotated = client.reset_device_password("e0").await.expect("reset");
+        assert_eq!(rotated.password, "generated");
+
+        let calls = transport.calls();
+        assert_eq!(calls[0].method.as_str(), "GET");
+        assert_eq!(
+            calls[0].url,
+            "https://api.sipgate.com/v2/devices/e0/callerid"
+        );
+        assert_eq!(calls[1].method.as_str(), "PUT");
+        assert_eq!(
+            json_body(&calls[1].body),
+            serde_json::json!({"value": "+4915112345678"})
+        );
+        assert_eq!(calls[2].method.as_str(), "POST");
+        assert_eq!(
+            calls[2].url,
+            "https://api.sipgate.com/v2/devices/e0/credentials/password"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_settings_and_display_and_settings_endpoints() {
+        let (transport, _, client) = harness();
+        for _ in 0..5 {
+            transport.push_response(no_content());
+        }
+        transport.push_response(json_response(
+            &serde_json::json!({"active": true, "value": "030"}),
+        ));
+        transport.push_response(json_response(&serde_json::json!({"enabled": true})));
+        transport.push_response(json_response(&serde_json::json!({"enabled": false})));
+
+        client
+            .update_external_incoming_call_display("x0", IncomingCallDisplay::CalledNumber)
+            .await
+            .expect("display");
+        client
+            .update_external_target_number(
+                "x0",
+                &ExternalTargetNumber::new("4915112345678").expect("number"),
+            )
+            .await
+            .expect("target");
+        client
+            .update_device_localprefix("e0", &Localprefix::new(true, "030").expect("prefix"))
+            .await
+            .expect("prefix set");
+        client
+            .update_device_single_row_display("e0", &SingleRowDisplay::new(true))
+            .await
+            .expect("single row");
+        client
+            .update_device_tariff_announcement("e0", &TariffAnnouncement::new(true))
+            .await
+            .expect("tariff");
+
+        let prefix: Localprefix = client.device_localprefix("e0").await.expect("read prefix");
+        assert_eq!(prefix.value, "030");
+        let single: SingleRowDisplay = client
+            .device_single_row_display("e0")
+            .await
+            .expect("read single");
+        assert!(single.enabled);
+        let tariff: TariffAnnouncement = client
+            .device_tariff_announcement("e0")
+            .await
+            .expect("read tariff");
+        assert!(!tariff.enabled);
+
+        let calls = transport.calls();
+        assert_eq!(
+            calls[0].url,
+            "https://api.sipgate.com/v2/devices/x0/external/incomingcalldisplay"
+        );
+        assert_eq!(
+            json_body(&calls[0].body),
+            serde_json::json!({"incomingCallDisplay": "CALLED_NUMBER"})
+        );
+        assert_eq!(
+            calls[1].url,
+            "https://api.sipgate.com/v2/devices/x0/external/targetnumber"
+        );
+        assert_eq!(
+            json_body(&calls[1].body),
+            serde_json::json!({"number": "+4915112345678"})
+        );
+        assert_eq!(
+            calls[2].url,
+            "https://api.sipgate.com/v2/devices/e0/localprefix"
+        );
+        assert_eq!(
+            json_body(&calls[2].body),
+            serde_json::json!({"active": true, "value": "030"})
+        );
+        assert_eq!(
+            calls[4].url,
+            "https://api.sipgate.com/v2/devices/e0/tariffannouncement"
+        );
+    }
+
+    #[tokio::test]
+    async fn contingents_and_sim_operations_hit_their_paths() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "contingents": [{
+                "type": "DATA_FAST", "amount": 2500, "used": 1000, "left": 1500,
+                "unit": "KILOBYTE", "expires": "2016-02-10T14:19:39Z"
+            }]
+        })));
+        transport.push_response(no_content());
+        transport.push_response(no_content());
+        transport.push_response(no_content());
+
+        let contingents: DeviceContingents = client
+            .device_contingents("w0", "y0")
+            .await
+            .expect("contingents");
+        assert_eq!(contingents.contingents[0].left, 1500);
+        client.deactivate_sim("w0", "y0").await.expect("deactivate");
+        client
+            .activate_sim("w0", "y0", &ActivateSim::new("1234567").expect("sim"))
+            .await
+            .expect("activate");
+        client
+            .order_sim("w0", "y0", &OrderSim::new("123456").expect("address"))
+            .await
+            .expect("order");
+
+        let calls = transport.calls();
+        assert_eq!(
+            calls[0].url,
+            "https://api.sipgate.com/v2/w0/devices/y0/contingents"
+        );
+        assert_eq!(calls[1].method.as_str(), "DELETE");
+        assert_eq!(calls[1].url, "https://api.sipgate.com/v2/w0/devices/y0/sim");
+        assert_eq!(
+            json_body(&calls[2].body),
+            serde_json::json!({"simId": "1234567"})
+        );
+        assert_eq!(
+            calls[3].url,
+            "https://api.sipgate.com/v2/w0/devices/y0/sim/orders"
+        );
+        assert_eq!(
+            json_body(&calls[3].body),
+            serde_json::json!({"addressId": "123456"})
+        );
+    }
+
+    #[tokio::test]
+    async fn per_endpoint_id_parameters_are_validated_before_the_wire() {
+        let (transport, _, client) = harness();
+        for bad in ["", ".", "..", "a/b", "a?b", "a b", "a#b"] {
+            assert!(matches!(
+                client.delete_device(bad).await.expect_err("bad device"),
+                Error::Validation {
+                    field: "device_id",
+                    ..
+                }
+            ));
+            assert!(matches!(
+                client.user_devices(bad, &[]).await.expect_err("bad user"),
+                Error::Validation {
+                    field: "user_id",
+                    ..
+                }
+            ));
+            assert!(matches!(
+                client
+                    .device_contingents("w0", bad)
+                    .await
+                    .expect_err("bad device"),
+                Error::Validation {
+                    field: "device_id",
+                    ..
+                }
+            ));
+            assert!(matches!(
+                client
+                    .deactivate_sim("w0", bad)
+                    .await
+                    .expect_err("bad device"),
+                Error::Validation {
+                    field: "device_id",
+                    ..
+                }
+            ));
+            assert!(matches!(
+                client
+                    .device_contingents(bad, "y0")
+                    .await
+                    .expect_err("bad user"),
+                Error::Validation {
+                    field: "user_id",
+                    ..
+                }
+            ));
+        }
+        assert_eq!(transport.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn every_path_boundary_accepts_just_inside_and_rejects_just_outside() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({"items": []})));
+        transport.push_response(json_response(&serde_json::json!({"items": []})));
+
+        let inside = "a".repeat(200);
+        let outside = "a".repeat(201);
+        assert!(client.user_devices(&inside, &[]).await.is_ok());
+        assert!(matches!(
+            client.user_devices(&outside, &[]).await,
+            Err(Error::Validation {
+                field: "user_id",
+                ..
+            })
+        ));
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn request_field_boundaries_accept_just_inside_and_reject_just_outside() {
+        // `validate::MAX_REST_FIELD_BYTES` is the documented 1 MiB ceiling.
+        let limit = 1024 * 1024;
+
+        assert!(DeviceAlias::new("a".repeat(limit)).is_ok());
+        assert!(matches!(
+            DeviceAlias::new("a".repeat(limit + 1)),
+            Err(Error::Validation { field: "value", .. })
+        ));
+
+        assert!(CreateDevice::new(DeviceKind::Register)
+            .unwrap()
+            .with_alias("a".repeat(limit))
+            .is_ok());
+        assert!(matches!(
+            CreateDevice::new(DeviceKind::Register)
+                .unwrap()
+                .with_alias("a".repeat(limit + 1)),
+            Err(Error::Validation { field: "alias", .. })
+        ));
+
+        assert!(CreateMobileDevice::new()
+            .with_alias("a".repeat(limit))
+            .is_ok());
+        assert!(matches!(
+            CreateMobileDevice::new().with_alias("a".repeat(limit + 1)),
+            Err(Error::Validation { field: "alias", .. })
+        ));
+        assert!(CreateRegisterDevice::new()
+            .with_alias("a".repeat(limit))
+            .is_ok());
+        assert!(matches!(
+            CreateRegisterDevice::new().with_alias("a".repeat(limit + 1)),
+            Err(Error::Validation { field: "alias", .. })
+        ));
+        assert!(CreateExternalDevice::new("4915112345678")
+            .unwrap()
+            .with_alias("a".repeat(limit))
+            .is_ok());
+        assert!(matches!(
+            CreateExternalDevice::new("4915112345678")
+                .unwrap()
+                .with_alias("a".repeat(limit + 1)),
+            Err(Error::Validation { field: "alias", .. })
+        ));
+
+        assert!(ActivateSim::new("a".repeat(limit)).is_ok());
+        assert!(matches!(
+            ActivateSim::new("a".repeat(limit + 1)),
+            Err(Error::Validation {
+                field: "sim_id",
+                ..
+            })
+        ));
+        assert!(OrderSim::new("a".repeat(limit)).is_ok());
+        assert!(matches!(
+            OrderSim::new("a".repeat(limit + 1)),
+            Err(Error::Validation {
+                field: "address_id",
+                ..
+            })
+        ));
+
+        assert!(Localprefix::new(true, "0".repeat(limit)).is_ok());
+        assert!(matches!(
+            Localprefix::new(true, "0".repeat(limit + 1)),
+            Err(Error::Validation { field: "value", .. })
+        ));
+    }
+
+    #[test]
+    fn documented_enums_carry_unknown_values_verbatim() {
+        assert_eq!(
+            DeviceFilter::from_wire("future"),
+            DeviceFilter::Other("future".into())
+        );
+        assert_eq!(
+            IncomingCallDisplay::from_wire("future"),
+            IncomingCallDisplay::Other("future".into())
+        );
+        assert_eq!(SimState::from_wire("ACTIVE"), SimState::Active);
+        // camelCase wire values for the type filter are folded case-insensitively.
+        assert_eq!(DeviceFilter::from_wire("REGISTER"), DeviceFilter::Register);
+    }
+
+    #[test]
+    fn response_models_decode_camel_case_and_snake_case_aliases() {
+        let mobile: MobileDevice = serde_json::from_value(serde_json::json!({
+            "id": "m0",
+            "sim_state": "PENDING",
+            "credentials": {"sim_id": "9"},
+            "active_groups": [{"id": "g0", "alias": "Sales"}]
+        }))
+        .expect("mobile");
+        assert_eq!(mobile.sim_state, Some(SimState::Pending));
+        assert_eq!(
+            mobile.credentials.as_ref().map(|c| c.sim_id.as_str()),
+            Some("9")
+        );
+        assert_eq!(mobile.active_groups[0].alias, "Sales");
+
+        let registered: RegisterDevice = serde_json::from_value(serde_json::json!({
+            "address_url": "/addresses/1",
+            "emergency_address_id": "1",
+            "registered": [{"user_agent": "ua"}],
+            "credentials": {"sip_server": "sip.example"}
+        }))
+        .expect("registered");
+        assert_eq!(registered.address_url, "/addresses/1");
+        assert_eq!(registered.emergency_address_id, "1");
+        assert_eq!(registered.registered[0].user_agent, "ua");
+        assert_eq!(registered.credentials.unwrap().sip_server, "sip.example");
+
+        let external: ExternalDevice = serde_json::from_value(serde_json::json!({
+            "incoming_call_display_state": "CALLED_NUMBER"
+        }))
+        .expect("external");
+        assert_eq!(
+            external.incoming_call_display,
+            Some(IncomingCallDisplay::CalledNumber)
+        );
+
+        let unknown: RegisterDevice = serde_json::from_value(serde_json::json!({
+            "type": "futureKind",
+            "credentials": {"futureField": 1},
+            "registered": [{"futureField": 2}]
+        }))
+        .expect("permissive");
+        assert_eq!(unknown.kind, Some(DeviceKind::Other("futureKind".into())));
+    }
+
+    #[test]
+    fn device_password_and_contingents_decode_permissively() {
+        let password: DevicePassword =
+            serde_json::from_value(serde_json::json!({"password": "x", "future": 1}))
+                .expect("password");
+        assert_eq!(password.password, "x");
+
+        let contingents: DeviceContingents = serde_json::from_value(serde_json::json!({
+            "contingents": [{"left": 1, "future": 2}]
+        }))
+        .expect("contingents");
+        assert_eq!(contingents.contingents[0].left, 1);
+        assert_eq!(Contingent::default().amount, 0);
+
+        let mobile_creds: MobileCredentials =
+            serde_json::from_value(serde_json::json!({"simId": "7"})).expect("creds");
+        assert_eq!(mobile_creds.sim_id, "7");
+
+        let register_creds: RegisterCredentials =
+            serde_json::from_value(serde_json::json!({"sipServer": "s"})).expect("creds");
+        assert_eq!(register_creds.sip_server, "s");
+
+        let endpoint: RegisteredEndpoint =
+            serde_json::from_value(serde_json::json!({"ip": "x"})).expect("endpoint");
+        assert_eq!(endpoint.ip, "x");
+    }
+
+    #[test]
+    fn phone_and_digit_builders_reject_unusable_values() {
+        assert!(DeviceCallerId::new("4915112345678").is_ok());
+        assert!(DeviceCallerId::new("+4915112345678").is_ok());
+        assert!(DeviceCallerId::new("49 151 123").is_err());
+        assert!(DeviceCallerId::new("491511").is_err());
+
+        assert!(ExternalTargetNumber::new("4915112345678").is_ok());
+        assert!(ExternalTargetNumber::new("00151").is_err());
+        assert!(CreateExternalDevice::new("4915112345678").is_ok());
+        assert!(CreateExternalDevice::new("4915").is_err());
+
+        assert!(Localprefix::new(true, "030").is_ok());
+        assert!(Localprefix::new(true, "03A0").is_err());
+        assert!(Localprefix::new(true, "").is_err());
+
+        assert!(CreateDevice::new(DeviceKind::Other("x".into())).is_err());
+
+        let empty_mobile = CreateMobileDevice::new().to_json();
+        assert_eq!(empty_mobile, serde_json::json!({}));
+        let empty_register = CreateRegisterDevice::new().to_json();
+        assert_eq!(empty_register, serde_json::json!({}));
+    }
+}
