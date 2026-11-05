@@ -439,8 +439,8 @@ impl Response {
 /// * return the raw status, headers and body even for non-2xx (the client
 ///   decides what is retryable),
 /// * classify a failure that provably happened **before** the request was
-///   written (DNS, TCP connect, TLS) as [`Error::transport`] (retryable), and a
-///   failure after the write (timeout, reset while waiting) as
+///   written (DNS, TCP connect, TLS) as [`Error::transport_before_write`]
+///   (retryable), and a failure after the write (timeout, reset while waiting) as
 ///   [`Error::ambiguous`] for a non-idempotent method,
 ///   see [`Method::is_idempotent`].
 ///
@@ -574,8 +574,13 @@ fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
     };
     // `reqwest::Error` renders the URL but never the Authorization header.
     let message = format!("{kind}: {error}");
-    if error.is_connect() || method.is_idempotent() {
-        Error::transport(message)
+    if error.is_connect() {
+        Error::transport_before_write(message)
+    } else if method.is_idempotent() {
+        Error::Transport {
+            message,
+            retryable: true,
+        }
     } else {
         Error::ambiguous(None, message)
     }
