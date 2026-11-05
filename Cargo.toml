@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 subtle = "2"
+mime = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"], optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
 base64 = { version = "0.23", default-features = false, features = ["std"] }

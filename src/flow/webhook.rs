@@ -210,15 +210,15 @@ impl WebhookVerifier {
 ///
 /// assert!(is_json_content_type("application/json"));
 /// assert!(is_json_content_type("Application/JSON; charset=utf-8"));
+/// assert!(is_json_content_type("application/vnd.api+json"));
 /// assert!(!is_json_content_type("application/x-www-form-urlencoded"));
+/// assert!(!is_json_content_type("not+json"));
+/// assert!(!is_json_content_type("not a media type"));
 /// ```
 #[must_use]
 pub fn is_json_content_type(value: &str) -> bool {
-    let media_type = value
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    media_type == "application/json" || media_type.ends_with("+json")
+    value.trim().parse::<mime::Mime>().is_ok_and(|mime| {
+        let essence = mime.essence_str();
+        essence == "application/json" || essence.ends_with("+json")
+    })
 }
