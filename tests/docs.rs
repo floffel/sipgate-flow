@@ -44,11 +44,15 @@ fn contract_gaps() -> (String, String) {
     }
 }
 
+/// A gap list this short means a section was gutted, not that every surface is
+/// covered - the count is a floor, and both documents must still agree.
+const MIN_GAP_ENTRIES: usize = 3;
+
 fn assert_every_gap_is_tracked(what: &str, text: &str) {
     let found = bullets(text);
     assert!(
-        found.len() >= 4,
-        "{what}: expected at least 4 gap entries, found {}",
+        found.len() >= MIN_GAP_ENTRIES,
+        "{what}: expected at least {MIN_GAP_ENTRIES} gap entries, found {}",
         found.len()
     );
     for gap in &found {

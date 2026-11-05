@@ -10,9 +10,11 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
 
 [dependencies.sipgate-flow]
 path = ".."
+features = ["websocket"]
 
 [[bin]]
 name = "parse_event"
@@ -37,6 +39,13 @@ bench = false
 [[bin]]
 name = "parse_rest"
 path = "fuzz_targets/parse_rest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_socket"
+path = "fuzz_targets/parse_socket.rs"
 test = false
 doc = false
 bench = false

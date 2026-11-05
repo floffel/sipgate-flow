@@ -18,6 +18,7 @@ all-features = true
 [features]
 default = ["http"]
 http = ["dep:reqwest", "dep:serde_urlencoded"]
+websocket = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
