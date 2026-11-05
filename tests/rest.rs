@@ -505,6 +505,10 @@ impl RotatingToken {
 }
 
 impl TokenSource for RotatingToken {
+    fn refreshable(&self) -> bool {
+        true
+    }
+
     fn access_token(
         &self,
         force_refresh: bool,
@@ -694,6 +698,10 @@ impl SlowTokenEndpoint {
 struct OAuthHandle(Arc<OAuth2Client<SlowTokenEndpoint>>);
 
 impl TokenSource for OAuthHandle {
+    fn refreshable(&self) -> bool {
+        self.0.refreshable()
+    }
+
     fn access_token(
         &self,
         force_refresh: bool,
@@ -779,6 +787,10 @@ async fn concurrent_401s_trigger_one_single_flight_token_refresh() {
 struct AuthHandle(Arc<RotatingToken>);
 
 impl TokenSource for AuthHandle {
+    fn refreshable(&self) -> bool {
+        self.0.refreshable()
+    }
+
     fn access_token(
         &self,
         force_refresh: bool,

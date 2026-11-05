@@ -537,8 +537,9 @@ impl Token {
 /// Token ([`PersonalAccessToken`]), or [`OAuth2Client`] for client credentials.
 ///
 /// `force_refresh` asks for a new token even if the cached one is still valid;
-/// it is how a 401 is answered. `refresh_after` replaces the credential that
-/// was actually rejected, and `invalidate` drops whatever is cached.
+/// it is how a 401 is answered when [`TokenSource::refreshable`] is `true`.
+/// `refresh_after` replaces the credential that was actually rejected, and
+/// `invalidate` drops whatever is cached.
 ///
 /// ```
 /// use sipgate_flow::{StaticToken, TokenSource};
@@ -550,6 +551,25 @@ impl Token {
 /// # }
 /// ```
 pub trait TokenSource: Send + Sync {
+    /// Whether answering a 401 with a fresh token can plausibly change the
+    /// outcome.
+    ///
+    /// The default is `false`: a source must opt in when a rejected credential
+    /// can actually be replaced. This keeps a static token or Personal Access
+    /// Token from causing an automatic resend that is guaranteed to fail the
+    /// same way and may duplicate a non-idempotent request.
+    ///
+    /// ```
+    /// use sipgate_flow::{PersonalAccessToken, StaticToken, TokenSource};
+    ///
+    /// assert!(!StaticToken::new("pat")?.refreshable());
+    /// assert!(!PersonalAccessToken::new("token-FQ1V12", "e68ead46")?.refreshable());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    fn refreshable(&self) -> bool {
+        false
+    }
+
     /// Returns a token, refreshing (or fetching) as needed.
     ///
     /// # Errors
@@ -561,6 +581,10 @@ pub trait TokenSource: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Token>> + Send;
 
     /// Replaces `stale` after it was rejected with a 401.
+    ///
+    /// This is only used for sources whose [`TokenSource::refreshable`] method
+    /// returns `true`; callers must not use the returned token to resend a
+    /// non-idempotent request.
     ///
     /// This is the single-flight refresh path: if another task already stored a
     /// different usable token, that token is returned without contacting the
@@ -649,6 +673,10 @@ impl TokenSource for StaticToken {
     }
 
     fn invalidate(&self) {}
+
+    fn refreshable(&self) -> bool {
+        false
+    }
 }
 
 /// A sipgate **Personal Access Token**, sent the way sipgate documents it.
@@ -755,6 +783,10 @@ impl TokenSource for PersonalAccessToken {
     }
 
     fn invalidate(&self) {}
+
+    fn refreshable(&self) -> bool {
+        false
+    }
 }
 
 struct Cached {
@@ -1183,6 +1215,10 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
 }
 
 impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
+    fn refreshable(&self) -> bool {
+        true
+    }
+
     async fn access_token(&self, force_refresh: bool) -> Result<Token> {
         if !force_refresh {
             if let Some(token) = self.cached()? {
