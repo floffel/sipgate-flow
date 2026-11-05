@@ -42,6 +42,10 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `MissingSecret`. The new method matches both documented names with
   `eq_ignore_ascii_case`, rejects a request whose two present spellings
   disagree, and keeps the constant-time value comparison.
+* `validate::language_tag` now checks the documented BCP-47 *shape* instead of
+  only the alphabet. Structurally invalid tags that previously slipped through
+  (`"-"`, `"en-"`, `"en--US"`, `"1234"`, a lone 35-character subtag, and
+  friends) are refused before the TTS or transcription request is built.
 * The flagship crate example no longer teaches failure-to-default. It used
   `event.session_id().unwrap_or_default()`, silently substituting an empty
   session id and returning `200` as if the action were valid. The example now
