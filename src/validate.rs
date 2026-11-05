@@ -234,19 +234,42 @@ pub(crate) fn http_url(field: &'static str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validates a BCP-47 language tag as far as the API cares: non-empty, short,
-/// ASCII, with a `-` separator in the common case.
+/// Validates a BCP-47 language tag as far as the API cares: a non-empty,
+/// ASCII tag of at most [`MAX_LANGUAGE_TAG`] bytes whose `-`-separated subtags
+/// are shaped like a real tag rather than an arbitrary token.
+///
+/// The primary subtag must be 2..=8 ASCII letters (`en`, `zh`). Each following
+/// subtag is either a one-character alphanumeric singleton (`en-x`) or a
+/// 2..=8 character alphanumeric subtag (`en-US`, `zh-Hant-TW`). Empty subtags
+/// and tags whose total byte length exceeds [`MAX_LANGUAGE_TAG`] are refused,
+/// so the documented shape actually matches what this function accepts.
 pub(crate) fn language_tag(field: &'static str, value: &str) -> Result<()> {
     non_empty(field, value, MAX_LANGUAGE_TAG)?;
-    if !value.is_ascii()
-        || value
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
-    {
+    if !value.is_ascii() {
         return Err(Error::validation(
             field,
             "must be a BCP-47 tag such as en-US",
         ));
+    }
+
+    let mut subtags = value.split('-');
+    let primary = subtags.next().unwrap_or_default();
+    if !(2..=8).contains(&primary.len()) || !primary.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Err(Error::validation(
+            field,
+            "must be a BCP-47 tag such as en-US",
+        ));
+    }
+    for subtag in subtags {
+        let len = subtag.len();
+        let shaped = (len == 1 || (2..=8).contains(&len))
+            && subtag.bytes().all(|b| b.is_ascii_alphanumeric());
+        if !shaped {
+            return Err(Error::validation(
+                field,
+                "must be a BCP-47 tag such as en-US",
+            ));
+        }
     }
     Ok(())
 }
@@ -453,6 +476,101 @@ mod tests {
         ) {
             let expected = !value.is_empty() && value.len() <= max_bytes;
             prop_assert_eq!(non_empty("field", &value, max_bytes).is_ok(), expected);
+        }
+    }
+
+    #[test]
+    fn language_tag_accepts_well_shaped_tags() {
+        for value in ["en", "en-US", "zh-Hant-TW", "de", "en-x", "en-abcdefgh"] {
+            assert!(language_tag("languages", value).is_ok(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn language_tag_accepts_the_primary_subtag_bounds() {
+        // Two letters is the shortest primary language subtag, eight the longest.
+        assert!(language_tag("languages", "en").is_ok());
+        assert!(language_tag("languages", "abcdefgh").is_ok());
+        // Just outside: a one-letter and a nine-letter primary subtag.
+        assert!(language_tag("languages", "e").is_err());
+        assert!(language_tag("languages", "abcdefghi").is_err());
+    }
+
+    #[test]
+    fn language_tag_accepts_the_subtag_length_bounds() {
+        // A one-character subtag (the singleton) and an eight-character subtag
+        // are the two accepted shapes; nine characters is one too many.
+        assert!(language_tag("languages", "en-x").is_ok());
+        assert!(language_tag("languages", "en-abcdefgh").is_ok());
+        assert!(language_tag("languages", "en-abcdefghi").is_err());
+    }
+
+    #[test]
+    fn language_tag_accepts_the_total_length_bounds() {
+        // Exactly 35 bytes after splitting, then the same shape one byte over.
+        let at_limit = format!("en{}", "-ab".repeat(11));
+        assert_eq!(at_limit.len(), MAX_LANGUAGE_TAG);
+        assert!(language_tag("languages", &at_limit).is_ok());
+
+        let over_limit = format!("en{}", "-ab".repeat(10) + "-abc");
+        assert_eq!(over_limit.len(), MAX_LANGUAGE_TAG + 1);
+        assert!(language_tag("languages", &over_limit).is_err());
+    }
+
+    #[test]
+    fn language_tag_rejects_a_single_over_long_subtag() {
+        let value = "en-abcdefghi";
+        assert_eq!(value.len(), 2 + 1 + 9);
+        assert!(language_tag("languages", value).is_err());
+    }
+
+    #[test]
+    fn language_tag_rejects_non_ascii() {
+        for value in ["en-US\u{00e9}", "de\u{00df}", "\u{4f60}\u{597d}"] {
+            assert!(language_tag("languages", value).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn language_tag_rejects_structurally_invalid_tags() {
+        for value in [
+            "",
+            "-",
+            "--",
+            "en--US",
+            "en-",
+            "-en",
+            "e",
+            "abcdefghi",
+            "1234",
+            "en-U_S",
+            "de_DE",
+            "de DE",
+        ] {
+            assert!(language_tag("languages", value).is_err(), "{value:?}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn language_tag_accepts_exactly_the_well_shaped_bounded_tags(
+            value in "[A-Za-z0-9-]{0,40}",
+        ) {
+            let subtags = value.split('-').collect::<Vec<_>>();
+            let primary_ok = subtags
+                .first()
+                .is_some_and(|p| (2..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphabetic()));
+            let rest_ok = subtags.iter().skip(1).all(|s| {
+                let len = s.len();
+                (len == 1 || (2..=8).contains(&len))
+                    && s.bytes().all(|b| b.is_ascii_alphanumeric())
+            });
+            let expected = !value.is_empty()
+                && value.len() <= MAX_LANGUAGE_TAG
+                && value.is_ascii()
+                && primary_ok
+                && rest_ok;
+            prop_assert_eq!(language_tag("languages", &value).is_ok(), expected);
         }
     }
 }
