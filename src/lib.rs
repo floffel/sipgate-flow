@@ -196,7 +196,7 @@
 //! the PAT rendered as a Basic credential:
 //!
 //! ```
-//! use sipgate_flow::{rest::Sms, PersonalAccessToken, Request, Response, RestClient};
+//! use sipgate_flow::{PersonalAccessToken, Request, Response, RestClient, RestSms};
 //! use sipgate_flow::{Result, Transport};
 //!
 //! #[derive(Clone, Default)]
@@ -215,7 +215,7 @@
 //! let auth = PersonalAccessToken::new("token-FQ1V12", "e68ead46")?;
 //! let client = RestClient::new(transport.clone(), auth);
 //!
-//! let sms = Sms::new("s0", "4915112345678", "Hallo!")?;
+//! let sms = RestSms::new("s0", "4915112345678", "Hallo!")?;
 //! client.send_sms(&sms).await?;
 //!
 //! assert_eq!(
@@ -233,13 +233,13 @@
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! use sipgate_flow::{rest::Sms, PersonalAccessToken, RestClient};
+//! use sipgate_flow::{PersonalAccessToken, RestClient, RestSms};
 //!
 //! let auth = PersonalAccessToken::new(
 //!     std::env::var("SIPGATE_TOKEN_ID")?,
 //!     std::env::var("SIPGATE_TOKEN")?,
 //! )?;
-//! let sms = Sms::new("s0", "4915112345678", "Hallo!")?;
+//! let sms = RestSms::new("s0", "4915112345678", "Hallo!")?;
 //!
 //! # #[cfg(feature = "http")]
 //! # {
@@ -349,6 +349,20 @@ pub use auth::{
     TokenSource,
 };
 pub use error::{Base64Error, Error, Result, MAX_RETRY_AFTER};
+/// The sipgate Flow `send_sms` action.
+///
+/// This is the action returned from a Flow webhook response. The REST API v2
+/// has a separate request body, [`RestSms`]; the two deliberately do not share
+/// a type because their wire shapes and validation differ.
+///
+/// ```
+/// use sipgate_flow::{FlowSendSms, SendSms};
+///
+/// let action: SendSms = FlowSendSms::new("4915112345678", "hi")?;
+/// assert_eq!(action.phone_number(), "4915112345678");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+pub use flow::action::SendSms as FlowSendSms;
 pub use flow::action::{
     Action, ActionKind, Audio, BargeInConfig, BargeInStrategy, ConfigureTranscription, MixAudio,
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
@@ -365,6 +379,20 @@ pub use flow::socket::{
 };
 pub use flow::webhook::{self, WebhookVerifier};
 pub use rest::RestClient;
+/// The sipgate REST API v2 `POST /v2/sessions/sms` request body.
+///
+/// This is the payload passed to [`RestClient::send_sms`]. It requires a
+/// sending device id and keeps the `+` on E.164 recipients, unlike the Flow
+/// action [`FlowSendSms`].
+///
+/// ```
+/// use sipgate_flow::{rest::Sms, RestSms};
+///
+/// let request: Sms = RestSms::new("s0", "4915112345678", "hi")?;
+/// assert_eq!(request.recipient(), "+4915112345678");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+pub use rest::Sms as RestSms;
 pub use retry::{
     classify, parse_retry_after, retry_after_from, retry_after_from_with_clock, FnSleeper, NoSleep,
     RetryOutcome, RetryPolicy, Sleeper, MIN_RETRY_DELAY,
