@@ -12,7 +12,7 @@ use sipgate_flow::{base64, Error};
 /// more is refused before the decoder runs.
 #[test]
 fn encoded_input_above_the_size_ceiling_is_rejected() {
-    let limit = base64::encoded_len(base64::MAX_DECODED_BYTES);
+    let limit = base64::encoded_len(base64::MAX_DECODED_BYTES).expect("representable ceiling");
     assert_eq!(limit, 28_330_000);
 
     let just_inside = "A".repeat(limit);
@@ -36,7 +36,7 @@ fn encoded_input_above_the_size_ceiling_is_rejected() {
 /// size ceiling, proving the guard fired before the decoder saw the input.
 #[test]
 fn the_size_ceiling_fires_before_decoding() {
-    let limit = base64::encoded_len(base64::MAX_DECODED_BYTES);
+    let limit = base64::encoded_len(base64::MAX_DECODED_BYTES).expect("representable ceiling");
     let input = format!("!{}", "A".repeat(limit));
     let err = base64::decode(&input).expect_err("oversized invalid input is rejected by size");
     match err {
@@ -65,7 +65,11 @@ fn lengths_cover_all_three_padding_cases() {
     for len in 0..=9_usize {
         let bytes = vec![0xAB_u8; len];
         let encoded = base64::encode(&bytes);
-        assert_eq!(encoded.len(), base64::encoded_len(len), "len {len}");
+        assert_eq!(
+            encoded.len(),
+            base64::encoded_len(len).unwrap(),
+            "len {len}"
+        );
         assert!(encoded.len().is_multiple_of(4), "len {len}");
         let padding = encoded.chars().rev().take_while(|c| *c == '=').count();
         assert_eq!(padding, (3 - len % 3) % 3, "len {len}");
@@ -175,17 +179,24 @@ fn every_rejection_names_the_field_without_echoing_the_input() {
 }
 
 /// `encoded_len` is the engine's own arithmetic, so it cannot drift from
-/// `encode`; the saturation case is the one value it cannot represent.
+/// `encode`; an unrepresentable length reports that instead of saturating.
 #[test]
 fn encoded_len_matches_encode() {
     for len in [0, 1, 2, 3, 4, 5, 1_000, 1_000_001] {
         assert_eq!(
-            base64::encoded_len(len),
+            base64::encoded_len(len).expect("small length is representable"),
             base64::encode(&vec![0_u8; len]).len(),
             "len {len}"
         );
     }
-    assert_eq!(base64::encoded_len(usize::MAX), usize::MAX);
+    let max_complete_chunks = usize::MAX / 4;
+    let max_input_len = max_complete_chunks * 3;
+    assert_eq!(
+        base64::encoded_len(max_input_len),
+        Some(max_complete_chunks * 4)
+    );
+    assert_eq!(base64::encoded_len(max_input_len + 1), None);
+    assert_eq!(base64::encoded_len(usize::MAX), None);
 }
 
 /// `is_valid` and `decode` never disagree — the cheap check is the same rule,
@@ -206,6 +217,9 @@ fn is_valid_agrees_with_decode() {
 fn a_large_payload_round_trips() {
     let bytes: Vec<u8> = (0_u8..=250).cycle().take(1024 * 1024).collect();
     let encoded = base64::encode(&bytes);
-    assert_eq!(encoded.len(), base64::encoded_len(bytes.len()));
+    assert_eq!(
+        encoded.len(),
+        base64::encoded_len(bytes.len()).expect("representable")
+    );
     assert_eq!(base64::decode(&encoded).expect("decodes"), bytes);
 }

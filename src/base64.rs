@@ -40,33 +40,38 @@ use crate::error::{Error, Result};
 /// use sipgate_flow::base64;
 ///
 /// assert_eq!(base64::MAX_DECODED_BYTES, 21_247_500);
-/// assert_eq!(base64::encoded_len(base64::MAX_DECODED_BYTES), 28_330_000);
+/// assert_eq!(
+///     base64::encoded_len(base64::MAX_DECODED_BYTES),
+///     Some(28_330_000)
+/// );
 /// ```
 pub const MAX_DECODED_BYTES: usize = 21_247_500;
 
 /// The largest accepted encoded input length, in characters.
-const MAX_ENCODED_LEN: usize = encoded_len(MAX_DECODED_BYTES);
+const MAX_ENCODED_LEN: usize = saturating_encoded_len(MAX_DECODED_BYTES);
 
 /// The number of base64 characters `len` bytes encode to, padding included.
 ///
-/// Saturates at [`usize::MAX`] for a length whose encoding cannot be
-/// represented; the engine's own capacity arithmetic is the source of truth, so
+/// Returns [`None`] for a length whose encoded size cannot be represented in
+/// [`usize`]. The engine's own capacity arithmetic is the source of truth, so
 /// this cannot drift from [`encode`].
 ///
 /// ```
-/// assert_eq!(sipgate_flow::base64::encoded_len(0), 0);
-/// assert_eq!(sipgate_flow::base64::encoded_len(1), 4);
-/// assert_eq!(sipgate_flow::base64::encoded_len(3), 4);
-/// assert_eq!(sipgate_flow::base64::encoded_len(4), 8);
-/// assert_eq!(
-///     sipgate_flow::base64::encoded_len(usize::MAX),
-///     usize::MAX,
-///     "unrepresentable lengths saturate instead of wrapping"
-/// );
+/// assert_eq!(sipgate_flow::base64::encoded_len(0), Some(0));
+/// assert_eq!(sipgate_flow::base64::encoded_len(1), Some(4));
+/// assert_eq!(sipgate_flow::base64::encoded_len(3), Some(4));
+/// assert_eq!(sipgate_flow::base64::encoded_len(4), Some(8));
+/// assert_eq!(sipgate_flow::base64::encoded_len(usize::MAX), None);
 /// ```
 #[must_use]
-pub const fn encoded_len(len: usize) -> usize {
-    match base64::encoded_len(len, true) {
+pub const fn encoded_len(len: usize) -> Option<usize> {
+    base64::encoded_len(len, true)
+}
+
+/// The encoded size for an in-crate ceiling, saturating only where the ceiling
+/// itself has already fixed a small, representable input length.
+const fn saturating_encoded_len(len: usize) -> usize {
+    match encoded_len(len) {
         Some(encoded) => encoded,
         None => usize::MAX,
     }
@@ -103,7 +108,7 @@ pub fn encode(bytes: &[u8]) -> String {
 /// # Errors
 ///
 /// [`Error::Validation`] with `field = "base64"` and a reason naming the
-/// defect. Inputs longer than `encoded_len(MAX_DECODED_BYTES)` characters are
+/// defect. Inputs longer than the encoded length of [`MAX_DECODED_BYTES`] are
 /// rejected before decoding, so a hostile string cannot make the call allocate
 /// proportionally more memory than [`MAX_DECODED_BYTES`].
 pub fn decode(input: &str) -> Result<Vec<u8>> {
@@ -276,7 +281,7 @@ mod tests {
                 (Ok(decoded), Some(expected)) => {
                     assert_eq!(decoded, expected, "{input:?}");
                     assert_eq!(encode(&decoded), input, "{input:?}");
-                    assert_eq!(encoded_len(decoded.len()), input.len(), "{input:?}");
+                    assert_eq!(encoded_len(decoded.len()), Some(input.len()), "{input:?}");
                 }
                 (Err(_), None) => {}
                 (Ok(decoded), None) => {
@@ -323,7 +328,7 @@ mod tests {
         fn arbitrary_bytes_round_trip(bytes in prop::collection::vec(any::<u8>(), 0..=8192)) {
             let encoded = encode(&bytes);
             prop_assert!(is_valid(&encoded));
-            prop_assert_eq!(encoded.len(), encoded_len(bytes.len()));
+            prop_assert_eq!(encoded.len(), encoded_len(bytes.len()).expect("small length"));
             prop_assert_eq!(decode(&encoded).expect("our own encoding must decode"), bytes);
         }
 

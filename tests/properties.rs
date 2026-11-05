@@ -124,7 +124,10 @@ proptest! {
     fn base64_round_trips(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
         let encoded = base64::encode(&bytes);
         prop_assert!(base64::is_valid(&encoded));
-        prop_assert_eq!(encoded.len(), base64::encoded_len(bytes.len()));
+        prop_assert_eq!(
+            encoded.len(),
+            base64::encoded_len(bytes.len()).expect("small length")
+        );
         prop_assert_eq!(base64::decode(&encoded).expect("decodes"), bytes);
     }
 
