@@ -654,19 +654,19 @@ impl Failing {
 }
 
 impl Connection for Failing {
-    async fn recv(&self) -> Result<Option<Frame>> {
+    fn recv(&self) -> impl std::future::Future<Output = Result<Option<Frame>>> + Send {
         if self.read_ok {
-            return Ok(Some(Frame::text(USER_SPEAK)));
+            return std::future::ready(Ok(Some(Frame::text(USER_SPEAK))));
         }
-        Err(Error::socket_with_source(
+        std::future::ready(Err(Error::socket_with_source(
             "recv: connection reset",
             true,
             std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"),
-        ))
+        )))
     }
 
-    async fn send(&self, _frame: Frame) -> Result<()> {
-        Err(Error::socket("send: broken pipe"))
+    fn send(&self, _frame: Frame) -> impl std::future::Future<Output = Result<()>> + Send {
+        std::future::ready(Err(Error::socket("send: broken pipe")))
     }
 }
 

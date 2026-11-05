@@ -286,13 +286,15 @@ impl MockConnection {
 }
 
 impl Connection for MockConnection {
-    async fn recv(&self) -> Result<Option<Frame>> {
-        Ok(lock(&self.incoming).pop_front())
+    // No `.await` in either half, so the futures are `ready()`: declaring them
+    // `async` would claim a suspension point the implementation does not have.
+    fn recv(&self) -> impl Future<Output = Result<Option<Frame>>> + Send {
+        std::future::ready(Ok(lock(&self.incoming).pop_front()))
     }
 
-    async fn send(&self, frame: Frame) -> Result<()> {
+    fn send(&self, frame: Frame) -> impl Future<Output = Result<()>> + Send {
         lock(&self.sent).push(frame);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }
 
