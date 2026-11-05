@@ -246,6 +246,13 @@ URL and the same bearer credential as §4.
 | --- | --- | --- | --- | --- | --- |
 | PUT | `/ai-webhooks` | `updateWebhookSettings` | `WebhookSettingsUpdateRequest` | 200/201 | `FlowClient::update_ai_webhook` |
 | GET | `/ai-webhooks` | `getWebhookSettings` | — | 200 → `WebhookSettingsResponse` | `FlowClient::ai_webhook` |
+| DELETE | `/ai-webhooks` | `deleteWebhookSettings` | — | 204 | `FlowClient::delete_ai_webhook` |
+| GET | `/webhooks` | `getWebhookConfigs` | — | 200 → `[WebhookConfigResponse]` | `FlowClient::ai_webhook_configs` |
+| POST | `/webhooks` | `createWebhookConfig` | `WebhookConfigRequest` | 201 → `WebhookConfigResponse` | `FlowClient::create_ai_webhook_config` |
+| PUT | `/webhooks/{configId}` | `replaceWebhookConfig` | `WebhookConfigRequest` | 200 → `WebhookConfigResponse` | `FlowClient::replace_ai_webhook_config` |
+| DELETE | `/webhooks/{configId}` | `deleteWebhookConfig` | — | 204 | `FlowClient::delete_ai_webhook_config` |
+| POST | `/webhooks/{configId}/headers` | `addWebhookConfigHeader` | `WebhookHeaderDto` | 201 → `WebhookHeaderDto` | `FlowClient::add_ai_webhook_header` |
+| DELETE | `/webhooks/{configId}/headers/{headerName}` | `deleteWebhookConfigHeader` | — | 204 | `FlowClient::delete_ai_webhook_header` |
 | GET | `/tts/voices` | `listVoices` | — | 200 → `GenericListResponseTtsVoice` | `FlowClient::tts_voices` |
 
 * `WebhookSettingsUpdateRequest` and `WebhookSettingsResponse` both carry one
@@ -257,6 +264,12 @@ URL and the same bearer credential as §4.
   objects (`voiceId`, `name`, `languages`, `previewUrl`, `recommended`,
   `beta`), so `TtsVoice` accepts both shapes and preserves unknown fields in
   `raw()`.
+* The current AI webhook config surface is the `WebhookConfigRequest` /
+  `WebhookConfigResponse` pair: `{active, entityIds, name, urls}`, with the
+  response adding `webhookId` and `headers`. `AiWebhookConfig` validates the
+  `https://` target URLs, name length and non-empty entity ids before the wire,
+  and `AiWebhookHeader` enforces the documented `X-` prefix, rejects `#`/CR/LF
+  and redacts the value in `Debug`.
 
 ## 5. REST API v2 — verified against the public Swagger
 

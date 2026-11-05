@@ -418,6 +418,390 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
         ))
     }
 
+    /// Removes the account's AI-assist webhook URL:
+    /// `DELETE /v3/ai-webhooks`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_ai_webhook().await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth and API errors. A documented `404` (no
+    /// webhook configured) is returned as [`crate::Error::Api`]. `DELETE` is
+    /// idempotent, so a retryable non-2xx answer is reported on
+    /// [`crate::Error::Api`] rather than [`crate::Error::Ambiguous`].
+    pub async fn delete_ai_webhook(&self) -> Result<()> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/ai-webhooks",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Delete,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(());
+        }
+        Err(crate::retry::api_error(
+            Method::Delete,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Lists the account's AI webhook configurations:
+    /// `GET /v3/webhooks`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for config in client.ai_webhook_configs().await? {
+    ///     println!("{:?}", config.name());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Json`] when the success body is not a JSON array of
+    /// webhook configs, plus the generic transport, auth and API errors.
+    pub async fn ai_webhook_configs(&self) -> Result<Vec<AiWebhookConfig>> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/webhooks",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return AiWebhookConfig::list_from_json(response.json()?);
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Creates an AI webhook configuration: `POST /v3/webhooks`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{AiWebhookConfig, FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"])?;
+    /// let created = client.create_ai_webhook_config(&request).await?;
+    /// println!("{:?}", created.webhook_id());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when the request is built with an invalid
+    /// URL or entity id, [`crate::Error::Json`] when the success body is not a
+    /// JSON config, plus the generic transport, auth and API errors. A `POST`
+    /// is not idempotent, so a retryable `5xx` outcome is reported as
+    /// [`crate::Error::Ambiguous`].
+    pub async fn create_ai_webhook_config(
+        &self,
+        request: &AiWebhookConfig,
+    ) -> Result<AiWebhookConfig> {
+        request.validate_request()?;
+        let body = request.to_request_json();
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/webhooks",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Post,
+            Some(&body),
+        )
+        .await?;
+        if response.is_success() {
+            return AiWebhookConfig::from_json(response.json()?);
+        }
+        Err(crate::retry::api_error(
+            Method::Post,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Replaces an AI webhook configuration:
+    /// `PUT /v3/webhooks/{configId}`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{AiWebhookConfig, FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"])?;
+    /// let updated = client.replace_ai_webhook_config("48f1e8a8-5e4c-4d2f-8f04-1c2a97a4c3de", &request).await?;
+    /// println!("{:?}", updated.headers());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `config_id` is not a UUID or the
+    /// request is invalid, [`crate::Error::Json`] when the success body is not
+    /// a JSON config, plus the generic transport, auth and API errors.
+    pub async fn replace_ai_webhook_config(
+        &self,
+        config_id: impl Into<String>,
+        request: &AiWebhookConfig,
+    ) -> Result<AiWebhookConfig> {
+        let config_id = config_id.into();
+        validate_webhook_config_id("config_id", &config_id)?;
+        request.validate_request()?;
+        let path = format!("/v3/webhooks/{config_id}");
+        let body = request.to_request_json();
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Put,
+            Some(&body),
+        )
+        .await?;
+        if response.is_success() {
+            return AiWebhookConfig::from_json(response.json()?);
+        }
+        Err(crate::retry::api_error(
+            Method::Put,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Deletes an AI webhook configuration:
+    /// `DELETE /v3/webhooks/{configId}`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_ai_webhook_config("48f1e8a8-5e4c-4d2f-8f04-1c2a97a4c3de").await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `config_id` is not a UUID, plus the
+    /// generic transport, auth and API errors. `DELETE` is idempotent, so a
+    /// retryable non-2xx answer is reported on [`crate::Error::Api`].
+    pub async fn delete_ai_webhook_config(&self, config_id: impl Into<String>) -> Result<()> {
+        let config_id = config_id.into();
+        validate_webhook_config_id("config_id", &config_id)?;
+        let path = format!("/v3/webhooks/{config_id}");
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Delete,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(());
+        }
+        Err(crate::retry::api_error(
+            Method::Delete,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Adds a custom header to an AI webhook configuration:
+    /// `POST /v3/webhooks/{configId}/headers`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{AiWebhookHeader, FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let header = AiWebhookHeader::new("X-API-Key", "secret")?;
+    /// let created = client.add_ai_webhook_header("48f1e8a8-5e4c-4d2f-8f04-1c2a97a4c3de", &header).await?;
+    /// println!("{:?}", created.value());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `config_id` is not a UUID or the
+    /// header is invalid, [`crate::Error::Json`] when the success body is not a
+    /// JSON header, plus the generic transport, auth and API errors. A `POST`
+    /// is not idempotent, so a retryable `5xx` outcome is reported as
+    /// [`crate::Error::Ambiguous`].
+    pub async fn add_ai_webhook_header(
+        &self,
+        config_id: impl Into<String>,
+        header: &AiWebhookHeader,
+    ) -> Result<AiWebhookHeader> {
+        let config_id = config_id.into();
+        validate_webhook_config_id("config_id", &config_id)?;
+        header.validate_request()?;
+        let path = format!("/v3/webhooks/{config_id}/headers");
+        let body = header.to_json();
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Post,
+            Some(&body),
+        )
+        .await?;
+        if response.is_success() {
+            let value = response.json()?;
+            return AiWebhookHeader::from_json(&value);
+        }
+        Err(crate::retry::api_error(
+            Method::Post,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Removes a custom header from an AI webhook configuration:
+    /// `DELETE /v3/webhooks/{configId}/headers/{headerName}`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_ai_webhook_header("48f1e8a8-5e4c-4d2f-8f04-1c2a97a4c3de", "X-API-Key").await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `config_id` is not a UUID or
+    /// `header_name` is not a valid custom header name, plus the generic
+    /// transport, auth and API errors. `DELETE` is idempotent, so a retryable
+    /// non-2xx answer is reported on [`crate::Error::Api`].
+    pub async fn delete_ai_webhook_header(
+        &self,
+        config_id: impl Into<String>,
+        header_name: impl AsRef<str>,
+    ) -> Result<()> {
+        let config_id = config_id.into();
+        validate_webhook_config_id("config_id", &config_id)?;
+        let header_name = header_name.as_ref();
+        validate_webhook_header_name("header_name", header_name)?;
+        let path = format!("/v3/webhooks/{config_id}/headers/{header_name}");
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Delete,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(());
+        }
+        Err(crate::retry::api_error(
+            Method::Delete,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
     /// Lists the TTS voices usable in synthesize requests:
     /// `GET /v3/tts/voices`.
     ///
@@ -3077,6 +3461,679 @@ impl TtsSettingList {
         }
         Ok(settings)
     }
+}
+
+// ===========================================================================
+// v3 AI webhook configurations (#168)
+//
+// The current v3 document models the account's AI assist webhook delivery
+// through `/v3/webhooks` and its headers sub-resource, while keeping the
+// legacy single-URL `/v3/ai-webhooks` resource above for compatibility.
+// ===========================================================================
+
+/// Longest webhook config `name` accepted, matching the `maxLength` of the
+/// documented request schema.
+const MAX_WEBHOOK_CONFIG_NAME_CHARS: usize = 255;
+
+/// Longest webhook entity id accepted before it is placed in the request body.
+const MAX_WEBHOOK_ENTITY_ID_BYTES: usize = 255;
+
+/// Longest custom webhook header name accepted.
+const MAX_WEBHOOK_HEADER_NAME_BYTES: usize = 256;
+
+/// Longest custom webhook header value accepted by this crate.
+///
+/// The v3 document sets no explicit upper bound; the generic REST field cap
+/// keeps a single header from carrying an unbounded payload.
+const MAX_WEBHOOK_HEADER_VALUE_BYTES: usize = validate::MAX_REST_FIELD_BYTES;
+
+/// Rejects a `configId` path parameter outside the documented UUID shape.
+fn validate_webhook_config_id(field: &'static str, value: &str) -> Result<()> {
+    validate::non_empty(field, value, validate::MAX_SESSION_ID)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(Error::validation(
+            field,
+            "must contain only ASCII letters, digits or -",
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects a custom webhook header name the API would refuse.
+///
+/// The v3 document requires names to start with `X-` and to avoid `#`; the
+/// alphabet is narrowed further to HTTP token characters so the name is safe
+/// both in JSON and as a URL path segment.
+fn validate_webhook_header_name(field: &'static str, value: &str) -> Result<()> {
+    validate::non_empty(field, value, MAX_WEBHOOK_HEADER_NAME_BYTES)?;
+    if !value
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("x-"))
+    {
+        return Err(Error::validation(field, "must start with X-"));
+    }
+    if value.contains('#') {
+        return Err(Error::validation(field, "must not contain #"));
+    }
+    if !value.bytes().all(is_webhook_header_name_byte) {
+        return Err(Error::validation(
+            field,
+            "must contain only ASCII letters, digits or -_",
+        ));
+    }
+    Ok(())
+}
+
+fn is_webhook_header_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
+/// Rejects a custom webhook header value the API would refuse.
+///
+/// The v3 document requires a non-blank value without CR or LF, so a header
+/// cannot inject a second header line on delivery.
+fn validate_webhook_header_value(field: &'static str, value: &str) -> Result<()> {
+    validate::non_empty(field, value, MAX_WEBHOOK_HEADER_VALUE_BYTES)?;
+    if value.trim().is_empty() {
+        return Err(Error::validation(field, "must not be blank"));
+    }
+    if value.contains('\r') || value.contains('\n') {
+        return Err(Error::validation(field, "must not contain CR or LF"));
+    }
+    Ok(())
+}
+
+/// One AI webhook configuration as modelled by `/v3/webhooks`.
+///
+/// The same type carries the create/replace request (name, `active` flag,
+/// target URLs and entity ids) and the response (the same fields plus the
+/// server-assigned `webhookId` and custom headers). Unknown response fields
+/// stay in [`Self::raw`], and decoding tolerates `webhook_id`/`entity_ids` as
+/// aliases.
+///
+/// ```
+/// use sipgate_flow::AiWebhookConfig;
+///
+/// let request = AiWebhookConfig::new(
+///     "prod",
+///     true,
+///     ["https://example.com/wh"],
+///     ["e2"],
+/// )?;
+/// assert_eq!(request.to_request_json()["name"], "prod");
+/// assert_eq!(request.to_request_json()["urls"][0], "https://example.com/wh");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AiWebhookConfig {
+    name: String,
+    active: bool,
+    urls: Vec<String>,
+    entity_ids: Vec<String>,
+    webhook_id: Option<String>,
+    headers: Vec<AiWebhookHeader>,
+    raw: Value,
+}
+
+impl std::fmt::Debug for AiWebhookConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiWebhookConfig")
+            .field("name", &self.name)
+            .field("active", &self.active)
+            .field("urls", &RedactedUrls(&self.urls))
+            .field("entity_ids", &self.entity_ids)
+            .field("webhook_id", &self.webhook_id)
+            .field("headers", &self.headers)
+            .field("raw", &RedactedRaw(&self.raw))
+            .finish()
+    }
+}
+
+/// A list of webhook target URLs as it may appear in `Debug`: host only.
+struct RedactedUrls<'a>(&'a [String]);
+
+impl fmt::Debug for RedactedUrls<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = f.debug_list();
+        for url in self.0 {
+            list.entry(&RedactedUrl(url));
+        }
+        list.finish()
+    }
+}
+
+impl AiWebhookConfig {
+    /// Builds the create/replace body from the documented required fields.
+    ///
+    /// Every URL must be an absolute `https://` URL without credentials, the
+    /// name must be at most 255 characters, and entity ids must be non-empty.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    ///
+    /// assert!(AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"]).is_ok());
+    /// assert!(AiWebhookConfig::new("prod", false, Vec::<&str>::new(), Vec::<&str>::new()).is_ok());
+    /// assert!(AiWebhookConfig::new("prod", true, ["http://example.com/wh"], Vec::<&str>::new()).is_err());
+    /// assert!(AiWebhookConfig::new("prod", true, Vec::<&str>::new(), [""]).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the name is longer than 255 characters, a
+    /// URL is empty or not an absolute `https://` URL, or an entity id is empty
+    /// or over-long.
+    pub fn new(
+        name: impl Into<String>,
+        active: bool,
+        urls: impl IntoIterator<Item = impl Into<String>>,
+        entity_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self> {
+        let name = name.into();
+        validate_webhook_config_name(&name)?;
+        let urls = collect_webhook_urls(urls)?;
+        let entity_ids = collect_webhook_entity_ids(entity_ids)?;
+        Ok(Self {
+            name,
+            active,
+            urls,
+            entity_ids,
+            webhook_id: None,
+            headers: Vec::new(),
+            raw: Value::Null,
+        })
+    }
+
+    /// Decodes the documented response body.
+    ///
+    /// Both `webhookId`/`webhook_id` and `entityIds`/`entity_ids` are accepted.
+    /// Unknown fields stay in [`Self::raw`].
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    ///
+    /// let config = AiWebhookConfig::from_json(serde_json::json!({
+    ///     "webhookId": "48f1e8a8-5e4c-4d2f-8f04-1c2a97a4c3de",
+    ///     "name": "prod",
+    ///     "active": true,
+    ///     "urls": ["https://example.com/wh"],
+    ///     "entityIds": ["e2"],
+    ///     "headers": [],
+    ///     "future": true,
+    /// }))?;
+    /// assert_eq!(config.name(), "prod");
+    /// assert_eq!(config.raw()["future"], true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the body is not an object, or a required
+    /// field (`name`, `active`, `urls`, `entityIds`, `headers`) is missing or
+    /// has the wrong JSON shape.
+    pub fn from_json(value: Value) -> Result<Self> {
+        let object = value.as_object().ok_or_else(|| {
+            Error::validation("ai_webhook_config", "response must be a JSON object")
+        })?;
+        let name = required_string(object, "name", "ai_webhook_config.name")?;
+        validate_webhook_config_name(&name)
+            .map_err(|_| Error::validation("ai_webhook_config.name", "is invalid"))?;
+        let active = object
+            .get("active")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| Error::validation("ai_webhook_config.active", "must be a boolean"))?;
+        let urls = required_string_list(object, &["urls"], "ai_webhook_config.urls")?;
+        let entity_ids = required_string_list(
+            object,
+            &["entityIds", "entity_ids"],
+            "ai_webhook_config.entity_ids",
+        )?;
+        let webhook_id = optional_string(object, &["webhookId", "webhook_id"])
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let headers_value = object.get("headers").ok_or_else(|| {
+            Error::validation("ai_webhook_config.headers", "must be a JSON array")
+        })?;
+        let headers = decode_webhook_headers(headers_value)?;
+        Ok(Self {
+            name,
+            active,
+            urls,
+            entity_ids,
+            webhook_id,
+            headers,
+            raw: value,
+        })
+    }
+
+    /// Decodes the documented `GET /v3/webhooks` array response.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    ///
+    /// let configs = AiWebhookConfig::list_from_json(serde_json::json!([]))?;
+    /// assert!(configs.is_empty());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the body is not a JSON array, or any entry is
+    /// not a webhook config object.
+    pub fn list_from_json(value: Value) -> Result<Vec<Self>> {
+        let Value::Array(entries) = value else {
+            return Err(Error::validation(
+                "ai_webhook_configs",
+                "response must be a JSON array",
+            ));
+        };
+        let mut configs = Vec::with_capacity(entries.len());
+        for entry in entries {
+            configs.push(Self::from_json(entry)?);
+        }
+        Ok(configs)
+    }
+
+    /// Rejects an already-constructed request that is no longer valid.
+    ///
+    /// The fields are private, so this normally only re-checks values stored by
+    /// [`Self::new`]; it is still called before every send so an invariant
+    /// break cannot reach the wire.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    ///
+    /// let config = AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"])?;
+    /// assert!(config.validate_request().is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when a stored URL or entity id is no longer valid.
+    pub fn validate_request(&self) -> Result<()> {
+        validate_webhook_config_name(&self.name)?;
+        for url in &self.urls {
+            validate_webhook_url("urls", url)?;
+        }
+        for entity_id in &self.entity_ids {
+            validate_webhook_entity_id("entity_ids", entity_id)?;
+        }
+        Ok(())
+    }
+
+    /// The human-readable name.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// assert_eq!(AiWebhookConfig::new("prod", true, ["https://example.com/wh"], Vec::<&str>::new())?.name(), "prod");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether the config delivers webhooks.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// assert!(AiWebhookConfig::new("prod", true, ["https://example.com/wh"], Vec::<&str>::new())?.active());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
+    /// The configured target URLs.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// assert_eq!(
+    ///     AiWebhookConfig::new("prod", true, ["https://example.com/wh"], Vec::<&str>::new())?.urls(),
+    ///     ["https://example.com/wh"]
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn urls(&self) -> &[String] {
+        &self.urls
+    }
+
+    /// The entity ids the config delivers events for.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// assert_eq!(
+    ///     AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"])?.entity_ids(),
+    ///     ["e2"]
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn entity_ids(&self) -> &[String] {
+        &self.entity_ids
+    }
+
+    /// The server-assigned webhook id, when the response carried one.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// assert_eq!(AiWebhookConfig::new("prod", true, ["https://example.com/wh"], Vec::<&str>::new())?.webhook_id(), None);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn webhook_id(&self) -> Option<&str> {
+        self.webhook_id.as_deref()
+    }
+
+    /// The custom headers attached to the config.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// assert!(AiWebhookConfig::new("prod", true, ["https://example.com/wh"], Vec::<&str>::new())?.headers().is_empty());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn headers(&self) -> &[AiWebhookHeader] {
+        &self.headers
+    }
+
+    /// The body exactly as received, for fields this crate does not model.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// let config = AiWebhookConfig::from_json(serde_json::json!({
+    ///     "name": "prod",
+    ///     "active": false,
+    ///     "urls": [],
+    ///     "entityIds": [],
+    ///     "headers": [],
+    ///     "future": 1,
+    /// }))?;
+    /// assert_eq!(config.raw()["future"], 1);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn raw(&self) -> &Value {
+        &self.raw
+    }
+
+    /// Renders the create/replace body exactly as the `OpenAPI` schema names it.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookConfig;
+    /// let config = AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"])?;
+    /// assert_eq!(
+    ///     config.to_request_json(),
+    ///     serde_json::json!({
+    ///         "name": "prod",
+    ///         "active": true,
+    ///         "urls": ["https://example.com/wh"],
+    ///         "entityIds": ["e2"],
+    ///     })
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_request_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "active": self.active,
+            "urls": self.urls,
+            "entityIds": self.entity_ids,
+        })
+    }
+}
+
+/// One custom header of an AI webhook configuration:
+/// `WebhookHeaderDto<682C6352>`.
+///
+/// The same type is used for the `POST .../headers` request and the `201`
+/// response. The value is treated as a secret: [`Debug`] never prints it.
+///
+/// ```
+/// use sipgate_flow::AiWebhookHeader;
+///
+/// let header = AiWebhookHeader::new("X-API-Key", "secret")?;
+/// assert_eq!(header.name(), "X-API-Key");
+/// assert_eq!(header.to_json()["value"], "secret");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AiWebhookHeader {
+    name: String,
+    value: String,
+}
+
+impl std::fmt::Debug for AiWebhookHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiWebhookHeader")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+impl AiWebhookHeader {
+    /// Builds a custom webhook header.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookHeader;
+    ///
+    /// assert!(AiWebhookHeader::new("X-API-Key", "secret").is_ok());
+    /// assert!(AiWebhookHeader::new("Authorization", "secret").is_err());
+    /// assert!(AiWebhookHeader::new("X-API-Key", "").is_err());
+    /// assert!(AiWebhookHeader::new("X-API-Key", "a\nb").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the name does not start with `X-`, contains
+    /// `#` or non-token characters, or when the value is blank or contains CR
+    /// or LF.
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        validate_webhook_header_name("header_name", &name)?;
+        let value = value.into();
+        validate_webhook_header_value("header_value", &value)?;
+        Ok(Self { name, value })
+    }
+
+    /// Decodes the documented response body.
+    ///
+    /// Both `name` and `key` are accepted as the header name.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookHeader;
+    ///
+    /// let header = AiWebhookHeader::from_json(&serde_json::json!({"name": "X-Source", "value": "sipgate"}))?;
+    /// assert_eq!(header.name(), "X-Source");
+    ///
+    /// let keyed = AiWebhookHeader::from_json(&serde_json::json!({"key": "X-Source", "value": "sipgate"}))?;
+    /// assert_eq!(keyed.name(), "X-Source");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the body is not an object or the name/value
+    /// pair is invalid.
+    pub fn from_json(value: &Value) -> Result<Self> {
+        let object = value.as_object().ok_or_else(|| {
+            Error::validation("ai_webhook_header", "response must be a JSON object")
+        })?;
+        let name = optional_string(object, &["name", "key"])
+            .ok_or_else(|| Error::validation("ai_webhook_header.name", "must be a string"))?;
+        let value = optional_string(object, &["value"])
+            .ok_or_else(|| Error::validation("ai_webhook_header.value", "must be a string"))?;
+        Self::new(name, value)
+    }
+
+    /// Rejects an already-constructed header that is no longer valid.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookHeader;
+    /// assert!(AiWebhookHeader::new("X-API-Key", "secret")?.validate_request().is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the stored name or value is no longer valid.
+    pub fn validate_request(&self) -> Result<()> {
+        validate_webhook_header_name("header_name", &self.name)?;
+        validate_webhook_header_value("header_value", &self.value)
+    }
+
+    /// The header name.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookHeader;
+    /// assert_eq!(AiWebhookHeader::new("X-API-Key", "secret")?.name(), "X-API-Key");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The header value.
+    ///
+    /// The value is commonly a credential; callers should avoid logging it.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookHeader;
+    /// assert_eq!(AiWebhookHeader::new("X-API-Key", "secret")?.value(), "secret");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Renders the header body exactly as the `OpenAPI` schema names it.
+    ///
+    /// ```
+    /// use sipgate_flow::AiWebhookHeader;
+    /// assert_eq!(
+    ///     AiWebhookHeader::new("X-API-Key", "secret")?.to_json(),
+    ///     serde_json::json!({"name": "X-API-Key", "value": "secret"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "name": self.name, "value": self.value })
+    }
+}
+
+fn validate_webhook_config_name(name: &str) -> Result<()> {
+    if name.chars().count() > MAX_WEBHOOK_CONFIG_NAME_CHARS {
+        return Err(Error::validation(
+            "name",
+            format!("must be at most {MAX_WEBHOOK_CONFIG_NAME_CHARS} characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_webhook_url(field: &'static str, url: &str) -> Result<()> {
+    validate::http_url(field, url)?;
+    if !url
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    {
+        return Err(Error::validation(field, "must use https://"));
+    }
+    Ok(())
+}
+
+fn validate_webhook_entity_id(field: &'static str, value: &str) -> Result<()> {
+    validate::non_empty(field, value, MAX_WEBHOOK_ENTITY_ID_BYTES)?;
+    if value.contains('\r') || value.contains('\n') {
+        return Err(Error::validation(field, "must not contain CR or LF"));
+    }
+    Ok(())
+}
+
+fn collect_webhook_urls(urls: impl IntoIterator<Item = impl Into<String>>) -> Result<Vec<String>> {
+    let mut collected = Vec::new();
+    for url in urls {
+        let url = url.into();
+        validate_webhook_url("urls", &url)?;
+        collected.push(url);
+    }
+    Ok(collected)
+}
+
+fn collect_webhook_entity_ids(
+    entity_ids: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<Vec<String>> {
+    let mut collected = Vec::new();
+    for entity_id in entity_ids {
+        let entity_id = entity_id.into();
+        validate_webhook_entity_id("entity_ids", &entity_id)?;
+        collected.push(entity_id);
+    }
+    Ok(collected)
+}
+
+fn required_string(object: &Map<String, Value>, field: &str, path: &'static str) -> Result<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| Error::validation(path, "must be a string"))
+}
+
+fn optional_string<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str))
+}
+
+fn required_string_list(
+    object: &Map<String, Value>,
+    names: &[&str],
+    path: &'static str,
+) -> Result<Vec<String>> {
+    let value = names
+        .iter()
+        .find_map(|name| object.get(*name))
+        .ok_or_else(|| Error::validation(path, "must be a JSON array"))?;
+    let Value::Array(entries) = value else {
+        return Err(Error::validation(path, "must be a JSON array"));
+    };
+    let mut list = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = entry
+            .as_str()
+            .ok_or_else(|| Error::validation(path, "entries must be strings"))?;
+        list.push(entry.to_string());
+    }
+    Ok(list)
+}
+
+fn decode_webhook_headers(value: &Value) -> Result<Vec<AiWebhookHeader>> {
+    let Value::Array(entries) = value else {
+        return Err(Error::validation(
+            "ai_webhook_config.headers",
+            "must be a JSON array",
+        ));
+    };
+    let mut headers = Vec::with_capacity(entries.len());
+    for entry in entries {
+        headers.push(AiWebhookHeader::from_json(entry)?);
+    }
+    Ok(headers)
 }
 
 /// The `200 OK` body of `GET /v3/ai-agents/{agentId}/voices`.

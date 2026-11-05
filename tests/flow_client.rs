@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use common::{json_response, no_content, response, static_auth, Body, MockTransport};
 use sipgate_flow::{
-    AccountRetentionSettings, AiWebhookSettings, Error, FlowClient, OutboundCall,
-    OutboundCallReceipt, RecordingAnnouncementMode, Result, SetAccountRetentionSettings,
-    StaticToken, Token, TokenSource, TranscriptionAnnouncementMode, TransferCallerIdSource,
-    TtsVoice, MAX_ACCOUNT_SETTING_TOKEN_BYTES, MAX_EVENT_RETENTION_DAYS,
+    AccountRetentionSettings, AiWebhookConfig, AiWebhookHeader, AiWebhookSettings, Error,
+    FlowClient, OutboundCall, OutboundCallReceipt, RecordingAnnouncementMode, Result,
+    SetAccountRetentionSettings, StaticToken, Token, TokenSource, TranscriptionAnnouncementMode,
+    TransferCallerIdSource, TtsVoice, MAX_ACCOUNT_SETTING_TOKEN_BYTES, MAX_EVENT_RETENTION_DAYS,
 };
 
 const FLOW_ID: &str = "e3670012-96a3-4ae5-ac42-87abe22015c3";
@@ -497,6 +497,20 @@ async fn a_missing_ai_webhook_stays_a_documented_404_api_error() {
 }
 
 #[tokio::test]
+async fn deleting_the_legacy_ai_webhook_deletes_the_documented_path() {
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = client(transport.clone());
+
+    client.delete_ai_webhook().await.expect("deleted");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "DELETE");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/ai-webhooks");
+    assert_eq!(recorded.body, Body::Empty);
+}
+
+#[tokio::test]
 async fn listing_tts_voices_accepts_the_documented_string_catalogue() {
     let transport = MockTransport::new();
     transport.push_response(response(
@@ -612,6 +626,300 @@ fn ai_webhook_settings_reads_the_documented_json_body() {
         AiWebhookSettings::from_json(&serde_json::json!({})).webhook_url(),
         ""
     );
+}
+
+// ---------------------------------------------------------------------------
+// v3 AI webhook configurations (#168)
+// ---------------------------------------------------------------------------
+
+const CONFIG_ID: &str = "48f1e8a8-5e4c-4d2f-8f04-1c2a97a4c3de";
+
+fn config_body() -> serde_json::Value {
+    serde_json::json!({
+        "webhookId": CONFIG_ID,
+        "name": "prod",
+        "active": true,
+        "urls": ["https://example.com/wh"],
+        "entityIds": ["e2"],
+        "headers": [{"name": "X-Source", "value": "sipgate"}],
+        "future": true,
+    })
+}
+
+#[tokio::test]
+async fn listing_webhook_configs_gets_the_documented_path() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&serde_json::json!([config_body()])));
+    let client = client(transport.clone());
+
+    let configs = client.ai_webhook_configs().await.expect("listed");
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name(), "prod");
+    assert_eq!(configs[0].webhook_id(), Some(CONFIG_ID));
+    assert_eq!(configs[0].urls(), ["https://example.com/wh"]);
+    assert_eq!(configs[0].entity_ids(), ["e2"]);
+    assert_eq!(configs[0].headers()[0].name(), "X-Source");
+    assert_eq!(configs[0].raw()["future"], true);
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "GET");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/webhooks");
+    assert_eq!(recorded.auth.bearer(), Some("access-token"));
+    assert_eq!(recorded.body, Body::Empty);
+}
+
+#[tokio::test]
+async fn creating_a_webhook_config_posts_the_documented_body() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        201,
+        &[("Content-Type", "application/json")],
+        serde_json::to_vec(&config_body()).expect("json").as_slice(),
+    ));
+    let client = client(transport.clone());
+
+    let request =
+        AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"]).expect("valid");
+    let created = client
+        .create_ai_webhook_config(&request)
+        .await
+        .expect("created");
+    assert_eq!(created.webhook_id(), Some(CONFIG_ID));
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "POST");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/webhooks");
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({
+            "name": "prod",
+            "active": true,
+            "urls": ["https://example.com/wh"],
+            "entityIds": ["e2"],
+        }))
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_webhook_config_puts_the_documented_path_and_body() {
+    let transport = MockTransport::new();
+    transport.push_response(json_response(&config_body()));
+    let client = client(transport.clone());
+
+    let request =
+        AiWebhookConfig::new("prod", false, Vec::<&str>::new(), Vec::<&str>::new()).expect("valid");
+    let updated = client
+        .replace_ai_webhook_config(CONFIG_ID, &request)
+        .await
+        .expect("replaced");
+    assert_eq!(updated.name(), "prod");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "PUT");
+    assert_eq!(
+        recorded.url,
+        format!("https://api.sipgate.com/v3/webhooks/{CONFIG_ID}")
+    );
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({
+            "name": "prod",
+            "active": false,
+            "urls": [],
+            "entityIds": [],
+        }))
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_webhook_config_deletes_the_documented_path() {
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = client(transport.clone());
+
+    client
+        .delete_ai_webhook_config(CONFIG_ID)
+        .await
+        .expect("deleted");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "DELETE");
+    assert_eq!(
+        recorded.url,
+        format!("https://api.sipgate.com/v3/webhooks/{CONFIG_ID}")
+    );
+    assert_eq!(recorded.body, Body::Empty);
+}
+
+#[tokio::test]
+async fn adding_a_webhook_header_posts_the_documented_path_and_body() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        201,
+        &[("Content-Type", "application/json")],
+        br#"{"name":"X-Source","value":"sipgate"}"#,
+    ));
+    let client = client(transport.clone());
+
+    let header = AiWebhookHeader::new("X-Source", "sipgate").expect("valid");
+    let created = client
+        .add_ai_webhook_header(CONFIG_ID, &header)
+        .await
+        .expect("added");
+    assert_eq!(created.name(), "X-Source");
+    assert_eq!(created.value(), "sipgate");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "POST");
+    assert_eq!(
+        recorded.url,
+        format!("https://api.sipgate.com/v3/webhooks/{CONFIG_ID}/headers")
+    );
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({"name": "X-Source", "value": "sipgate"}))
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_webhook_header_deletes_the_documented_path() {
+    let transport = MockTransport::new();
+    transport.push_response(no_content());
+    let client = client(transport.clone());
+
+    client
+        .delete_ai_webhook_header(CONFIG_ID, "X-Source")
+        .await
+        .expect("removed");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "DELETE");
+    assert_eq!(
+        recorded.url,
+        format!("https://api.sipgate.com/v3/webhooks/{CONFIG_ID}/headers/X-Source")
+    );
+}
+
+#[tokio::test]
+async fn a_webhook_config_uuid_is_validated_before_the_request_exists() {
+    let transport = MockTransport::new();
+    let request =
+        AiWebhookConfig::new("prod", true, Vec::<&str>::new(), Vec::<&str>::new()).expect("valid");
+    let error = client(transport.clone())
+        .replace_ai_webhook_config("../../evil", &request)
+        .await
+        .expect_err("path traversal is refused before the wire");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "config_id",
+            ..
+        }
+    ));
+    assert_eq!(transport.call_count(), 0);
+}
+
+#[test]
+fn webhook_config_validates_urls_names_and_entity_ids() {
+    assert!(AiWebhookConfig::new("prod", true, ["https://example.com/wh"], ["e2"]).is_ok());
+    assert!(AiWebhookConfig::new("", false, Vec::<&str>::new(), Vec::<&str>::new()).is_ok());
+    assert!(AiWebhookConfig::new(
+        "n".repeat(255),
+        true,
+        Vec::<&str>::new(),
+        Vec::<&str>::new()
+    )
+    .is_ok());
+    assert!(AiWebhookConfig::new(
+        "n".repeat(256),
+        true,
+        Vec::<&str>::new(),
+        Vec::<&str>::new()
+    )
+    .is_err());
+    assert!(AiWebhookConfig::new("prod", true, ["https://example.com/wh"], [""]).is_err());
+    assert!(
+        AiWebhookConfig::new("prod", true, ["http://example.com/wh"], Vec::<&str>::new()).is_err()
+    );
+    assert!(AiWebhookConfig::new("prod", true, ["https://"], Vec::<&str>::new()).is_err());
+    assert!(AiWebhookConfig::new(
+        "prod",
+        true,
+        ["https://user:secret@example.com"],
+        Vec::<&str>::new()
+    )
+    .is_err());
+    assert!(AiWebhookConfig::new(
+        "prod",
+        true,
+        ["https://example.com/a b"],
+        Vec::<&str>::new()
+    )
+    .is_err());
+}
+
+#[test]
+fn webhook_header_validates_name_and_value() {
+    assert!(AiWebhookHeader::new("X-API-Key", "secret").is_ok());
+    assert!(AiWebhookHeader::new("x-lower", "secret").is_ok());
+    assert!(AiWebhookHeader::new(format!("X-{}", "a".repeat(254)), "v").is_ok());
+    assert!(AiWebhookHeader::new(format!("X-{}", "a".repeat(255)), "v").is_err());
+    assert!(AiWebhookHeader::new("Authorization", "secret").is_err());
+    assert!(AiWebhookHeader::new("X-Bad#Name", "secret").is_err());
+    assert!(AiWebhookHeader::new("X-Space Name", "secret").is_err());
+    assert!(AiWebhookHeader::new("X-API-Key", "").is_err());
+    assert!(AiWebhookHeader::new("X-API-Key", "   ").is_err());
+    assert!(AiWebhookHeader::new("X-API-Key", "a\r\nb").is_err());
+}
+
+#[test]
+fn webhook_header_debug_redacts_the_value() {
+    let header = AiWebhookHeader::new("X-API-Key", "super-secret").expect("valid");
+    let rendered = format!("{header:?}");
+    assert!(rendered.contains("X-API-Key"), "{rendered}");
+    assert!(!rendered.contains("super-secret"), "{rendered}");
+}
+
+#[test]
+fn webhook_config_debug_redacts_full_urls() {
+    let config = AiWebhookConfig::new(
+        "prod",
+        true,
+        ["https://example.com/secret-hook"],
+        Vec::<&str>::new(),
+    )
+    .expect("valid");
+    let rendered = format!("{config:?}");
+    assert!(rendered.contains("example.com"), "{rendered}");
+    assert!(!rendered.contains("secret-hook"), "{rendered}");
+}
+
+#[test]
+fn webhook_config_decodes_alias_field_names_and_rejects_missing_fields() {
+    let config = AiWebhookConfig::from_json(serde_json::json!({
+        "webhook_id": CONFIG_ID,
+        "name": "prod",
+        "active": true,
+        "urls": [],
+        "entity_ids": ["e2"],
+        "headers": [],
+    }))
+    .expect("aliases accepted");
+    assert_eq!(config.webhook_id(), Some(CONFIG_ID));
+    assert_eq!(config.entity_ids(), ["e2"]);
+
+    assert!(AiWebhookConfig::from_json(serde_json::json!({"name": "prod"})).is_err());
+    assert!(AiWebhookConfig::from_json(serde_json::json!([])).is_err());
+    assert!(AiWebhookConfig::list_from_json(serde_json::json!({})).is_err());
+}
+
+#[test]
+fn webhook_header_decodes_name_key_and_rejects_missing_fields() {
+    let header = AiWebhookHeader::from_json(&serde_json::json!({"key": "X-K", "value": "v"}))
+        .expect("key alias accepted");
+    assert_eq!(header.name(), "X-K");
+    assert!(AiWebhookHeader::from_json(&serde_json::json!({"name": "X-K"})).is_err());
+    assert!(AiWebhookHeader::from_json(&serde_json::json!([])).is_err());
 }
 
 // ---------------------------------------------------------------------------

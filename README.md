@@ -200,6 +200,12 @@ in any `Debug` output.
   register/replace the account-level AI webhook URL
   (`PUT /v3/ai-webhooks`), read it back (`GET /v3/ai-webhooks`) and list the
   `GET /v3/tts/voices` catalogue with typed `TtsVoice` entries.
+* **The current v3 AI webhook configurations**: `FlowClient` can list
+  (`GET /v3/webhooks`), create (`POST /v3/webhooks`), replace
+  (`PUT /v3/webhooks/{configId}`) and delete
+  (`DELETE /v3/webhooks/{configId}`) multi-target configs with typed
+  `AiWebhookConfig` values, and add/remove custom `X-` headers through the
+  `/headers` sub-resource with redacted `AiWebhookHeader` values.
 * **Twenty-one REST v2 operations** covering SMS, fax (send + resend), outbound
   calls (classic and Neo PBX), voicemail playback, IVR/voicemail recording,
   call listing, hangup, DTMF, announcements, recording, hold, mute, transfer,

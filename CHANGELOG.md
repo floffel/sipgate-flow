@@ -10,6 +10,15 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Added
 
+* The **current v3 AI webhook configuration surface** (#168): `FlowClient` now
+  models `GET`/`POST /v3/webhooks`, `PUT`/`DELETE /v3/webhooks/{configId}` and
+  the header sub-resource `POST /v3/webhooks/{configId}/headers` and
+  `DELETE /v3/webhooks/{configId}/headers/{headerName}`. `AiWebhookConfig`
+  carries the documented name, `active` flag, `https://` target URLs and entity
+  ids and keeps the server-assigned `webhookId` plus unknown fields; typed
+  `AiWebhookHeader` values validate the `X-` name, reject `#`/CR/LF and redact
+  the value in `Debug`. The legacy single-URL `/v3/ai-webhooks` methods stay for
+  compatibility, now including `DELETE /v3/ai-webhooks`.
 * Part of the **v3 AI webhook and TTS voice surface** (#15): `FlowClient`
   now models `PUT`/`GET /v3/ai-webhooks` with the typed
   `AiWebhookSettings` body/response and `GET /v3/tts/voices` with `TtsVoice`
