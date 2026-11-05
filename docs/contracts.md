@@ -3,7 +3,8 @@
 Every shape this crate accepts or sends, with the public document it came from.
 Retrieved **2026-10-24**, in two passes: the first covered the published pages
 and the v2 Swagger, the second the machine-readable v3 documents and sipgate's
-published clients (§9 lists every source and how it was fetched).
+published clients (§9 lists every source and how it was fetched). A third pass on
+**2026-11-05** covered the classic Push API (§11, §7.10).
 
 Rule for this document: a shape is **verified** only when a public sipgate
 artifact states it — a documentation page, the v2 Swagger, the **v3 OpenAPI
@@ -14,18 +15,18 @@ and the code treats it accordingly — never as if it were a fact.
 
 ---
 
-## 0. Three products, only two of which this crate speaks
+## 0. Three products, all three of which this crate speaks
 
 | Product | Protocol | Auth | In this crate |
 | --- | --- | --- | --- |
 | **sipgate flow** (`flow.sipgate.io`) | JSON both ways; actions go in the **webhook response** | shared secret in `X-API-TOKEN` | `flow::*` |
 | **sipgate REST API v2** (`api.sipgate.com/v2`) | JSON in/out over REST | OAuth2 bearer / PAT (Basic) | `rest::*` |
-| **sipgate.io Push API** (classic) | `application/x-www-form-urlencoded` in, **XML** out | — | **not modelled**, see §8 |
+| **sipgate.io Push API** (classic) | `application/x-www-form-urlencoded` in, **XML** out | none documented (§7.10) | `push::*` |
 
 The 0.1 stub conflated them: it parsed `{"event":"answered","callId":…}`
-(shaped after the Push API), emitted `{"action":"tts"}` (a name neither product
-uses), and posted to `{base}/calls/{id}/actions` — a path that exists in
-**neither** API. All three assumptions are gone.
+(shaped after the Push API), emitted `{"action":"tts"}` (a name none of the
+products uses), and posted to `{base}/calls/{id}/actions` — a path that exists
+in **none** of them. All three assumptions are gone.
 
 ---
 
@@ -491,26 +492,33 @@ reverse proxy allow-list, whatever their infrastructure offers). A caller who
 finds the mechanism published should put it in front of `Connection`, not inside
 the protocol layer.
 
+### 7.10 Push API authentication — undocumented
+
+The Push API reference and overview describe the URL you configure, the form
+parameters and the XML reply. Neither page, nor the troubleshooting page, names
+a request header, token, signature, HTTP Basic credential or source allow-list;
+the overview only recommends HTTPS and notes that self-signed certificates are
+rejected. §11 therefore records "none documented", and `push::PushVerifier`
+invents none: it checks the content type and a bounded body, and the deployment
+owns authentication (an unguessable path, a reverse proxy, a network
+allow-list). A caller who finds a published mechanism should put it in front of
+the handler, not inside this module.
+
 ## 8. Surfaces not covered yet
 
 Every surface sipgate documents and this crate does not model is an **open issue**,
 not a decision record. A bullet in this section that carries no issue link is a bug
 in this document — `tests/docs.rs` fails on it. Order of work is the order below:
 
-* **Push API (classic)** — <https://en.sipgate.io/push-api/api-references>:
-  `event=newCall` as `application/x-www-form-urlencoded`, answered with **XML**
-  (`<Dial>`, `<Play>`, `<Gather>`, `<Reject>`), follow-up events `onAnswer`,
-  `onHangup`, `onData`. Tracked in
-  [#10](https://github.com/floffel/sipgate-flow/issues/10). A different protocol
-  (form in, XML out, no JSON), so it lands as its own module; `WebhookVerifier`
-  keeps rejecting it with `Error::UnsupportedContentType` rather than half-parsing
-  it.
 * **REST v2 account administration** (devices, contacts, history, phonelines,
   numbers, …) — <https://api.sipgate.com/v2/swagger.json>. Tracked in
   [#12](https://github.com/floffel/sipgate-flow/issues/12).
-* **The rest of the v3 surface** — <https://api.sipgate.com/v3/openapi.json>, 402
-  paths. Models only `POST /ai-flows/{id}/call` today; `PUT /ai-webhooks`, the TTS
-  provider catalogue, accounts, devices and phonelines are tracked in
+* **v3 webhook and TTS configuration** — <https://api.sipgate.com/v3/openapi.json>,
+  `PUT /ai-webhooks` and the TTS provider catalogue. Tracked in
+  [#15](https://github.com/floffel/sipgate-flow/issues/15).
+* **v3 account, device and phoneline inventory** — the same 402-path document;
+  accounts, devices and phonelines (ai-agents and the playground are other
+  products). Tracked in
   [#15](https://github.com/floffel/sipgate-flow/issues/15).
 
 ### Absent upstream
@@ -548,6 +556,8 @@ implement and no issue to track:
 | <https://en.sipgate.io/rest-api/authentication> | 2026-10-24 | PAT vs OAuth2 headers, token lifetimes, grant list |
 | <https://en.sipgate.io/rest-api/managing-third-party-clients> | 2026-10-24 | what an API client is (redirect URIs, web origins) |
 | <https://login.sipgate.com/auth/realms/third-party/.well-known/openid-configuration> | 2026-10-24 | grants, token endpoint auth methods |
+| <https://en.sipgate.io/push-api/api-references> | 2026-11-05 | every Push API event parameter, XML verb, attribute, default and limit |
+| <https://en.sipgate.io/push-api> + `/troubleshooting` | 2026-11-05 | webhook URL configuration, HTTPS recommendation, transfer/forward behaviour, and the absence of any credential |
 
 ## 10. Fixture provenance
 
@@ -567,5 +577,64 @@ implement and no issue to track:
 | `flow/sms_failed.json` | <https://flow.sipgate.io/api/events#sms-failed> |
 | `flow/error.json` | <https://flow.sipgate.io/api/events/error> |
 | `flow/unknown_event.json` | synthetic, for the permissive path |
+| `push/new_call.form` | the `curl` example in <https://en.sipgate.io/push-api/api-references> (§ The POST request) |
+| `push/new_call_diverted.form` | `newCall` field table, with `origCallId`, `xcid` and the optional `diversion` |
+| `push/answer.form` | the `curl` example in the *onAnswer* section, same page |
+| `push/hangup.form` | the `curl` example in the *onHangup* section, same page |
+| `push/dtmf.form`, `push/dtmf_empty.form` | the `curl` example in the *onData* section plus its "empty if no input" note |
+| `push/unknown_event.form` | synthetic, for the permissive path |
 | `rest/*_request.json` | `definitions` examples in <https://api.sipgate.com/v2/swagger.json> |
 | `rest/calls_response.json` | `Call` / `Participant` definitions, same document |
+
+## 11. Classic Push API — verified
+
+Sources: <https://en.sipgate.io/push-api/api-references> (parameters, verbs,
+attributes, defaults and limits) and <https://en.sipgate.io/push-api> (webhook
+configuration, transfer/forward behaviour, HTTPS recommendation), retrieved
+**2026-11-05**. This is a different protocol from Flow: form-encoded in, XML
+out, no JSON anywhere.
+
+**Inbound.** sipgate.io POSTs `application/x-www-form-urlencoded` to the URL
+configured under *sipgate.io → Webhooks → Incoming/Outgoing calls*. The
+reference's parameter tables give one event per body:
+
+| `event` | Documented parameters | Modelled as |
+| --- | --- | --- |
+| `newCall` | `from`, `to`, `direction` (`in`/`out`), `callId`, `origCallId`, `user[]`, `userId[]`, `fullUserId[]`, `xcid`; optional `diversion` | `PushEventKind::NewCall` |
+| `answer` | `callId`, `user`, `userId`, `fullUserId`, `from`, `to`, `direction`, `answeringNumber`; optional `diversion` | `PushEventKind::Answer` |
+| `hangup` | `callId`, `cause`, `from`, `to`, `direction`, `answeringNumber`; optional `diversion` | `PushEventKind::Hangup` |
+| `dtmf` | `callId`, `dtmf` | `PushEventKind::Dtmf` |
+
+`from` may be the literal `anonymous`. `user[]` is always spelled with the
+brackets when repeated, and a group call carries one entry per user. The
+reference contradicts itself on `dtmf` when nothing was pressed: the *Gather*
+section says the field is "completely omitted", the callback table says it is
+empty. The model therefore keeps `None` (absent) and `Some("")` (present and
+empty) distinguishable and rejects neither. The seven `hangup` causes are
+`normalClearing`, `busy`, `cancel`, `noAnswer`, `congestion`, `notFound` and
+`forwarded` (`HangupCause`).
+
+**Outbound.** The reply is XML and the reference requires
+`Content-Type: application/xml`; every example also opens with
+`<?xml version="1.0" encoding="UTF-8"?>`. The root element is `<Response>` and
+carries the optional `onAnswer` and `onHangup` subscription URLs (follow-up
+events arrive as `answer`/`hangup` bodies).
+
+| Verb | Documented shape | Modelled as |
+| --- | --- | --- |
+| `Dial` | attributes `callerId` (E.164) and `anonymous` (`true`/`false`); children `<Number>` (E.164) or `<Voicemail />`; "calls with `direction=in` can be redirected to up to 5 targets" | `Dial`, `DialTarget` |
+| `Play` | `<Url>` with an absolute URL; the file must be mono 16-bit PCM WAV at 8 kHz | `Play` |
+| `Gather` | attributes `type` (`dtmf`, the default), `onData` (mandatory absolute URL), `maxDigits` (integer >= 1, default 1), `timeout` (ms, integer >= 1, default 2000); `<Play>` may be nested inside | `Gather` |
+| `Reject` | attribute `reason` (`rejected`, the default, or `busy`) | `RejectReason` |
+| `Hangup` | no attributes | `PushAction::Hangup` |
+
+The reference states no upper bound for `maxDigits` or `timeout`, so the crate
+uses `u32` and applies no ceiling below the documented `1`. The five-target cap
+is applied to every `Dial`, because a response does not state which direction it
+answers. The reference's nesting list for `Gather` renders empty on the page and
+its only `<Gather>` example nests `<Play>`, so `Gather` exposes exactly that.
+
+**Authentication: none documented.** See §7.10. `PushVerifier` enforces the
+documented content type and a crate-imposed body ceiling
+(`MAX_PUSH_BODY_BYTES`, 64 KiB, checked before the form is decoded); it invents
+no header, token or signature.

@@ -10,6 +10,26 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Added
 
+* The **classic Push API** (<https://en.sipgate.io/push-api/api-references>),
+  promoted from the README's gap list (#10). Its own `push` module: all four
+  documented events (`newCall`, `answer`, `hangup`, `dtmf`) decoded from
+  `application/x-www-form-urlencoded` with the same tolerance as Flow — unknown
+  events and parameters are carried, `camelCase` and `snake_case` name the same
+  parameter, and a duplicate *scalar* parameter is a typed error instead of a
+  guess. The five documented XML verbs are rendered as a `<Response>`: `Dial`
+  (up to five targets or voicemail, `callerId`, `anonymous`), `Play`, `Gather`
+  (with nested `Play`), `Reject` and `Hangup`, plus the `onAnswer`/`onHangup`
+  subscriptions. `PushVerifier` bounds the body (`MAX_PUSH_BODY_BYTES`, 64 KiB,
+  checked before the form is decoded) and refuses a foreign content type; the
+  reference documents no credential, so it invents none (§7.10 of
+  `docs/contracts.md`). Every documented limit and every crate ceiling is
+  pinned by a just-inside/just-outside pair, the form decoder and the XML
+  escaper have property tests, and the whole module works without a socket.
+* `Error::Form` (with `Error::form`) reports a Push API body that is not
+  decodable form data, carries no `event` parameter, or repeats a scalar
+  parameter. Like the other parse errors it names the parameter, never the
+  value, and is terminal.
+
 * The **Flow WebSocket transport** (<https://flow.sipgate.io/api/websocket>),
   behind the new `websocket` feature. Flow connects *to* the application, so the
   crate ships the server half and leaves the socket to the caller: implement

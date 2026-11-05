@@ -1,13 +1,15 @@
 # sipgate-flow
 
-Typed, tolerant client for **sipgate flow** and the **sipgate REST API v2**.
+Typed, tolerant client for **sipgate flow**, the classic **sipgate.io Push API**
+and the **sipgate REST API v2**.
 
-sipgate ships two JSON APIs that are easy to mix up, and 0.1 mixed them up. This
-crate keeps them apart:
+sipgate ships three webhook-shaped protocols that are easy to mix up, and 0.1
+mixed two of them up. This crate keeps them apart:
 
 | Half | What it does | Docs |
 | --- | --- | --- |
 | `flow` | Your webhook **receives** events (`session_start`, `user_speak`, `dtmf_received`, …) and **returns** actions (`speak`, `audio`, `transfer`, …) in the response. There is no separate endpoint to post an action to. Flow can also open a **WebSocket** to you and exchange the same events and actions as JSON messages. | [flow.sipgate.io/api](https://flow.sipgate.io/api/) |
+| `push` | The classic Push API: sipgate POSTs a form-encoded event (`newCall`, `answer`, `hangup`, `dtmf`) and your handler answers with an XML `<Response>` (`Dial`, `Play`, `Gather`, `Reject`, `Hangup`). | [en.sipgate.io/push-api](https://en.sipgate.io/push-api/api-references) |
 | `rest` | The imperative API at `api.sipgate.com/v2`: SMS, fax, outbound calls, and live call control (hangup, DTMF, announcement, recording, hold, mute, transfer). | [api.sipgate.com/v2/doc](https://api.sipgate.com/v2/doc) |
 
 Every shape was checked against public documentation and is cited in
@@ -94,6 +96,46 @@ accepts none (`session_end`, `user_speech_started`, …) is refused with
 `AcceptBackoff` paces the accept loop that keeps your endpoint reachable after a
 dropped link.
 
+## Answering a classic Push API call
+
+The classic Push API is a different protocol — `application/x-www-form-urlencoded`
+in, XML out — so it has its own module. `PushVerifier` enforces the content type
+and the body ceiling; `PushResponse` renders the document, including the
+`onAnswer`/`onHangup` subscriptions:
+
+```rust
+use sipgate_flow::push::{Dial, Gather, Play, PushAction, PushResponse, PushVerifier};
+
+let event = PushVerifier::new().verify_and_parse(
+    Some("application/x-www-form-urlencoded"),
+    body, // the raw request body
+)?;
+
+let response = match event.kind() {
+    sipgate_flow::push::PushEventKind::NewCall => PushResponse::new()
+        .with_on_hangup("https://example.com/hangup")?
+        .with_verb(PushAction::gather(
+            Gather::new("https://example.com/dtmf")?
+                .with_max_digits(1)?
+                .with_play(Play::new("https://example.com/menu.wav")?),
+        )),
+    sipgate_flow::push::PushEventKind::Dtmf if event.dtmf() == Some("1") => {
+        PushResponse::new().with_verb(PushAction::dial(Dial::to_number("4915799912345")?))
+    }
+    _ => PushResponse::new(), // a valid, empty <Response />
+};
+
+// Send `response.content_type()` ("application/xml") with `response.to_xml()`.
+```
+
+`maxDigits` and `timeout` refuse `0` because the reference documents `>= 1`; a
+`Dial` refuses a sixth target, because the reference documents up to five; every
+URL is an absolute `http(s)` URL without credentials, and every number is E.164.
+The reference documents **no credential** for this API, so `PushVerifier` does
+not pretend to authenticate a caller — protect the endpoint at the edge (an
+unguessable path, a reverse proxy, an allow-list) and treat every event as
+untrusted input. `docs/contracts.md` §11 records that gap.
+
 ## Calling the REST API
 
 ```rust
@@ -139,6 +181,14 @@ in any `Debug` output.
   `eleven_labs`, plus `openai` from the SDK schema).
 * **The documented Flow webhook handshake**: shared secret in constant time,
   JSON-only content type, bounded event bodies, `200`/`204` response shapes.
+* **The classic Push API**, end to end: all four documented events (`newCall`,
+  `answer`, `hangup`, `dtmf`), every documented field (including `user[]`,
+  `origCallId`, `xcid`, `diversion`, `answeringNumber` and all seven hangup
+  causes), unknown events and parameters carried instead of rejected, and all
+  five documented XML verbs (`Dial` with up to five targets or voicemail,
+  `Play`, nested `Gather`, `Reject`, `Hangup`) plus the `onAnswer`/`onHangup`
+  subscriptions. Form decoding and XML rendering are pure, bounded and
+  socket-free.
 * **The WebSocket transport** (`websocket` feature): the same events and actions
   as JSON messages over the connection Flow opens to your server, with ping/pong
   handling, a bounded inbound frame ceiling checked before parsing, a per-event
@@ -220,16 +270,16 @@ issue, so a caller can see whether their case is covered instead of reading a li
 of decisions — and `tests/docs.rs` fails the build if a gap is written down without
 an issue behind it:
 
-* **The classic Push API** (`event=newCall`, XML `<Dial>`/`<Gather>` responses) —
-  [#10](https://github.com/floffel/sipgate-flow/issues/10). Form-encoded in, XML
-  out: its own module, with the same validation and webhook-verification
-  discipline as Flow.
 * **REST v2 account administration** (devices, contacts, history, phonelines,
   numbers, …) — [#12](https://github.com/floffel/sipgate-flow/issues/12).
   Documented endpoints, not modelled yet.
-* **The rest of the v3 surface** (`PUT /ai-webhooks`, the TTS provider catalogue,
-  accounts, devices; ai-agents and the playground are other products) —
-  [#15](https://github.com/floffel/sipgate-flow/issues/15).
+* **v3 webhook and TTS configuration** (`PUT /ai-webhooks` and the TTS provider
+  catalogue) — [#15](https://github.com/floffel/sipgate-flow/issues/15).
+  Documented paths, not modelled yet.
+* **v3 account, device and phoneline inventory** (accounts, devices,
+  phonelines; ai-agents and the playground are other products) —
+  [#15](https://github.com/floffel/sipgate-flow/issues/15). Documented paths,
+  not modelled yet.
 
 Two surfaces really are absent upstream, which is the only kind of exclusion the
 standing order allows: delivery through the Flow "external API POST" (no path,
@@ -240,35 +290,46 @@ action catalogue; the REST v2 operations that do exist are implemented here —
 
 ## Examples
 
-Two runnable examples, both offline (`cargo run --example <name>`):
+Three runnable examples, all offline (`cargo run --example <name>`):
 
 * `flow_webhook` — verifies `X-API-TOKEN`, parses a `user_speak`, answers with
   two actions, and shows the 204 `session_end` must get.
+* `push_webhook` — decodes a `newCall`, answers with a `<Gather>` that plays a
+  prompt, forwards the collected digit, and shows the JSON refusal.
 * `rest_dry_run` — drives `RestClient` against a recording `Transport` and
   prints the request the crate would send; a real call is one
   `ReqwestTransport::new()` away.
 
-CI runs both (with and without default features), so the quickstart cannot
-drift away from the API.
+CI runs `flow_webhook` and `rest_dry_run` and builds every example without
+default features, so the quickstarts cannot drift away from the API.
 
 ## Tests
 
 ```bash
-cargo test                        # 402 tests + 389 doctests (default features)
-cargo test --all-features         # 433 tests + 412 doctests (adds the websocket feature)
-cargo test --no-default-features  # 383 tests + 386 doctests (no reqwest, no websocket)
+cargo test                        # 495 tests + 492 doctests (default features)
+cargo test --all-features         # 526 tests + 515 doctests (adds the websocket feature)
+cargo test --no-default-features  # 472 tests + 489 doctests (no reqwest, no websocket)
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-cargo +nightly fuzz run parse_event   # fuzz/ — five named targets
+cargo +nightly fuzz run parse_event   # fuzz/ — six named targets
 cargo llvm-cov --all-features --summary-only
 ```
 
 * **Fixtures** (`tests/fixtures/`) are the documented payloads verbatim; the
   event tests fail if the model drifts from the published wire format.
-* **Property tests** (`tests/properties.rs`): arbitrary JSON and arbitrary bytes
-  never panic the event parser; documented events round-trip and render
-  idempotently; base64 and WAV round-trip; backoff stays bounded and jittered;
+* **Property tests** (`tests/properties.rs`): arbitrary JSON, arbitrary bytes
+  and arbitrary form bodies never panic the parsers; documented events
+  round-trip and render idempotently; a validated `Dial` renders exactly its
+  digits; base64 and WAV round-trip; backoff stays bounded and jittered;
   `Retry-After` never panics.
+* **The classic Push API** (`tests/push.rs`): every fixture is a documented
+  request body; the four events decode with their fields, the five XML verbs
+  (and `onAnswer`/`onHangup`) render exactly as documented, and each limit is
+  pinned by the just-inside/just-outside pair — five versus six dial targets,
+  seven/fifteen versus six/sixteen E.164 digits, `1` versus `0` for `maxDigits`
+  and `timeout`, the URL length limit versus one byte over, the 64 KiB body
+  ceiling versus one byte over, and a reader that never ends. The test plays the
+  HTTP framework, so no socket is involved.
 * **The WebSocket transport** (`tests/websocket.rs`, `websocket` feature): every
   documented event arrives from a text *and* a binary frame, pings are answered,
   actions render exactly as the webhook body does, the frame ceiling is pinned
@@ -286,18 +347,19 @@ cargo llvm-cov --all-features --summary-only
 * **Concurrency**: one client hammered from 32 tasks (`Send + Sync` enforced by
   the compiler at the call site).
 * **Fuzz targets** (`fuzz/`): `parse_event` (webhook bodies), `parse_socket`
-  (raw WebSocket frames through `FlowSocket`), `parse_token` (token responses)
-  and `parse_rest` (the `GET /calls` envelope and the outbound `callSid` body),
-  each asserting that whatever parses re-parses to the same value.
+  (raw WebSocket frames through `FlowSocket`), `parse_token` (token responses),
+  `parse_rest` (the `GET /calls` envelope and the outbound `callSid` body),
+  `parse_base64` (the decoder) and `parse_push` (Push API form bodies), each
+  asserting that whatever parses re-parses to the same value.
 * **Every test but one file runs against `MockTransport`** (`tests/common/`).
   `tests/http_transport.rs` is the exception: it binds a `TcpListener` on
   `127.0.0.1` to exercise the `reqwest` adapter itself (verbs, both auth
   schemes, JSON and form bodies, timeouts, truncated bodies). Nothing reaches
   the network.
-* **Coverage**: **96.6 % of lines, 96.3 % of regions, 97.0 % of functions**
+* **Coverage**: **96.6 % of lines, 97.0 % of regions, 97.6 % of functions**
   (`cargo llvm-cov --all-features`; the figure moves by a few tenths between
-  toolchains, and the WebSocket module is at 100 % of its lines). CI fails below
-  95 %.
+  toolchains, the WebSocket module is at 100 % of its lines, and the Push
+  modules are above 93 % of lines each). CI fails below 95 %.
 
 ## Versioning
 
