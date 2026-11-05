@@ -65,6 +65,12 @@ const _: fn(sipgate_flow::flow::client::OutboundCall) = |v| {
 const _: fn(sipgate_flow::flow::client::OutboundCallReceipt) = |v| {
     let _: sipgate_flow::flow::OutboundCallReceipt = v;
 };
+const _: fn(sipgate_flow::flow::client::AiWebhookSettings) = |v| {
+    let _: sipgate_flow::flow::AiWebhookSettings = v;
+};
+const _: fn(sipgate_flow::flow::client::TtsVoice) = |v| {
+    let _: sipgate_flow::flow::TtsVoice = v;
+};
 // `FlowClient` is generic over its transport; a bound-checked helper proves the
 // facade path is the same type without naming a concrete transport.
 #[allow(dead_code)]
@@ -177,12 +183,12 @@ const _: fn(sipgate_flow::flow::Result<sipgate_flow::flow::Event>) = |v| {
 #[allow(unused_imports)]
 mod imports {
     use sipgate_flow::flow::{
-        is_json_content_type, Action, ActionKind, Audio, BargeInConfig, BargeInStrategy,
-        ConfigureTranscription, Direction, Error, ErrorCode, Event, EventPayload, FlowClient,
-        FlowResponse, MixAudio, OutboundCall, OutboundCallReceipt, Result, SendSms, Session,
-        Severity, SmsFailureReason, Speak, TranscriptionProvider, Transfer, TransferFailedReason,
-        Tts, Vad, WebhookVerifier, DEFAULT_BASE_URL, DEFAULT_MAX_BODY_BYTES, MAX_EVENT_BODY_BYTES,
-        SECRET_HEADER, SECRET_HEADER_LEGACY,
+        is_json_content_type, Action, ActionKind, AiWebhookSettings, Audio, BargeInConfig,
+        BargeInStrategy, ConfigureTranscription, Direction, Error, ErrorCode, Event, EventPayload,
+        FlowClient, FlowResponse, MixAudio, OutboundCall, OutboundCallReceipt, Result, SendSms,
+        Session, Severity, SmsFailureReason, Speak, TranscriptionProvider, Transfer,
+        TransferFailedReason, Tts, TtsVoice, Vad, WebhookVerifier, DEFAULT_BASE_URL,
+        DEFAULT_MAX_BODY_BYTES, MAX_EVENT_BODY_BYTES, SECRET_HEADER, SECRET_HEADER_LEGACY,
     };
     #[cfg(feature = "websocket")]
     use sipgate_flow::flow::{

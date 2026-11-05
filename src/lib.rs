@@ -367,7 +367,9 @@ pub use flow::action::{
     Action, ActionKind, Audio, BargeInConfig, BargeInStrategy, ConfigureTranscription, MixAudio,
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
 };
-pub use flow::client::{FlowClient, OutboundCall, OutboundCallReceipt};
+pub use flow::client::{
+    AiWebhookSettings, FlowClient, OutboundCall, OutboundCallReceipt, TtsVoice,
+};
 pub use flow::event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
     TransferFailedReason, MAX_EVENT_BODY_BYTES,

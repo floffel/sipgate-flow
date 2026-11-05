@@ -10,6 +10,16 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Added
 
+* Part of the **v3 AI webhook and TTS voice surface** (#15): `FlowClient`
+  now models `PUT`/`GET /v3/ai-webhooks` with the typed
+  `AiWebhookSettings` body/response and `GET /v3/tts/voices` with `TtsVoice`
+  entries from the documented `{"items": [...]}` catalogue. The webhook URL is
+  validated as absolute `https://` before it can reach the wire; the voice
+  catalogue accepts both the current bare-id entries and the richer object
+  shape used by the adjacent frontdesk catalogue, keeps unknown fields in
+  `raw()`, and refuses an empty catalogue instead of returning a misleading
+  success. The remaining v3 account/device/phoneline inventory stays tracked in
+  #15.
 * The **core REST v2 account-administration reads** (#12): typed models and
   `RestClient` methods for the four documented families previewed in the gap
   list — `device` (`GET /v2/devices/{deviceId}`), `contacts` / `contact`

@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use common::{json_response, no_content, response, static_auth, Body, MockTransport};
 use sipgate_flow::{
-    Error, FlowClient, OutboundCall, OutboundCallReceipt, Result, StaticToken, Token, TokenSource,
+    AiWebhookSettings, Error, FlowClient, OutboundCall, OutboundCallReceipt, Result, StaticToken,
+    Token, TokenSource, TtsVoice,
 };
 
 const FLOW_ID: &str = "e3670012-96a3-4ae5-ac42-87abe22015c3";
@@ -433,4 +434,180 @@ fn a_documented_receipt_body_parses_on_its_own() {
     let receipt = OutboundCallReceipt::parse(br#"{"callSid":"c-42"}"#).expect("documented body");
     assert_eq!(receipt.call_sid(), Some("c-42"));
     assert!(OutboundCallReceipt::parse(b"not json").is_err());
+}
+
+#[tokio::test]
+async fn updating_the_ai_webhook_puts_the_documented_body() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/json")],
+        br#"{"webhookUrl":"https://example.com/ai-flow"}"#,
+    ));
+    let client = client(transport.clone());
+
+    let settings = AiWebhookSettings::new("https://example.com/ai-flow").expect("valid");
+    let body = client.update_ai_webhook(&settings).await.expect("updated");
+    assert_eq!(body["webhookUrl"], "https://example.com/ai-flow");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "PUT");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/ai-webhooks");
+    assert_eq!(recorded.auth.bearer(), Some("access-token"));
+    assert_eq!(
+        recorded.body,
+        Body::Json(serde_json::json!({"webhookUrl": "https://example.com/ai-flow"}))
+    );
+}
+
+#[tokio::test]
+async fn reading_the_ai_webhook_gets_the_documented_path() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/json")],
+        br#"{"webhook_url":"https://example.com/hook"}"#,
+    ));
+    let client = client(transport.clone());
+
+    let settings = client.ai_webhook().await.expect("read");
+    assert_eq!(settings.webhook_url(), "https://example.com/hook");
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "GET");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/ai-webhooks");
+    assert_eq!(recorded.body, Body::Empty);
+}
+
+#[tokio::test]
+async fn a_missing_ai_webhook_stays_a_documented_404_api_error() {
+    let transport = MockTransport::new();
+    transport.push_response(response(404, &[], b"not configured"));
+    let error = client(transport)
+        .ai_webhook()
+        .await
+        .expect_err("no webhook configured");
+    assert!(matches!(
+        error,
+        Error::Api { status: 404, ref body, retryable: false, ambiguous: false, .. }
+            if body == "not configured"
+    ));
+}
+
+#[tokio::test]
+async fn listing_tts_voices_accepts_the_documented_string_catalogue() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/json")],
+        br#"{"items":["SIPGATE_VOICE", "RACHEL", "DE_DE_FLORIAN"],"extra":true}"#,
+    ));
+    let client = client(transport.clone());
+
+    let voices = client.tts_voices().await.expect("voices");
+    assert_eq!(
+        voices.iter().map(TtsVoice::id).collect::<Vec<_>>(),
+        ["SIPGATE_VOICE", "RACHEL", "DE_DE_FLORIAN"]
+    );
+
+    let recorded = transport.only_call();
+    assert_eq!(recorded.method.as_str(), "GET");
+    assert_eq!(recorded.url, "https://api.sipgate.com/v3/tts/voices");
+}
+
+#[tokio::test]
+async fn listing_tts_voices_accepts_richer_voice_objects() {
+    let transport = MockTransport::new();
+    transport.push_response(response(
+        200,
+        &[("Content-Type", "application/json")],
+        br#"{"items":[{"voiceId":"v1","name":"Kai","languages":["de","en"],"previewUrl":"https://example.com/a.mp3","recommended":true,"beta":false,"vendor":"future"}]}"#,
+    ));
+
+    let voices = client(transport).tts_voices().await.expect("voices");
+    let voice = voices.first().expect("one voice");
+    assert_eq!(voice.id(), "v1");
+    assert_eq!(voice.name(), Some("Kai"));
+    assert_eq!(voice.languages(), ["de", "en"]);
+    assert_eq!(voice.preview_url(), Some("https://example.com/a.mp3"));
+    assert_eq!(voice.recommended(), Some(true));
+    assert_eq!(voice.beta(), Some(false));
+    assert_eq!(voice.raw()["vendor"], "future");
+}
+
+#[tokio::test]
+async fn an_empty_tts_voice_catalogue_is_a_validation_error() {
+    let transport = MockTransport::new();
+    transport.push_response(response(200, &[], br#"{"items":[]}"#));
+    let error = client(transport)
+        .tts_voices()
+        .await
+        .expect_err("empty list");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "tts_voices",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn ai_webhook_settings_validate_the_url_shape() {
+    assert_eq!(
+        AiWebhookSettings::new("https://example.com/hook")
+            .expect("valid")
+            .to_json(),
+        serde_json::json!({"webhookUrl": "https://example.com/hook"})
+    );
+    assert!(AiWebhookSettings::new("https://example.com").is_ok());
+    assert!(AiWebhookSettings::new("https://example.com/").is_ok());
+    assert!(AiWebhookSettings::new("https://example.com/abcdefgh").is_ok());
+    assert!(AiWebhookSettings::new("http://example.com/hook").is_err());
+    assert!(AiWebhookSettings::new("HTTP://example.com/hook").is_err());
+    assert!(AiWebhookSettings::new("").is_err());
+    assert!(AiWebhookSettings::new("example.com/hook").is_err());
+    assert!(AiWebhookSettings::new("https://").is_err());
+    assert!(AiWebhookSettings::new("https://user:secret@example.com").is_err());
+    assert!(AiWebhookSettings::new("https://example.com/a b").is_err());
+}
+
+#[test]
+fn ai_webhook_debug_does_not_reveal_the_whole_url() {
+    let settings = AiWebhookSettings::new("https://example.com/secret-hook").expect("valid");
+    let rendered = format!("{settings:?}");
+    assert!(rendered.contains("example.com"), "{rendered}");
+    assert!(!rendered.contains("secret-hook"), "{rendered}");
+}
+
+#[test]
+fn tts_voice_decodes_the_string_and_object_shapes() {
+    assert_eq!(
+        TtsVoice::from_json(serde_json::json!("SIPGATE_VOICE"))
+            .expect("string entry")
+            .id(),
+        "SIPGATE_VOICE"
+    );
+    let voice = TtsVoice::from_json(serde_json::json!({
+        "voice_id": "v2",
+        "label": "Kai",
+        "language": "de",
+    }))
+    .expect("object entry");
+    assert_eq!(voice.id(), "v2");
+    assert_eq!(voice.name(), Some("Kai"));
+    assert_eq!(voice.languages(), ["de"]);
+    assert!(TtsVoice::from_json(serde_json::json!({})).is_err());
+    assert!(TtsVoice::from_json(serde_json::json!("")).is_err());
+}
+
+#[test]
+fn ai_webhook_settings_reads_the_documented_json_body() {
+    let settings =
+        AiWebhookSettings::from_json(&serde_json::json!({"webhookUrl": "https://x.test/hook"}));
+    assert_eq!(settings.webhook_url(), "https://x.test/hook");
+    assert_eq!(
+        AiWebhookSettings::from_json(&serde_json::json!({})).webhook_url(),
+        ""
+    );
 }
