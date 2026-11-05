@@ -7,11 +7,11 @@
 
 #![cfg(feature = "http")]
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sipgate_flow::transport::{Method, Request, RequestBody, Response, Security, Transport};
 use sipgate_flow::{Error, ReqwestTransport};
@@ -27,35 +27,28 @@ impl TestServer {
     /// Starts a server that answers the first connection with `response`, after
     /// waiting `delay`.
     fn start(response: &'static str, delay: Duration) -> Self {
+        Self::start_sequence(vec![response], delay)
+    }
+
+    /// Starts a server that answers a sequence of connections, one response per
+    /// request. Later connections are accepted until a short deadline, so a
+    /// client that follows a redirect can be observed without hanging a
+    /// client that does not.
+    fn start_sequence(responses: Vec<&'static str>, delay: Duration) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let addr: SocketAddr = listener.local_addr().expect("local addr");
         let received = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
         let handle = std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_millis(300)))
-                .expect("read timeout");
-            let mut buffer = [0_u8; 4096];
-            let mut seen_headers = false;
-            while let Ok(read) = stream.read(&mut buffer) {
-                if read == 0 {
-                    break;
-                }
-                {
-                    let mut collected = sink.lock().expect("lock");
-                    collected.extend_from_slice(&buffer[..read]);
-                    seen_headers |= collected.windows(4).any(|w| w == b"\r\n\r\n");
-                }
-                if seen_headers {
-                    break;
-                }
+            for (index, response) in responses.into_iter().enumerate() {
+                let Some(mut stream) = accept_request(&listener, index == 0) else {
+                    return;
+                };
+                read_request(&mut stream, &sink);
+                std::thread::sleep(delay);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
             }
-            std::thread::sleep(delay);
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
         });
         Self {
             base: format!("http://{addr}"),
@@ -76,6 +69,54 @@ impl TestServer {
         }
         let bytes = self.received.lock().expect("lock").clone();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+/// Accepts the first connection forever, later connections for a short window.
+fn accept_request(listener: &TcpListener, blocking: bool) -> Option<std::net::TcpStream> {
+    if blocking {
+        let (stream, _) = listener.accept().ok()?;
+        return Some(stream);
+    }
+
+    listener.set_nonblocking(true).ok()?;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).ok()?;
+                return Some(stream);
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Reads one HTTP request into `sink`, stopping after the header block.
+fn read_request(stream: &mut std::net::TcpStream, sink: &Arc<Mutex<Vec<u8>>>) {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .expect("read timeout");
+    let mut buffer = [0_u8; 4096];
+    let mut seen_headers = false;
+    while let Ok(read) = stream.read(&mut buffer) {
+        if read == 0 {
+            break;
+        }
+        {
+            let mut collected = sink.lock().expect("lock");
+            collected.extend_from_slice(&buffer[..read]);
+            seen_headers |= collected.windows(4).any(|w| w == b"\r\n\r\n");
+        }
+        if seen_headers {
+            break;
+        }
     }
 }
 
@@ -302,6 +343,85 @@ async fn a_non_success_status_is_returned_rather_than_raised() {
     assert_eq!(response.text(), "busy!");
     assert!(!response.is_success());
     let _ = server.received();
+}
+
+#[tokio::test]
+async fn a_default_transport_does_not_follow_a_redirect() {
+    let mut server = TestServer::start_sequence(
+        vec![
+            "HTTP/1.1 302 Found\r\nLocation: /v2/sessions/sms-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            OK_JSON,
+        ],
+        Duration::ZERO,
+    );
+    let url = server.url("/v2/sessions/sms");
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(Method::Post, &url, Security::Bearer("t"), &body);
+
+    let response = ReqwestTransport::new()
+        .execute(request)
+        .await
+        .expect("the redirect is returned to the caller");
+    assert_eq!(response.status(), 302);
+    assert_eq!(response.header("location"), Some("/v2/sessions/sms-final"));
+
+    let seen = server.received();
+    assert_eq!(seen.matches("POST /v2/sessions/sms").count(), 1, "{seen}");
+    assert!(!seen.contains("/v2/sessions/sms-final"), "{seen}");
+}
+
+#[tokio::test]
+async fn a_default_transport_does_not_resend_a_post_after_307() {
+    let mut server = TestServer::start_sequence(
+        vec![
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: /v2/sessions/sms-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            OK_JSON,
+        ],
+        Duration::ZERO,
+    );
+    let url = server.url("/v2/sessions/sms");
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(Method::Post, &url, Security::Bearer("t"), &body);
+
+    let response = ReqwestTransport::new()
+        .execute(request)
+        .await
+        .expect("the redirect is returned to the caller");
+    assert_eq!(response.status(), 307);
+    assert_eq!(response.header("location"), Some("/v2/sessions/sms-final"));
+
+    let seen = server.received();
+    assert_eq!(seen.matches("POST /v2/sessions/sms").count(), 1, "{seen}");
+    assert!(!seen.contains("/v2/sessions/sms-final"), "{seen}");
+}
+
+#[tokio::test]
+async fn a_preconfigured_client_can_opt_into_redirects() {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(1))
+        .build()
+        .expect("redirect client");
+    let mut server = TestServer::start_sequence(
+        vec![
+            "HTTP/1.1 302 Found\r\nLocation: /v2/sessions/sms-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            OK_JSON,
+        ],
+        Duration::ZERO,
+    );
+    let url = server.url("/v2/sessions/sms");
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(Method::Post, &url, Security::Bearer("t"), &body);
+
+    let response = ReqwestTransport::from_client(client)
+        .execute(request)
+        .await
+        .expect("the caller opted into redirects");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.json().expect("json")["sessionId"], "s0");
+
+    let seen = server.received();
+    assert!(seen.contains("POST /v2/sessions/sms"), "{seen}");
+    assert!(seen.contains("GET /v2/sessions/sms-final"), "{seen}");
 }
 
 #[tokio::test]

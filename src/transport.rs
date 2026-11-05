@@ -472,6 +472,10 @@ pub trait Transport: Send + Sync {
 /// `reqwest`-based transport, enabled by default via the `http` feature.
 ///
 /// The inner client is cheap to clone and safe to share across tasks.
+/// Default construction does not follow redirects: a 3xx reaches the caller as
+/// a normal response so it can classify the redirect. Use
+/// [`ReqwestTransport::from_client`] when redirect-following is deliberately
+/// configured by the caller.
 ///
 /// ```no_run
 /// # #[cfg(feature = "http")]
@@ -484,14 +488,14 @@ pub trait Transport: Send + Sync {
 /// # }
 /// ```
 #[cfg(feature = "http")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
-    client: reqwest::Client,
+    client: std::result::Result<reqwest::Client, String>,
 }
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client (rustls, redirects followed).
+    /// Creates a transport with a default client (rustls, redirects disabled).
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -499,18 +503,61 @@ impl ReqwestTransport {
     /// ```
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(client) => Self::from_client(client),
+            Err(error) => Self {
+                client: Err(format!("reqwest client construction failed: {error}")),
+            },
+        }
+    }
+
+    /// Creates a transport from an already configured [`reqwest::Client`].
+    ///
+    /// This preserves the caller's client settings, including any redirect
+    /// policy. Use it when redirect-following is deliberately enabled.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::ReqwestTransport;
+    ///
+    /// let client = reqwest::Client::builder()
+    ///     .timeout(std::time::Duration::from_secs(5))
+    ///     .build()?;
+    /// let transport = ReqwestTransport::from_client(client);
+    /// # let _ = transport;
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(feature = "http"))]
+    /// # fn main() {}
+    /// ```
+    #[must_use]
+    pub fn from_client(client: reqwest::Client) -> Self {
+        Self { client: Ok(client) }
+    }
+}
+
+#[cfg(feature = "http")]
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(feature = "http")]
 impl Transport for ReqwestTransport {
     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+        let client = self.client.as_ref().map_err(|message| {
+            Error::transport_terminal(format!("reqwest client unavailable: {message}"))
+        })?;
         let mut builder = match request.method {
-            Method::Get => self.client.get(request.url),
-            Method::Post => self.client.post(request.url),
-            Method::Put => self.client.put(request.url),
-            Method::Delete => self.client.delete(request.url),
+            Method::Get => client.get(request.url),
+            Method::Post => client.post(request.url),
+            Method::Put => client.put(request.url),
+            Method::Delete => client.delete(request.url),
         };
         builder = match request.security {
             Security::None => builder,
