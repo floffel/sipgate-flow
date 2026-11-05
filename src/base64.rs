@@ -163,9 +163,12 @@ const fn reason(err: &DecodeError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_encoded_len, reason, MAX_ENCODED_LEN};
+    use super::{
+        check_encoded_len, decode, encode, encoded_len, is_valid, reason, MAX_ENCODED_LEN,
+    };
     use crate::Error;
     use base64::DecodeError;
+    use proptest::prelude::*;
 
     #[test]
     fn every_decoder_error_maps_to_a_distinct_reason() {
@@ -201,6 +204,72 @@ mod tests {
                 assert!(message.contains(&MAX_ENCODED_LEN.to_string()));
             }
             other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn padding_boundaries_are_exact() {
+        let cases: &[(&str, Option<&[u8]>)] = &[
+            ("", Some(&[])),
+            (">", None),
+            ("=", None),
+            ("====", None),
+            ("Zg==", Some(b"f")),
+            ("Zg=", None),
+            ("Zg===", None),
+            ("Zm8=", Some(b"fo")),
+            ("Zm8", None),
+            ("Zm9v", Some(b"foo")),
+            ("Zm9v=", None),
+            ("Zm9vYg==", Some(b"foob")),
+            ("Zm9vYg=", None),
+            ("Zm9vYmE=", Some(b"fooba")),
+            ("Zm9vYmE", None),
+            ("AA==", Some(&[0])),
+            ("AAA=", Some(&[0, 0])),
+            ("AAAA", Some(&[0, 0, 0])),
+            ("AB==", None),
+            ("AAB=", None),
+            ("A", None),
+            ("AA", None),
+            ("AAA", None),
+            ("AAAAA", None),
+            ("A===", None),
+            ("AA=A", None),
+            ("AA==AA==", None),
+        ];
+
+        for &(input, expected) in cases {
+            assert_eq!(is_valid(input), expected.is_some(), "{input:?}");
+            match (decode(input), expected) {
+                (Ok(decoded), Some(expected)) => {
+                    assert_eq!(decoded, expected, "{input:?}");
+                    assert_eq!(encode(&decoded), input, "{input:?}");
+                    assert_eq!(encoded_len(decoded.len()), input.len(), "{input:?}");
+                }
+                (Err(_), None) => {}
+                (Ok(decoded), None) => {
+                    panic!("{input:?} decoded unexpectedly to {decoded:?}");
+                }
+                (Err(error), Some(expected)) => {
+                    panic!("{input:?} should decode to {expected:?}, got {error:?}");
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_bytes_round_trip(bytes in prop::collection::vec(any::<u8>(), 0..=8192)) {
+            let encoded = encode(&bytes);
+            prop_assert!(is_valid(&encoded));
+            prop_assert_eq!(encoded.len(), encoded_len(bytes.len()));
+            prop_assert_eq!(decode(&encoded).expect("our own encoding must decode"), bytes);
+        }
+
+        #[test]
+        fn is_valid_agrees_with_decode(input in ".{0,512}") {
+            prop_assert_eq!(is_valid(&input), decode(&input).is_ok());
         }
     }
 }
