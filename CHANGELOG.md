@@ -10,6 +10,14 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* The flagship crate example no longer teaches failure-to-default. It used
+  `event.session_id().unwrap_or_default()`, silently substituting an empty
+  session id and returning `200` as if the action were valid. The example now
+  uses `let Some(session) = event.session_id() else { return Ok(FlowResponse::none()) };`,
+  and the doctest actually executes both branches (present and missing session
+  id) instead of only the branch that never needed the fallback. Action builders
+  already reject an empty session id with `Error::Validation { field:
+  "session_id", .. }`, which a regression test now pins.
 * Retry pacing now has a hard `MIN_RETRY_DELAY` floor. `with_base_delay`,
   `with_max_delay`, local backoff and `Retry-After` values can no longer produce
   a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer

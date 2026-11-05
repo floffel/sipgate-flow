@@ -21,7 +21,21 @@
 //! # Receiving an event and answering it
 //!
 //! ```
-//! use sipgate_flow::{Action, Event, EventPayload, FlowResponse, WebhookVerifier};
+//! use sipgate_flow::{Action, Error, Event, EventPayload, FlowResponse, WebhookVerifier};
+//!
+//! /// Answers a verified event. A missing session id means the event cannot be
+//! /// addressed, so the handler returns `204` instead of substituting a default.
+//! fn answer(event: &Event) -> Result<FlowResponse, Error> {
+//!     let Some(session) = event.session_id() else {
+//!         return Ok(FlowResponse::none());
+//!     };
+//!     match event.payload() {
+//!         EventPayload::UserSpeak { text, .. } if text.contains("Hilfe") => {
+//!             Ok(FlowResponse::one(Action::speak(session, "Ich verbinde.")?))
+//!         }
+//!         _ => Ok(FlowResponse::none()),
+//!     }
+//! }
 //!
 //! let verifier = WebhookVerifier::new("shared-secret")?;
 //! let event = verifier.verify_and_parse(
@@ -29,14 +43,15 @@
 //!     Some("application/json"),
 //!     br#"{"type":"user_speak","text":"Ich brauche Hilfe","session":{"id":"s1"}}"#,
 //! )?;
+//! assert_eq!(answer(&event)?.status(), 200);
 //!
-//! let response = match event.payload() {
-//!     EventPayload::UserSpeak { text, .. } if text.contains("Hilfe") => {
-//!         FlowResponse::one(Action::speak(event.session_id().unwrap_or_default(), "Ich verbinde.")?)
-//!     }
-//!     _ => FlowResponse::none(),
-//! };
-//! assert_eq!(response.status(), 200);
+//! // An event without a session id is unactionable, not a reason to guess.
+//! let headless = verifier.verify_and_parse(
+//!     Some("shared-secret"),
+//!     Some("application/json"),
+//!     br#"{"type":"user_speak","text":"Ich brauche Hilfe"}"#,
+//! )?;
+//! assert_eq!(answer(&headless)?.status(), 204);
 //! # Ok::<(), sipgate_flow::Error>(())
 //! ```
 //!
