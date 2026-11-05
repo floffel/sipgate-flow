@@ -43,6 +43,12 @@ with the pre-1.0 reading described in the README section *Versioning*.
 * The crate-root REST example now states the PAT wire form accurately again:
   `PersonalAccessToken` sends `Authorization: Basic base64(<token id>:<token>)`
   and links to `transport::Security::Basic` for the same contract.
+* `Response::json` no longer synthesises an empty object for a body that never
+  arrived. A body that is empty or only ASCII whitespace is now `Value::Null`
+  for the statuses that forbid a body (`204`/`205`, via the new
+  `Response::is_no_content`) and a typed `Error::EmptyBody` for every other
+  status, so a truncated or proxy-stripped `200` fails closed instead of
+  parsing to a `{}` whose every field lookup yields `Null`.
 * The minimal configuration (`--no-default-features`) now builds clean under
   `-D warnings`: the crate-internal transport-error constructor is `http`-gated
   (nothing outside the `reqwest` adapter calls it), and the two intra-doc links

@@ -626,6 +626,64 @@ fn every_accessor_a_caller_can_reach_returns_what_it_was_built_with() {
 }
 
 #[test]
+fn a_no_content_status_yields_json_null_and_a_lost_body_is_an_empty_body_error() {
+    use sipgate_flow::transport::Response;
+    use sipgate_flow::Error;
+
+    // The valid case: `204`/`205` are documented to carry no body, so an empty
+    // body is `Null` (a genuine "no value") on both sides of the boundary.
+    for status in [204, 205] {
+        let empty = Response::new(status, std::iter::empty(), Vec::new());
+        assert!(empty.is_no_content(), "{status}");
+        assert_eq!(
+            empty.json().expect("no-content body"),
+            serde_json::Value::Null
+        );
+    }
+
+    // A whitespace-only body on a body-forbidding status is still "no value",
+    // not a parse failure: `b""` and `b"\n\t"` are the boundary pair.
+    let whitespace = Response::new(204, std::iter::empty(), b"\n  \t".to_vec());
+    assert_eq!(
+        whitespace.json().expect("whitespace only"),
+        serde_json::Value::Null
+    );
+
+    // Just outside: a 2xx that documents a JSON body (200 here) with the same
+    // empty and whitespace-only payloads must fail closed, not synthesise `{}`.
+    for body in [&b""[..], b"\n\t", b"   "] {
+        let lost = Response::new(200, std::iter::empty(), body.to_vec());
+        assert!(!lost.is_no_content(), "{body:?}");
+        assert!(
+            matches!(lost.json(), Err(Error::EmptyBody)),
+            "an empty 200 body must not look like a parsed default: {body:?}"
+        );
+    }
+
+    // A real (non-empty) JSON body still parses on a success status, and the
+    // empty-object body `{}` is untouched by the empty-body branch.
+    let object = Response::new(200, std::iter::empty(), b"{}".to_vec());
+    assert_eq!(object.json().expect("empty object"), serde_json::json!({}));
+    let populated = Response::new(200, std::iter::empty(), br#"{"sessionId":"s0"}"#.to_vec());
+    assert_eq!(populated.json().expect("json")["sessionId"], "s0");
+}
+
+#[test]
+fn a_leading_bom_is_rejected_as_invalid_json_not_silently_stripped() {
+    use sipgate_flow::transport::Response;
+    use sipgate_flow::Error;
+
+    // A BOM is not valid JSON for `serde_json`, and it is not whitespace, so it
+    // takes the parse path and fails with a typed error carrying the source.
+    let with_bom = Response::new(200, std::iter::empty(), b"\xEF\xBB\xBF{}".to_vec());
+    let error = with_bom.json().expect_err("a BOM is not JSON");
+    assert!(matches!(error, Error::Json { .. }), "{error:?}");
+    assert!(std::error::Error::source(&error).is_some(), "{error:?}");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert!(!error.is_ambiguous(), "{error:?}");
+}
+
+#[test]
 fn a_status_lookup_answers_none_for_every_error_without_one() {
     // The `Error::status` fallthrough arm: a validation, secret or ambiguous
     // error must not invent a status.

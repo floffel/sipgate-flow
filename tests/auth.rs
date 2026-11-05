@@ -596,7 +596,9 @@ impl Transport for FlakyTokenTransport {
             }
             return Ok(json_response(&token_value("abc")));
         }
-        Ok(common::no_content())
+        // The api call here is `GET /v2/calls`, which really answers
+        // `200 {"data":[...]}` (the documented envelope), not `204`.
+        Ok(json_response(&serde_json::json!({"data": []})))
     }
 }
 
