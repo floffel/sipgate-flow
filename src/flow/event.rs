@@ -733,11 +733,14 @@ impl Event {
         if body.iter().all(u8::is_ascii_whitespace) {
             return Err(Error::EmptyBody);
         }
-        let header: RawEventHeader = serde_json::from_slice(body)?;
+        let header: RawEventHeader = serde_json::from_slice(body).map_err(Error::json_parse)?;
         if header.kind.as_deref().is_some_and(is_known_kind) {
-            Self::from_raw(serde_json::from_slice(body)?)
+            Self::from_raw(serde_json::from_slice(body).map_err(Error::json_parse)?)
         } else {
-            Ok(Self::from_unknown(header, serde_json::from_slice(body)?))
+            Ok(Self::from_unknown(
+                header,
+                serde_json::from_slice(body).map_err(Error::json_parse)?,
+            ))
         }
     }
 

@@ -89,7 +89,7 @@ pub const DEFAULT_LIFETIME: Duration = Duration::from_secs(300);
 ///     "access_token": "a",
 ///     "expires_in": u64::MAX,
 /// }));
-/// assert!(matches!(beyond, Err(Error::TokenResponse(_))));
+/// assert!(matches!(beyond, Err(Error::TokenResponse { .. })));
 /// # Ok::<(), Error>(())
 /// ```
 pub const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
@@ -103,7 +103,7 @@ pub const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 fn token_lifetime(seconds: u64) -> Result<Duration> {
     let lifetime = Duration::from_secs(seconds);
     if lifetime > MAX_TOKEN_LIFETIME {
-        return Err(Error::TokenResponse(format!(
+        return Err(Error::token_response(format!(
             "expires_in of {seconds} seconds exceeds the accepted maximum of {} seconds",
             MAX_TOKEN_LIFETIME.as_secs()
         )));
@@ -113,8 +113,8 @@ fn token_lifetime(seconds: u64) -> Result<Duration> {
 
 fn cached_lifetime(lifetime: Duration, margin: Duration) -> Result<Duration> {
     if lifetime.is_zero() {
-        return Err(Error::TokenResponse(
-            "expires_in of 0 seconds leaves no usable token lifetime".into(),
+        return Err(Error::token_response(
+            "expires_in of 0 seconds leaves no usable token lifetime",
         ));
     }
     // The margin may be validly configured for a long-lived issuer and still be
@@ -123,7 +123,7 @@ fn cached_lifetime(lifetime: Duration, margin: Duration) -> Result<Duration> {
     let margin = margin.min(lifetime / 2);
     lifetime
         .checked_sub(margin)
-        .ok_or_else(|| Error::TokenResponse("refresh margin leaves no usable lifetime".into()))
+        .ok_or_else(|| Error::token_response("refresh margin leaves no usable lifetime"))
 }
 
 /// A source of "now", so token expiry is testable without waiting.
@@ -385,13 +385,24 @@ impl Token {
     /// [`Error::TokenResponse`] for a missing or empty `access_token`, a
     /// non-object body, or an `expires_in` above [`MAX_TOKEN_LIFETIME`].
     pub fn from_json(value: &Value) -> Result<Self> {
-        let access_token = value
-            .get("access_token")
-            .and_then(Value::as_str)
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| Error::TokenResponse("missing or empty access_token".into()))?;
+        let access_token = match value.get("access_token") {
+            Some(Value::String(token)) if !token.is_empty() => token,
+            Some(Value::String(_)) => {
+                return Err(Error::token_response("missing or empty access_token"));
+            }
+            Some(other) => {
+                return match serde_json::from_value::<String>(other.clone()) {
+                    Err(source) => Err(Error::token_response_with_source(
+                        "access_token must be a string",
+                        source,
+                    )),
+                    Ok(_) => Err(Error::token_response("access_token must be a string")),
+                };
+            }
+            None => return Err(Error::token_response("missing or empty access_token")),
+        };
         Ok(Self {
-            access_token: access_token.to_string(),
+            access_token: access_token.clone(),
             token_type: value
                 .get("token_type")
                 .and_then(Value::as_str)
@@ -1113,7 +1124,7 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             .clock
             .now()?
             .checked_add(usable_for)
-            .ok_or_else(|| Error::TokenResponse("token expiry overflows the clock".into()))?;
+            .ok_or_else(|| Error::token_response("token expiry overflows the clock"))?;
         let mut guard = self
             .cache
             .lock()

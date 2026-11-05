@@ -193,7 +193,9 @@ fn an_ambiguous_error_is_never_retryable_whatever_it_carries() {
 #[test]
 fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
     let cases = [
-        Error::from(serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON")),
+        Error::json_parse(
+            serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON"),
+        ),
         Error::EmptyBody,
         Error::validation("text", "must not be empty"),
         Error::EmptyCredentials,
@@ -203,7 +205,7 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
         Error::unsupported_content_type("text/plain"),
         Error::BodyTooLarge { size: 2, limit: 1 },
         Error::auth_rejected(401, "denied"),
-        Error::TokenResponse("missing access token".to_string()),
+        Error::token_response("missing access token"),
         Error::invalid_request("path", "must start with /"),
         Error::Unauthorized,
         Error::transport_before_write("connect: dns failure"),

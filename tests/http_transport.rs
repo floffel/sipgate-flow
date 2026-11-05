@@ -255,8 +255,21 @@ async fn a_refused_connection_is_a_retryable_transport_error() {
         .await
         .expect_err("nothing listens there");
     assert!(error.is_retryable(), "{error:?}");
+    let source = std::error::Error::source(&error).expect("the reqwest error is reachable");
+    let reqwest_error = source
+        .downcast_ref::<reqwest::Error>()
+        .expect("the source is the reqwest failure");
+    assert!(
+        reqwest_error.is_connect(),
+        "the source still answers the retry question: {reqwest_error}"
+    );
     match error {
-        Error::Transport { message, .. } => assert!(message.starts_with("connect: "), "{message}"),
+        Error::Transport {
+            message, source, ..
+        } => {
+            assert!(message.starts_with("connect: "), "{message}");
+            assert!(source.is_some(), "the error keeps its cause");
+        }
         other => panic!("expected a transport error, got {other:?}"),
     }
 }

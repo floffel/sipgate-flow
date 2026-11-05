@@ -13,6 +13,13 @@ with the pre-1.0 reading described in the README section *Versioning*.
 * Event parsing now rejects bodies above `MAX_EVENT_BODY_BYTES` before
   deserialising, and unknown event types keep their raw JSON without building
   the duplicate `Value` trees that the old parser materialised.
+* Error cause chains are no longer flattened to `String`:
+  `Error::TokenResponse` and `Error::Transport` keep the underlying
+  `serde_json`/`reqwest` error as their `source`, and the blanket
+  `#[from] serde_json::Error` is gone. Parsing uses `Error::json_parse` while an
+  outbound encode failure is reported as the distinct `Error::JsonEncode`, so a
+  request body this crate emitted can no longer be mislabelled as an invalid
+  remote payload.
 * Transport failures with an unknown write phase now fail closed:
   `Error::transport` returns an ambiguous outcome instead of a retryable one,
   while the new `Error::transport_before_write` marks DNS, TCP connect and TLS

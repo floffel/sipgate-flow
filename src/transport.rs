@@ -415,7 +415,7 @@ impl Response {
         if self.body.iter().all(u8::is_ascii_whitespace) {
             return Ok(serde_json::json!({}));
         }
-        serde_json::from_slice(&self.body).map_err(Error::from)
+        serde_json::from_slice(&self.body).map_err(Error::json_parse)
     }
 
     /// The body as UTF-8 text; invalid bytes are replaced, never an error.
@@ -588,7 +588,7 @@ impl Transport for ReqwestTransport {
         let response = builder
             .send()
             .await
-            .map_err(|error| describe_reqwest_error(&error, method))?;
+            .map_err(|error| describe_reqwest_error(error, method))?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -603,7 +603,7 @@ impl Transport for ReqwestTransport {
         let body = response
             .bytes()
             .await
-            .map_err(|error| describe_reqwest_error(&error, method))?
+            .map_err(|error| describe_reqwest_error(error, method))?
             .to_vec();
 
         Ok(Response::new(status, headers, body))
@@ -622,7 +622,7 @@ impl Transport for ReqwestTransport {
 ///   for `POST` it is [`Error::ambiguous`] - the SMS, fax or call may exist and
 ///   only the response was lost.
 #[cfg(feature = "http")]
-fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
+fn describe_reqwest_error(error: reqwest::Error, method: Method) -> Error {
     let after_write = error.is_timeout() || error.is_body() || error.is_decode();
     let kind = if error.is_builder() {
         "builder"
@@ -639,15 +639,14 @@ fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
     };
     // `reqwest::Error` renders the URL but never the Authorization header.
     let message = format!("{kind}: {error}");
+    // The real error answers `is_timeout()`/`is_connect()`, so it stays on the
+    // cause chain; only the sanitised rendering enters the message.
     if error.is_connect() {
-        Error::transport_before_write(message)
+        Error::transport_with_source(message, true, error)
     } else if !after_write {
-        Error::transport_terminal(message)
+        Error::transport_with_source(message, false, error)
     } else if method.is_idempotent() {
-        Error::Transport {
-            message,
-            retryable: true,
-        }
+        Error::transport_with_source(message, true, error)
     } else {
         Error::ambiguous(None, message)
     }
@@ -655,8 +654,7 @@ fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
 
 #[cfg(feature = "http")]
 fn serialize_json_body<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    serde_json::to_vec(value)
-        .map_err(|error| Error::transport_terminal(format!("body serialization failed: {error}")))
+    serde_json::to_vec(value).map_err(Error::json_encode)
 }
 
 #[cfg(feature = "http")]
@@ -668,6 +666,8 @@ fn serialize_form_body<T: serde::Serialize + ?Sized>(fields: &T) -> Result<Vec<u
 
 #[cfg(all(test, feature = "http"))]
 mod tests {
+    use crate::error::Error;
+
     use super::{serialize_form_body, serialize_json_body};
 
     struct FailingSerialize;
@@ -684,14 +684,23 @@ mod tests {
     }
 
     #[test]
-    fn json_body_serialization_failure_is_terminal() {
+    fn json_body_serialization_failure_is_an_encode_error_with_a_source() {
         let error = serialize_json_body(&FailingSerialize).expect_err("serialization fails");
+        assert!(matches!(error, Error::JsonEncode { .. }), "{error:?}");
+        assert!(
+            !matches!(error, Error::Json { .. }),
+            "encoding is not a parse failure: {error:?}"
+        );
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "the serde error stays reachable: {error:?}"
+        );
         assert!(!error.is_retryable(), "{error:?}");
         assert!(!error.is_ambiguous(), "{error:?}");
         assert!(
             error
                 .to_string()
-                .starts_with("transport error: body serialization failed: "),
+                .starts_with("could not encode JSON body: "),
             "{error}"
         );
     }
