@@ -455,12 +455,14 @@ pub(crate) fn api_error(
         RetryOutcome::Retry | RetryOutcome::Terminal => {
             Error::api(method, status, truncated, retry_after)
         }
-        RetryOutcome::Ambiguous => Error::ambiguous(
+        RetryOutcome::Ambiguous => Error::ambiguous_with_response(
             Some(status),
             format!(
                 "api error {status} after a {} request may already have been applied: {truncated}",
                 method.as_str()
             ),
+            body,
+            headers.iter().copied(),
         ),
     }
 }

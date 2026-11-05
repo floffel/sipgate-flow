@@ -63,6 +63,114 @@ async fn a_500_after_an_sms_post_is_ambiguous_and_sent_once() {
         "exactly one SMS left the process"
     );
     assert_eq!(sleeper.delays(), Vec::<Duration>::new());
+    assert_eq!(
+        error.ambiguous_body(),
+        Some("upstream died"),
+        "the one response that could resolve the ambiguity must survive"
+    );
+}
+
+#[tokio::test]
+async fn an_ambiguous_5xx_exposes_the_body_and_id_header_that_resolve_it() {
+    let (transport, _, client) = harness();
+    transport.push_response(response(
+        503,
+        &[("X-Sipgate-Sms-Id", "sms-42"), ("X-Request-Id", "req-9")],
+        b"{\"id\":\"sms-42\",\"status\":\"created\"}",
+    ));
+
+    let error = send_sms(&client).await.expect_err("503 after POST");
+
+    assert!(error.is_ambiguous(), "{error:?}");
+    assert!(!error.is_retryable(), "a retry could send a second SMS");
+    // The evidence that tells the caller whether the SMS already exists is
+    // reachable, which is the whole point of handing back the decision.
+    assert_eq!(
+        error.ambiguous_body(),
+        Some("{\"id\":\"sms-42\",\"status\":\"created\"}")
+    );
+    assert_eq!(
+        error.ambiguous_header("x-sipgate-sms-id"),
+        Some("sms-42"),
+        "header lookup is case-insensitive"
+    );
+    assert_eq!(error.ambiguous_header("X-Request-Id"), Some("req-9"));
+    assert_eq!(
+        error.ambiguous_header("retry-after"),
+        None,
+        "an absent header stays absent"
+    );
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn an_ambiguous_error_carries_no_response_when_the_connection_died() {
+    // A `POST` that dies mid-connection is ambiguous with nothing to inspect,
+    // so the accessors have a documented empty case rather than a panic.
+    let error = Error::ambiguous(None, "timeout after the write");
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+    assert_eq!(error.ambiguous_body(), None);
+    assert_eq!(error.ambiguous_header("x-sipgate-sms-id"), None);
+
+    // A 500 on a GET is retryable, not ambiguous, and exposes no body through
+    // the ambiguous accessors even though `Error::Api` keeps one.
+    let retryable = Error::api(Method::Get, 503, "maintenance", None);
+    assert!(!retryable.is_ambiguous());
+    assert_eq!(retryable.ambiguous_body(), None);
+    assert_eq!(retryable.ambiguous_header("x-request-id"), None);
+}
+
+#[tokio::test]
+async fn ambiguous_response_bounds_the_body_at_the_512_byte_limit() {
+    // Valid: exactly at the ceiling survives untouched.
+    let at_limit = "a".repeat(512);
+    let error = Error::ambiguous_with_response(
+        Some(500),
+        "lost",
+        at_limit.as_str(),
+        std::iter::empty::<(&str, &str)>(),
+    );
+    assert_eq!(error.ambiguous_body().map(str::len), Some(512));
+
+    // Just outside: a huge error page is cut down to the ceiling instead of
+    // being held whole or logged.
+    let over_limit = "a".repeat(5_000);
+    let error = Error::ambiguous_with_response(
+        Some(500),
+        "lost",
+        over_limit.as_str(),
+        std::iter::empty::<(&str, &str)>(),
+    );
+    let body = error.ambiguous_body().expect("bounded body");
+    assert!(
+        body.len() <= 512 && !body.is_empty(),
+        "the stored body is clamped to the 512 byte ceiling, got {}",
+        body.len()
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_response_never_keeps_credential_headers() {
+    let error = Error::ambiguous_with_response(
+        Some(500),
+        "lost",
+        "",
+        [
+            ("Authorization", "Bearer secret"),
+            ("Cookie", "session=secret"),
+            ("Set-Cookie", "sid=secret"),
+            ("X-Sipgate-Sms-Id", "sms-1"),
+        ],
+    );
+    for secret in ["authorization", "cookie", "set-cookie"] {
+        assert_eq!(
+            error.ambiguous_header(secret),
+            None,
+            "{secret} must not be retained on a logged error"
+        );
+    }
+    assert_eq!(error.ambiguous_header("X-Sipgate-Sms-Id"), Some("sms-1"));
 }
 
 #[tokio::test]
