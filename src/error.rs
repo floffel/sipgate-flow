@@ -284,6 +284,90 @@ pub enum Error {
         body: String,
     },
 
+    /// The Flow cannot start an outbound call because it has no phone number.
+    ///
+    /// sipgate documents `400 Bad Request` for this outcome on
+    /// `POST /v3/ai-flows/{aiFlowId}/call`. The failure is terminal: fixing the
+    /// Flow configuration is required before another call can succeed.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::call_outcome(400, "no phone number").expect("documented call status");
+    /// assert!(matches!(err, Error::FlowNotCallable { status: 400, .. }));
+    /// assert_eq!(err.status(), Some(400));
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[non_exhaustive]
+    #[error("flow has no phone number (http {status}): {body}")]
+    FlowNotCallable {
+        /// HTTP status returned for the rejected call request.
+        status: u16,
+        /// Response body, truncated to at most 512 bytes, with control
+        /// characters replaced by `U+FFFD`.
+        body: String,
+        /// Source context with the same status and sanitized body, so callers
+        /// that inspect cause chains do not lose the API details.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The Flow id does not identify an existing Flow.
+    ///
+    /// sipgate documents `404 Not Found` for this outcome on
+    /// `POST /v3/ai-flows/{aiFlowId}/call`. The failure is terminal: retrying
+    /// the same id cannot make the Flow appear.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::call_outcome(404, "flow not found").expect("documented call status");
+    /// assert!(matches!(err, Error::FlowNotFound { status: 404, .. }));
+    /// assert_eq!(err.status(), Some(404));
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[non_exhaustive]
+    #[error("flow does not exist (http {status}): {body}")]
+    FlowNotFound {
+        /// HTTP status returned for the rejected call request.
+        status: u16,
+        /// Response body, truncated to at most 512 bytes, with control
+        /// characters replaced by `U+FFFD`.
+        body: String,
+        /// Source context with the same status and sanitized body, so callers
+        /// that inspect cause chains do not lose the API details.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// The account has not been granted access to start calls for this Flow.
+    ///
+    /// sipgate documents `403 Forbidden` for this outcome on
+    /// `POST /v3/ai-flows/{aiFlowId}/call`. The failure is terminal: retrying
+    /// without the missing account permission cannot succeed.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::call_outcome(403, "access denied").expect("documented call status");
+    /// assert!(matches!(err, Error::AccessNotGranted { status: 403, .. }));
+    /// assert_eq!(err.status(), Some(403));
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[non_exhaustive]
+    #[error("access to call the flow was not granted (http {status}): {body}")]
+    AccessNotGranted {
+        /// HTTP status returned for the rejected call request.
+        status: u16,
+        /// Response body, truncated to at most 512 bytes, with control
+        /// characters replaced by `U+FFFD`.
+        body: String,
+        /// Source context with the same status and sanitized body, so callers
+        /// that inspect cause chains do not lose the API details.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// The request reached the point where the server could act on it, but no
     /// usable response came back - a 5xx on a `POST`, or a timeout/reset while
     /// waiting. The operation **may** have happened.
@@ -302,6 +386,13 @@ pub enum Error {
         /// What happened, without the request body or any credential.
         message: String,
     },
+}
+
+#[derive(Debug, Error)]
+#[error("api error {status}: {body}")]
+struct CallOutcomeContext {
+    status: u16,
+    body: String,
 }
 
 impl Error {
@@ -492,6 +583,58 @@ impl Error {
             retry_after,
             retryable,
             ambiguous,
+        }
+    }
+
+    /// Maps the documented `POST /v3/ai-flows/{aiFlowId}/call` failure statuses
+    /// to their typed, terminal outcomes.
+    ///
+    /// `400` becomes [`Error::FlowNotCallable`], `403` becomes
+    /// [`Error::AccessNotGranted`], and `404` becomes [`Error::FlowNotFound`].
+    /// Every other status returns [`None`] so callers can keep the existing
+    /// [`Error::Api`] or [`Error::Ambiguous`] behavior.
+    ///
+    /// The response body is truncated to at most 512 bytes at a UTF-8 boundary,
+    /// and control characters are replaced by `U+FFFD`, before it is stored on
+    /// the variant and on the source chain.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::call_outcome(403, "access denied").expect("documented call status");
+    /// assert!(matches!(err, Error::AccessNotGranted { status: 403, .. }));
+    /// assert_eq!(err.status(), Some(403));
+    /// assert!(!err.is_retryable());
+    /// assert!(std::error::Error::source(&err).is_some());
+    /// assert!(Error::call_outcome(429, "slow down").is_none());
+    /// ```
+    #[must_use]
+    pub fn call_outcome(status: u16, body: impl Into<String>) -> Option<Self> {
+        let body = safe_text(&body.into());
+        let context_body = body.clone();
+        let context = || {
+            Box::new(CallOutcomeContext {
+                status,
+                body: context_body.clone(),
+            }) as Box<dyn std::error::Error + Send + Sync>
+        };
+        match status {
+            400 => Some(Self::FlowNotCallable {
+                status,
+                body,
+                source: context(),
+            }),
+            403 => Some(Self::AccessNotGranted {
+                status,
+                body,
+                source: context(),
+            }),
+            404 => Some(Self::FlowNotFound {
+                status,
+                body,
+                source: context(),
+            }),
+            _ => None,
         }
     }
 
@@ -686,7 +829,10 @@ impl Error {
         match self {
             Self::Api { status, .. }
             | Self::AuthRejected { status, .. }
-            | Self::CallStartedUnknown { status, .. } => Some(*status),
+            | Self::CallStartedUnknown { status, .. }
+            | Self::FlowNotCallable { status, .. }
+            | Self::FlowNotFound { status, .. }
+            | Self::AccessNotGranted { status, .. } => Some(*status),
             Self::Ambiguous { status, .. } => *status,
             _ => None,
         }

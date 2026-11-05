@@ -218,6 +218,9 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
         Error::api(Method::Post, 400, "bad request", None),
         Error::api(Method::Post, 502, "bad gateway after POST", None),
         Error::api(Method::Get, 503, "maintenance", None),
+        Error::call_outcome(400, "flow has no phone number").expect("documented status"),
+        Error::call_outcome(403, "access not granted").expect("documented status"),
+        Error::call_outcome(404, "flow missing").expect("documented status"),
         Error::ambiguous(None, "timeout after the write"),
         Error::ambiguous(Some(500), "5xx after a POST"),
     ];

@@ -237,8 +237,8 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
     }
 
     /// Dials `request.to_phone_number` through the Flow. Success is the
-    /// documented `201 Created`; a 400 means the Flow has no phone number, 404
-    /// means the Flow does not exist.
+    /// documented `201 Created`; a 400 means the Flow has no phone number, 403
+    /// means call access was not granted, and 404 means the Flow does not exist.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -255,11 +255,15 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Api`] for a non-2xx answer, plus transport and auth
-    /// errors. A `201` response with an unparseable body, or any other `2xx`
-    /// response, becomes [`crate::Error::CallStartedUnknown`]: the call may
-    /// already be dialling, but no identifier is available. There is no retry:
-    /// starting a call twice would dial the number twice.
+    /// [`crate::Error::FlowNotCallable`] for `400`,
+    /// [`crate::Error::AccessNotGranted`] for `403`, and
+    /// [`crate::Error::FlowNotFound`] for `404`. Other non-2xx answers keep the
+    /// generic [`crate::Error::Api`] or [`crate::Error::Ambiguous`] behavior,
+    /// plus transport and auth errors. A `201` response with an unparseable
+    /// body, or any other `2xx` response, becomes
+    /// [`crate::Error::CallStartedUnknown`]: the call may already be dialling,
+    /// but no identifier is available. There is no retry: starting a call twice
+    /// would dial the number twice.
     pub async fn call(&self, request: &OutboundCall) -> Result<OutboundCallReceipt> {
         let path = format!("/v3/ai-flows/{}/call", request.ai_flow_id());
         let body = request.to_json();
@@ -295,11 +299,15 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
                 body: crate::retry::truncate_body(&response.text()),
             });
         }
+        let body = response.text();
+        if let Some(error) = Error::call_outcome(response.status(), body.as_str()) {
+            return Err(error);
+        }
         Err(crate::retry::api_error(
             Method::Post,
             response.status(),
             &response.headers(),
-            &response.text(),
+            &body,
         ))
     }
 }

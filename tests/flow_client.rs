@@ -56,13 +56,17 @@ async fn a_404_means_the_flow_does_not_exist() {
         .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
         .await
         .expect_err("404");
-    match error {
-        Error::Api { status, body, .. } => {
-            assert_eq!(status, 404);
-            assert!(body.contains("flow not found"));
-        }
-        other => panic!("expected an API error, got {other:?}"),
-    }
+    assert!(matches!(
+        error,
+        Error::FlowNotFound { status: 404, ref body, .. } if body.contains("flow not found")
+    ));
+    assert_eq!(error.status(), Some(404));
+    assert!(!error.is_retryable());
+    assert!(!error.is_ambiguous());
+    let source = std::error::Error::source(&error).expect("API context stays on the chain");
+    let rendered = source.to_string();
+    assert!(rendered.contains("404"), "{rendered}");
+    assert!(rendered.contains("flow not found"), "{rendered}");
 }
 
 #[tokio::test]
@@ -126,12 +130,59 @@ async fn a_non_201_success_is_a_dedicated_ambiguous_call_started_error() {
 #[tokio::test]
 async fn a_400_means_the_flow_has_no_phone_number() {
     let transport = MockTransport::new();
-    transport.push_response(response(400, &[], b""));
+    transport.push_response(response(400, &[], b"{\"error\":\"no phone number\"}"));
     let error = client(transport)
         .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
         .await
         .expect_err("400");
+    assert!(matches!(
+        error,
+        Error::FlowNotCallable { status: 400, ref body, .. } if body.contains("no phone number")
+    ));
     assert_eq!(error.status(), Some(400));
+    assert!(!error.is_retryable());
+    assert!(!error.is_ambiguous());
+    let source = std::error::Error::source(&error).expect("API context stays on the chain");
+    let rendered = source.to_string();
+    assert!(rendered.contains("400"), "{rendered}");
+    assert!(rendered.contains("no phone number"), "{rendered}");
+}
+
+#[tokio::test]
+async fn a_403_means_call_access_was_not_granted() {
+    let transport = MockTransport::new();
+    transport.push_response(response(403, &[], b"{\"error\":\"access denied\"}"));
+    let error = client(transport)
+        .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
+        .await
+        .expect_err("403");
+    assert!(matches!(
+        error,
+        Error::AccessNotGranted { status: 403, ref body, .. } if body.contains("access denied")
+    ));
+    assert_eq!(error.status(), Some(403));
+    assert!(!error.is_retryable());
+    assert!(!error.is_ambiguous());
+    let source = std::error::Error::source(&error).expect("API context stays on the chain");
+    let rendered = source.to_string();
+    assert!(rendered.contains("403"), "{rendered}");
+    assert!(rendered.contains("access denied"), "{rendered}");
+}
+
+#[tokio::test]
+async fn non_documented_call_failures_keep_the_existing_api_shape() {
+    let transport = MockTransport::new();
+    transport.push_response(response(402, &[], b"payment required"));
+    let error = client(transport)
+        .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
+        .await
+        .expect_err("402 remains a generic API failure");
+    assert!(matches!(
+        error,
+        Error::Api { status: 402, ref body, retryable: false, ambiguous: false, .. }
+            if body == "payment required"
+    ));
+    assert_eq!(error.status(), Some(402));
 }
 
 #[tokio::test]
