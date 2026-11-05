@@ -5,7 +5,8 @@
 //! that pins *which* of its tolerances this crate accepts — nothing here may
 //! quietly widen.
 
-use sipgate_flow::{base64, Error};
+use ::base64::DecodeError;
+use sipgate_flow::{base64, Base64Error, Error};
 
 /// The size ceiling has a just-inside and just-outside value: the encoded
 /// length for [`base64::MAX_DECODED_BYTES`] decodes, one four-character group
@@ -156,25 +157,66 @@ fn a_valid_string_re_encodes_to_itself() {
     }
 }
 
-/// Whatever `decode` reports, the reason travels as `Validation` on the
-/// `base64` field and never echoes the offending input back to the caller.
+/// Whatever `decode` reports, the reason travels as a typed `Base64` error and
+/// never echoes the offending input back to the caller.
 #[test]
 fn every_rejection_names_the_field_without_echoing_the_input() {
     for input in ["A", "A===", "AB==", "A A==", "Zm9v\u{0}", "-_-_"] {
         let err = base64::decode(input).expect_err("must be rejected");
         match &err {
-            Error::Validation { field, message } => {
-                assert_eq!(*field, "base64");
+            Error::Base64 { message, .. } => {
                 assert_ne!(message, "", "a reason must never be empty");
                 assert!(
                     !message.contains(input) && !message.contains('!'),
                     "message must not echo the input: {message:?}"
                 );
             }
-            other => panic!("expected Error::Validation, got {other:?}"),
+            other => panic!("expected Error::Base64, got {other:?}"),
         }
         assert!(!err.is_retryable(), "a malformed string is terminal");
         assert!(err.to_string().starts_with("invalid base64: "), "{err}");
+    }
+}
+
+/// Each real decoder failure class maps to its typed kind, keeps the
+/// underlying `DecodeError` as the source, and renders without byte/offset
+/// detail.
+#[test]
+fn each_decoder_failure_class_maps_to_its_kind_and_source() {
+    let cases = [
+        ("Zm9v!", Base64Error::InvalidByte),
+        ("A", Base64Error::InvalidLength),
+        ("Zg=", Base64Error::InvalidPadding),
+        ("AB==", Base64Error::InvalidLastSymbol),
+    ];
+
+    for (input, expected_kind) in cases {
+        let err = base64::decode(input).expect_err("must be rejected");
+        match &err {
+            Error::Base64 { kind, message, .. } => {
+                assert_eq!(*kind, expected_kind, "{input:?}");
+                assert_ne!(message, "", "{input:?}");
+            }
+            other => panic!("expected Error::Base64, got {other:?}"),
+        }
+
+        let source = std::error::Error::source(&err).expect("decoder source is reachable");
+        let decode_error = source
+            .downcast_ref::<DecodeError>()
+            .unwrap_or_else(|| panic!("{input:?}: {source}"));
+        match (expected_kind, decode_error) {
+            (Base64Error::InvalidByte, DecodeError::InvalidByte(..))
+            | (Base64Error::InvalidLength, DecodeError::InvalidLength(_))
+            | (Base64Error::InvalidPadding, DecodeError::InvalidPadding)
+            | (Base64Error::InvalidLastSymbol, DecodeError::InvalidLastSymbol { .. }) => {}
+            _ => panic!("{input:?}: expected {expected_kind:?}, got {decode_error:?}"),
+        }
+
+        let rendered = err.to_string();
+        assert!(rendered.starts_with("invalid base64: "), "{rendered}");
+        assert!(!rendered.contains(input), "{rendered}");
+        assert!(!rendered.contains("offset"), "{rendered}");
+        assert!(!rendered.contains("decoded as"), "{rendered}");
     }
 }
 
