@@ -10,6 +10,11 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Fixed
 
+* `RetryPolicy::delay(0, ...)` no longer schedules a full backoff step. The
+  parameter is documented as completed *failures*, so zero completed failures
+  now returns `None` instead of treating the first caller attempt index as an
+  already-failed try; the boundary is pinned in tests for 0, 1,
+  `max_attempts - 1`, `max_attempts` and `u32::MAX`.
 * The minimal configuration (`--no-default-features`) now builds clean under
   `-D warnings`: the crate-internal transport-error constructor is `http`-gated
   (nothing outside the `reqwest` adapter calls it), and the two intra-doc links

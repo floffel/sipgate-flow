@@ -183,21 +183,24 @@ impl RetryPolicy {
         self
     }
 
-    /// The wait after `attempts_failed` failed attempts, or `None` when the
-    /// budget is spent and the caller must surface the error.
+    /// The wait after `attempts_failed` failed attempts, or `None` when there
+    /// is no retry to schedule.
     ///
-    /// `attempts_failed` counts completed attempts: `1` means the first try
-    /// just failed. Local exponential backoff is jittered uniformly in
-    /// `[d/2, d]` after applying the ceiling; `Retry-After` is returned exactly
-    /// after applying the ceiling. Every returned wait is clamped to
-    /// [`MIN_RETRY_DELAY`]..=effective ceiling, where the effective ceiling is
-    /// `max_delay.max(MIN_RETRY_DELAY)`.
+    /// `attempts_failed` counts completed *failures*: `0` means nothing has
+    /// failed yet, so there is nothing to wait for and this returns `None`.
+    /// `1` means the first try just failed. Local exponential backoff is
+    /// jittered uniformly in `[d/2, d]` after applying the ceiling;
+    /// `Retry-After` is returned exactly after applying the ceiling. Every
+    /// returned wait is clamped to [`MIN_RETRY_DELAY`]..=effective ceiling,
+    /// where the effective ceiling is `max_delay.max(MIN_RETRY_DELAY)`.
     ///
     /// ```
     /// use std::time::Duration;
     /// use sipgate_flow::RetryPolicy;
     ///
     /// let policy = RetryPolicy::default().with_max_delay(Duration::from_secs(3));
+    /// // Nothing has failed yet: no retry is scheduled.
+    /// assert_eq!(policy.delay(0, None), None);
     /// // Retry-After is honoured but clamped to the ceiling.
     /// assert_eq!(
     ///     policy.delay(1, Some(Duration::from_secs(30))),
@@ -207,7 +210,7 @@ impl RetryPolicy {
     #[must_use]
     pub fn delay(&self, attempts_failed: u32, retry_after: Option<Duration>) -> Option<Duration> {
         let budget = self.max_attempts.max(1);
-        if attempts_failed >= budget {
+        if attempts_failed == 0 || attempts_failed >= budget {
             return None;
         }
 
