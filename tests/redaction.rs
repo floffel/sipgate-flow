@@ -9,7 +9,7 @@
 use proptest::prelude::*;
 use serde_json::json;
 use sipgate_flow::transport::{Method, Request, RequestBody, Security};
-use sipgate_flow::Error;
+use sipgate_flow::{Error, OutboundCall, OutboundCallReceipt};
 
 /// A value that must never appear in any rendering.
 const SECRET: &str = "s3cr3t-B7-cr3dential";
@@ -50,6 +50,34 @@ fn an_unauthenticated_request_says_so() {
     assert!(
         !rendered.contains("redacted"),
         "nothing to redact: {rendered}"
+    );
+}
+
+#[test]
+fn an_outbound_call_debug_masks_the_callee_number() {
+    let call = OutboundCall::new("flow-1", "e2", "+4915112345678").expect("valid outbound call");
+    let rendered = format!("{call:?}");
+
+    assert!(!rendered.contains("4915112345678"), "{rendered}");
+    assert!(rendered.contains("+491****5678"), "{rendered}");
+    assert!(rendered.contains("flow-1"), "{rendered}");
+    assert!(rendered.contains("e2"), "{rendered}");
+}
+
+#[test]
+fn an_outbound_call_receipt_debug_hides_the_raw_body() {
+    let raw = json!({
+        "callSid": "pbx-c-ffff",
+        "payload": "arbitrary-server-payload",
+    });
+    let size = serde_json::to_vec(&raw).expect("raw JSON").len();
+    let receipt = OutboundCallReceipt::from_json(raw);
+    let rendered = format!("{receipt:?}");
+
+    assert!(!rendered.contains("arbitrary-server-payload"), "{rendered}");
+    assert_eq!(
+        rendered,
+        format!("OutboundCallReceipt {{ call_sid: Some(\"pbx-c-ffff\"), raw: <{size} bytes> }}")
     );
 }
 
