@@ -44,7 +44,7 @@ use serde_json::Value;
 use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
-use crate::retry::truncate_body;
+use crate::retry::{retry_after_from, truncate_body};
 use crate::transport::{Method, Request, Security, Transport};
 
 /// Keycloak token endpoint for sipgate's `third-party` realm, as documented at
@@ -1101,9 +1101,27 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             .with_timeout(self.timeout);
         let response = self.transport.execute(request).await?;
         if !response.is_success() {
-            return Err(Error::AuthRejected {
-                status: response.status(),
-                body: truncate_body(&response.text()),
+            let status = response.status();
+            let truncated = truncate_body(&response.text());
+            // The `client_credentials` POST creates a token and has no
+            // business side effect, so a 429 or 5xx can be repeated safely.
+            // Only an explicit rejection of the credentials (400/401/403 and
+            // other 4xx) is terminal.
+            return Err(if status == 429 || (500..600).contains(&status) {
+                Error::Api {
+                    status,
+                    body: truncated,
+                    retry_after: retry_after_from(|name| response.header(name)),
+                    retryable: true,
+                    // The token POST is side-effect-free: a repeat cannot duplicate
+                    // work, so it is retryable and never ambiguous.
+                    ambiguous: false,
+                }
+            } else {
+                Error::AuthRejected {
+                    status,
+                    body: truncated,
+                }
             });
         }
         Token::from_json(&response.json()?)
