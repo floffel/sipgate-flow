@@ -86,6 +86,37 @@ fn a_missing_content_type_is_tolerated_but_the_secret_is_not() {
 }
 
 #[test]
+fn empty_or_whitespace_content_type_is_treated_as_absent() {
+    let verifier = WebhookVerifier::new("s").expect("valid");
+    for content_type in [None, Some(""), Some("   ")] {
+        assert!(
+            verifier
+                .verify_and_parse(Some("s"), content_type, BODY)
+                .is_ok(),
+            "{content_type:?}"
+        );
+    }
+    for content_type in [
+        Some("application/json"),
+        Some("application/problem+json; charset=utf-8"),
+    ] {
+        assert!(
+            verifier
+                .verify_and_parse(Some("s"), content_type, BODY)
+                .is_ok(),
+            "{content_type:?}"
+        );
+    }
+    let error = verifier
+        .verify_and_parse(Some("s"), Some("text/plain"), BODY)
+        .expect_err("non-JSON content type must be rejected");
+    assert!(matches!(
+        error,
+        Error::UnsupportedContentType { ref content_type } if content_type == "text/plain"
+    ));
+}
+
+#[test]
 fn verification_happens_before_parsing() {
     let verifier = WebhookVerifier::new("s").expect("valid");
     let error = verifier

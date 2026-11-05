@@ -153,15 +153,20 @@ impl WebhookVerifier {
 
     /// Verifies, enforces the body limit and content type, then parses.
     ///
-    /// A missing `Content-Type` is accepted — some frameworks strip it, and the
-    /// secret is what authenticates the call — but a present non-JSON type is
-    /// refused: `application/x-www-form-urlencoded` means the request came from
-    /// the Push API, not from Flow.
+    /// A missing, empty, or whitespace-only `Content-Type` is accepted — some
+    /// frameworks strip it or report the missing header as an empty string, and
+    /// the secret is what authenticates the call — but a present non-JSON type
+    /// is refused: `application/x-www-form-urlencoded` means the request came
+    /// from the Push API, not from Flow.
     ///
     /// ```
     /// use sipgate_flow::{Error, WebhookVerifier};
     ///
     /// let verifier = WebhookVerifier::new("abc")?;
+    /// let body = br#"{"type":"session_start","session":{"id":"s1"}}"#;
+    /// assert!(verifier.verify_and_parse(Some("abc"), None, body).is_ok());
+    /// assert!(verifier.verify_and_parse(Some("abc"), Some(""), body).is_ok());
+    /// assert!(verifier.verify_and_parse(Some("abc"), Some("   "), body).is_ok());
     /// let err = verifier
     ///     .verify_and_parse(Some("abc"), Some("application/x-www-form-urlencoded"), b"event=newCall")
     ///     .unwrap_err();
@@ -181,7 +186,7 @@ impl WebhookVerifier {
         body: &[u8],
     ) -> Result<Event> {
         self.verify(provided)?;
-        if let Some(content_type) = content_type {
+        if let Some(content_type) = content_type.map(str::trim).filter(|ct| !ct.is_empty()) {
             if !is_json_content_type(content_type) {
                 return Err(Error::UnsupportedContentType {
                     content_type: content_type.to_string(),
