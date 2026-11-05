@@ -468,6 +468,405 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
             &response.text(),
         ))
     }
+
+    // -------------------------------------------------------------------
+    // v3 account administration (#170)
+    //
+    // A bounded slice of the documented v3 account-settings resource: the
+    // privacy announcement played for recorded and transcribed calls, and the
+    // caller ID used when transferring a call. These are the three
+    // `/account-settings/*` families the v3 document marks as account level.
+    // -------------------------------------------------------------------
+
+    /// Reads which privacy announcement plays for recorded calls:
+    /// `GET /v3/account-settings/privacyAnnouncements/recording`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let mode = client.recording_announcement_mode().await?;
+    /// println!("{}", mode.as_str());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Json`] when the success body is not JSON, plus the
+    /// generic transport, auth and API errors. An unknown `mode` value is kept
+    /// in [`RecordingAnnouncementMode::Other`] instead of failing the decode.
+    pub async fn recording_announcement_mode(&self) -> Result<RecordingAnnouncementMode> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/account-settings/privacyAnnouncements/recording",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return RecordingAnnouncementMode::from_json(&response.json()?);
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Sets which privacy announcement plays for recorded calls:
+    /// `PUT /v3/account-settings/privacyAnnouncements/recording`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, RecordingAnnouncementMode};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_recording_announcement_mode(&RecordingAnnouncementMode::InformOnly).await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when an unmodelled
+    /// [`RecordingAnnouncementMode::Other`] value is not a plausible wire token,
+    /// plus the generic transport, auth and API errors. The replacement is
+    /// idempotent, so a retryable non-2xx answer is reported on
+    /// [`crate::Error::Api`] rather than [`crate::Error::Ambiguous`].
+    pub async fn set_recording_announcement_mode(
+        &self,
+        mode: &RecordingAnnouncementMode,
+    ) -> Result<()> {
+        mode.validate()?;
+        let body = mode.to_json();
+        self.put_account_setting("/v3/account-settings/privacyAnnouncements/recording", &body)
+            .await
+    }
+
+    /// Reads which privacy announcement plays for transcribed calls:
+    /// `GET /v3/account-settings/privacyAnnouncements/transcription`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let mode = client.transcription_announcement_mode().await?;
+    /// println!("{}", mode.as_str());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Json`] when the success body is not JSON, plus the
+    /// generic transport, auth and API errors. An unknown `mode` value is kept
+    /// in [`TranscriptionAnnouncementMode::Other`] instead of failing.
+    pub async fn transcription_announcement_mode(&self) -> Result<TranscriptionAnnouncementMode> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/account-settings/privacyAnnouncements/transcription",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return TranscriptionAnnouncementMode::from_json(&response.json()?);
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Sets which privacy announcement plays for transcribed calls:
+    /// `PUT /v3/account-settings/privacyAnnouncements/transcription`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, TranscriptionAnnouncementMode};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_transcription_announcement_mode(&TranscriptionAnnouncementMode::Disabled).await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when an unmodelled
+    /// [`TranscriptionAnnouncementMode::Other`] value is not a plausible wire
+    /// token, plus the generic transport, auth and API errors.
+    pub async fn set_transcription_announcement_mode(
+        &self,
+        mode: &TranscriptionAnnouncementMode,
+    ) -> Result<()> {
+        mode.validate()?;
+        let body = mode.to_json();
+        self.put_account_setting(
+            "/v3/account-settings/privacyAnnouncements/transcription",
+            &body,
+        )
+        .await
+    }
+
+    /// Reads which caller ID is used when transferring calls:
+    /// `GET /v3/account-settings/transferCallerId`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let source = client.transfer_caller_id().await?;
+    /// println!("{}", source.as_str());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Json`] when the success body is not JSON, plus the
+    /// generic transport, auth and API errors. An unknown `source` value is
+    /// kept in [`TransferCallerIdSource::Other`] instead of failing.
+    pub async fn transfer_caller_id(&self) -> Result<TransferCallerIdSource> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/account-settings/transferCallerId",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return TransferCallerIdSource::from_json(&response.json()?);
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Sets which caller ID is used when transferring calls:
+    /// `PUT /v3/account-settings/transferCallerId`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, TransferCallerIdSource};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_transfer_caller_id(&TransferCallerIdSource::TransferredParty).await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when an unmodelled
+    /// [`TransferCallerIdSource::Other`] value is not a plausible wire token,
+    /// plus the generic transport, auth and API errors.
+    pub async fn set_transfer_caller_id(&self, source: &TransferCallerIdSource) -> Result<()> {
+        source.validate()?;
+        let body = source.to_json();
+        self.put_account_setting("/v3/account-settings/transferCallerId", &body)
+            .await
+    }
+
+    /// Reads the account's call-event retention setting:
+    /// `GET /v3/analytics/call-events/settings/retention`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let settings = client.account_retention().await?;
+    /// println!("{:?}", settings.event_retention_days());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Json`] when the success body is not JSON, plus the
+    /// generic transport, auth and API errors. A `null` retention value is the
+    /// documented "keep indefinitely" answer and decodes to `None`, not an
+    /// error.
+    pub async fn account_retention(&self) -> Result<AccountRetentionSettings> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/analytics/call-events/settings/retention",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(AccountRetentionSettings::from_json(&response.json()?));
+        }
+        Err(crate::retry::api_error(
+            Method::Get,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Replaces the account's call-event retention setting:
+    /// `PUT /v3/analytics/call-events/settings/retention`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, SetAccountRetentionSettings, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let request = SetAccountRetentionSettings::new(90)?;
+    /// client.set_account_retention(&request).await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when the already-constructed request is
+    /// somehow out of range (the type cannot be built out of range), plus the
+    /// generic transport, auth and API errors. The replacement is idempotent.
+    pub async fn set_account_retention(&self, request: &SetAccountRetentionSettings) -> Result<()> {
+        let body = request.to_json();
+        self.put_account_setting("/v3/analytics/call-events/settings/retention", &body)
+            .await
+    }
+
+    /// Removes the account's call-event retention policy, keeping call events
+    /// indefinitely: `DELETE /v3/analytics/call-events/settings/retention`.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.clear_account_retention().await?; // 204
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth and API errors. `DELETE` is idempotent, so a
+    /// retryable non-2xx answer is reported on [`crate::Error::Api`].
+    pub async fn clear_account_retention(&self) -> Result<()> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: "/v3/analytics/call-events/settings/retention",
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Delete,
+            None,
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(());
+        }
+        Err(crate::retry::api_error(
+            Method::Delete,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Sends one idempotent account-setting replacement and requires the
+    /// documented `204 No Content`.
+    async fn put_account_setting(&self, path: &str, body: &Value) -> Result<()> {
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            Method::Put,
+            Some(body),
+        )
+        .await?;
+        if response.is_success() {
+            return Ok(());
+        }
+        Err(crate::retry::api_error(
+            Method::Put,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
 }
 
 impl<T: Transport, A: TokenSource> std::fmt::Debug for FlowClient<T, A> {
@@ -1185,6 +1584,611 @@ impl std::io::Write for JsonByteCounter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+// ===================================================================
+// v3 account administration (#170)
+//
+// Types for the `/v3/account-settings/*` families modelled above and the
+// account-level call-event retention setting. Kept in one clearly delimited
+// block so the surrounding v3 client (AI webhooks, TTS, and the parallel TTS
+// synthesis work) stays easy to extend.
+// ===================================================================
+
+/// Longest unmodelled account-setting wire token accepted before sending.
+///
+/// The v3 document enumerates the values this crate models; a caller can still
+/// carry a value from a newer document as `Other`. The cap keeps that
+/// forward-compatible value a small, single wire token instead of an
+/// unbounded string.
+pub const MAX_ACCOUNT_SETTING_TOKEN_BYTES: usize = 64;
+
+/// Which privacy announcement plays for recorded calls:
+/// `GET`/`PUT /v3/account-settings/privacyAnnouncements/recording`.
+///
+/// ```
+/// use sipgate_flow::RecordingAnnouncementMode;
+///
+/// assert_eq!(
+///     RecordingAnnouncementMode::from_wire("OPT_OUT"),
+///     RecordingAnnouncementMode::OptOut
+/// );
+/// assert_eq!(
+///     RecordingAnnouncementMode::from_wire("FUTURE_MODE").as_str(),
+///     "FUTURE_MODE"
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordingAnnouncementMode {
+    /// Callers hear an announcement that the call is being recorded.
+    InformOnly,
+    /// Callers hear an announcement and can opt out of the recording.
+    OptOut,
+    /// A value this crate does not model yet, kept verbatim.
+    Other(String),
+}
+
+impl RecordingAnnouncementMode {
+    /// Maps a wire value, keeping unknown values verbatim.
+    ///
+    /// ```
+    /// use sipgate_flow::RecordingAnnouncementMode;
+    ///
+    /// assert_eq!(
+    ///     RecordingAnnouncementMode::from_wire("inform_only"),
+    ///     RecordingAnnouncementMode::InformOnly
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value.to_ascii_uppercase().as_str() {
+            "INFORM_ONLY" => Self::InformOnly,
+            "OPT_OUT" => Self::OptOut,
+            _ => Self::Other(value.to_string()),
+        }
+    }
+
+    /// The canonical wire value.
+    ///
+    /// ```
+    /// use sipgate_flow::RecordingAnnouncementMode;
+    ///
+    /// assert_eq!(RecordingAnnouncementMode::OptOut.as_str(), "OPT_OUT");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::InformOnly => "INFORM_ONLY",
+            Self::OptOut => "OPT_OUT",
+            Self::Other(value) => value,
+        }
+    }
+
+    /// Reads the documented `{"mode": "..."}` response body.
+    ///
+    /// Unknown `mode` values are carried as [`Self::Other`].
+    ///
+    /// ```
+    /// use sipgate_flow::RecordingAnnouncementMode;
+    ///
+    /// let mode = RecordingAnnouncementMode::from_json(&serde_json::json!({"mode": "OPT_OUT"}))?;
+    /// assert_eq!(mode, RecordingAnnouncementMode::OptOut);
+    /// assert!(RecordingAnnouncementMode::from_json(&serde_json::json!({})).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `mode` is absent, not a string, or empty.
+    pub fn from_json(value: &Value) -> Result<Self> {
+        let mode = value
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if mode.is_empty() {
+            return Err(Error::validation(
+                "recording_announcement_mode",
+                "response must carry a non-empty `mode`",
+            ));
+        }
+        Ok(Self::from_wire(mode))
+    }
+
+    /// Renders the request body exactly as the `OpenAPI` schema names it.
+    ///
+    /// ```
+    /// use sipgate_flow::RecordingAnnouncementMode;
+    ///
+    /// assert_eq!(
+    ///     RecordingAnnouncementMode::InformOnly.to_json()["mode"],
+    ///     "INFORM_ONLY"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "mode": self.as_str() })
+    }
+
+    /// Rejects an unmodelled value that is not a plausible wire token.
+    ///
+    /// ```
+    /// use sipgate_flow::RecordingAnnouncementMode;
+    ///
+    /// assert!(RecordingAnnouncementMode::OptOut.validate().is_ok());
+    /// assert!(RecordingAnnouncementMode::Other("FUTURE_MODE".into()).validate().is_ok());
+    /// assert!(RecordingAnnouncementMode::Other(String::new()).validate().is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when an unmodelled value is empty, longer than
+    /// [`MAX_ACCOUNT_SETTING_TOKEN_BYTES`], or contains anything other than
+    /// ASCII letters, digits and underscores.
+    pub fn validate(&self) -> Result<()> {
+        if let Self::Other(value) = self {
+            validate_wire_token("recording_announcement_mode", value)?;
+        }
+        Ok(())
+    }
+}
+
+/// Which privacy announcement plays for transcribed calls:
+/// `GET`/`PUT /v3/account-settings/privacyAnnouncements/transcription`.
+///
+/// ```
+/// use sipgate_flow::TranscriptionAnnouncementMode;
+///
+/// assert_eq!(
+///     TranscriptionAnnouncementMode::from_wire("NONE"),
+///     TranscriptionAnnouncementMode::Disabled
+/// );
+/// assert_eq!(TranscriptionAnnouncementMode::InformOnly.as_str(), "INFORM_ONLY");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TranscriptionAnnouncementMode {
+    /// Callers hear an announcement that the call is being transcribed.
+    InformOnly,
+    /// No announcement is played for transcribed calls.
+    Disabled,
+    /// A value this crate does not model yet, kept verbatim.
+    Other(String),
+}
+
+impl TranscriptionAnnouncementMode {
+    /// Maps a wire value, keeping unknown values verbatim.
+    ///
+    /// ```
+    /// use sipgate_flow::TranscriptionAnnouncementMode;
+    ///
+    /// assert_eq!(
+    ///     TranscriptionAnnouncementMode::from_wire("none"),
+    ///     TranscriptionAnnouncementMode::Disabled
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value.to_ascii_uppercase().as_str() {
+            "INFORM_ONLY" => Self::InformOnly,
+            "NONE" => Self::Disabled,
+            _ => Self::Other(value.to_string()),
+        }
+    }
+
+    /// The canonical wire value.
+    ///
+    /// ```
+    /// use sipgate_flow::TranscriptionAnnouncementMode;
+    ///
+    /// assert_eq!(TranscriptionAnnouncementMode::Disabled.as_str(), "NONE");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::InformOnly => "INFORM_ONLY",
+            Self::Disabled => "NONE",
+            Self::Other(value) => value,
+        }
+    }
+
+    /// Reads the documented `{"mode": "..."}` response body.
+    ///
+    /// ```
+    /// use sipgate_flow::TranscriptionAnnouncementMode;
+    ///
+    /// let mode = TranscriptionAnnouncementMode::from_json(
+    ///     &serde_json::json!({"mode": "NONE", "future": 1}),
+    /// )?;
+    /// assert_eq!(mode, TranscriptionAnnouncementMode::Disabled);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `mode` is absent, not a string, or empty.
+    pub fn from_json(value: &Value) -> Result<Self> {
+        let mode = value
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if mode.is_empty() {
+            return Err(Error::validation(
+                "transcription_announcement_mode",
+                "response must carry a non-empty `mode`",
+            ));
+        }
+        Ok(Self::from_wire(mode))
+    }
+
+    /// Renders the request body exactly as the `OpenAPI` schema names it.
+    ///
+    /// ```
+    /// use sipgate_flow::TranscriptionAnnouncementMode;
+    ///
+    /// assert_eq!(
+    ///     TranscriptionAnnouncementMode::Disabled.to_json()["mode"],
+    ///     "NONE"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "mode": self.as_str() })
+    }
+
+    /// Rejects an unmodelled value that is not a plausible wire token.
+    ///
+    /// ```
+    /// use sipgate_flow::TranscriptionAnnouncementMode;
+    ///
+    /// assert!(TranscriptionAnnouncementMode::Disabled.validate().is_ok());
+    /// assert!(TranscriptionAnnouncementMode::Other("FUTURE_MODE".into()).validate().is_ok());
+    /// assert!(TranscriptionAnnouncementMode::Other("has space".into()).validate().is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when an unmodelled value is empty, longer than
+    /// [`MAX_ACCOUNT_SETTING_TOKEN_BYTES`], or contains anything other than
+    /// ASCII letters, digits and underscores.
+    pub fn validate(&self) -> Result<()> {
+        if let Self::Other(value) = self {
+            validate_wire_token("transcription_announcement_mode", value)?;
+        }
+        Ok(())
+    }
+}
+
+/// Which party's number is shown as caller ID when transferring a call:
+/// `GET`/`PUT /v3/account-settings/transferCallerId`.
+///
+/// ```
+/// use sipgate_flow::TransferCallerIdSource;
+///
+/// assert_eq!(
+///     TransferCallerIdSource::from_wire("TRANSFERRED_PARTY"),
+///     TransferCallerIdSource::TransferredParty
+/// );
+/// assert_eq!(
+///     TransferCallerIdSource::TransferringParty.as_str(),
+///     "TRANSFERRING_PARTY"
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransferCallerIdSource {
+    /// Show the number of the party the call is transferred to.
+    TransferredParty,
+    /// Show the number of the party that transfers the call.
+    TransferringParty,
+    /// A value this crate does not model yet, kept verbatim.
+    Other(String),
+}
+
+impl TransferCallerIdSource {
+    /// Maps a wire value, keeping unknown values verbatim.
+    ///
+    /// ```
+    /// use sipgate_flow::TransferCallerIdSource;
+    ///
+    /// assert_eq!(
+    ///     TransferCallerIdSource::from_wire("transferring_party"),
+    ///     TransferCallerIdSource::TransferringParty
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value.to_ascii_uppercase().as_str() {
+            "TRANSFERRED_PARTY" => Self::TransferredParty,
+            "TRANSFERRING_PARTY" => Self::TransferringParty,
+            _ => Self::Other(value.to_string()),
+        }
+    }
+
+    /// The canonical wire value.
+    ///
+    /// ```
+    /// use sipgate_flow::TransferCallerIdSource;
+    ///
+    /// assert_eq!(
+    ///     TransferCallerIdSource::TransferredParty.as_str(),
+    ///     "TRANSFERRED_PARTY"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::TransferredParty => "TRANSFERRED_PARTY",
+            Self::TransferringParty => "TRANSFERRING_PARTY",
+            Self::Other(value) => value,
+        }
+    }
+
+    /// Reads the documented `{"source": "..."}` response body.
+    ///
+    /// ```
+    /// use sipgate_flow::TransferCallerIdSource;
+    ///
+    /// let source = TransferCallerIdSource::from_json(
+    ///     &serde_json::json!({"source": "TRANSFERRING_PARTY"}),
+    /// )?;
+    /// assert_eq!(source, TransferCallerIdSource::TransferringParty);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `source` is absent, not a string, or empty.
+    pub fn from_json(value: &Value) -> Result<Self> {
+        let source = value
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if source.is_empty() {
+            return Err(Error::validation(
+                "transfer_caller_id_source",
+                "response must carry a non-empty `source`",
+            ));
+        }
+        Ok(Self::from_wire(source))
+    }
+
+    /// Renders the request body exactly as the `OpenAPI` schema names it.
+    ///
+    /// ```
+    /// use sipgate_flow::TransferCallerIdSource;
+    ///
+    /// assert_eq!(
+    ///     TransferCallerIdSource::TransferredParty.to_json()["source"],
+    ///     "TRANSFERRED_PARTY"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "source": self.as_str() })
+    }
+
+    /// Rejects an unmodelled value that is not a plausible wire token.
+    ///
+    /// ```
+    /// use sipgate_flow::TransferCallerIdSource;
+    ///
+    /// assert!(TransferCallerIdSource::TransferredParty.validate().is_ok());
+    /// assert!(TransferCallerIdSource::Other("FUTURE_SOURCE".into()).validate().is_ok());
+    /// assert!(TransferCallerIdSource::Other(String::new()).validate().is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when an unmodelled value is empty, longer than
+    /// [`MAX_ACCOUNT_SETTING_TOKEN_BYTES`], or contains anything other than
+    /// ASCII letters, digits and underscores.
+    pub fn validate(&self) -> Result<()> {
+        if let Self::Other(value) = self {
+            validate_wire_token("transfer_caller_id_source", value)?;
+        }
+        Ok(())
+    }
+}
+
+/// Shortest call-event retention accepted by
+/// `PUT /v3/analytics/call-events/settings/retention` (the schema's exclusive
+/// minimum of `0`).
+pub const MIN_EVENT_RETENTION_DAYS: u32 = 1;
+
+/// Longest call-event retention accepted by the same endpoint (the schema's
+/// inclusive maximum).
+pub const MAX_EVENT_RETENTION_DAYS: u32 = 36_500;
+
+/// The account's call-event retention setting:
+/// `GET`/`DELETE /v3/analytics/call-events/settings/retention`.
+///
+/// The documented response is `{"eventRetentionDays": <days|null>}`. A `null`
+/// (or absent) value means call events are kept indefinitely, modelled here as
+/// [`Self::event_retention_days`] returning `None`.
+///
+/// ```
+/// use sipgate_flow::AccountRetentionSettings;
+///
+/// let settings = AccountRetentionSettings::from_json(
+///     &serde_json::json!({"eventRetentionDays": 90}),
+/// );
+/// assert_eq!(settings.event_retention_days(), Some(90));
+///
+/// let infinite = AccountRetentionSettings::from_json(&serde_json::json!({}));
+/// assert_eq!(infinite.event_retention_days(), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct AccountRetentionSettings {
+    event_retention_days: Option<u32>,
+}
+
+impl AccountRetentionSettings {
+    /// Reads the documented response body, tolerating `event_retention_days`
+    /// as an alias.
+    ///
+    /// ```
+    /// use sipgate_flow::AccountRetentionSettings;
+    ///
+    /// assert_eq!(
+    ///     AccountRetentionSettings::from_json(
+    ///         &serde_json::json!({"event_retention_days": 7, "future": true}),
+    ///     )
+    ///     .event_retention_days(),
+    ///     Some(7)
+    /// );
+    /// assert_eq!(
+    ///     AccountRetentionSettings::from_json(&serde_json::json!({"eventRetentionDays": null}))
+    ///         .event_retention_days(),
+    ///     None
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_json(value: &Value) -> Self {
+        let days = value
+            .get("eventRetentionDays")
+            .or_else(|| value.get("event_retention_days"))
+            .and_then(Value::as_u64)
+            .and_then(|days| u32::try_from(days).ok());
+        Self {
+            event_retention_days: days,
+        }
+    }
+
+    /// The configured retention in days, or `None` for "keep indefinitely".
+    ///
+    /// ```
+    /// use sipgate_flow::AccountRetentionSettings;
+    ///
+    /// assert_eq!(
+    ///     AccountRetentionSettings::from_json(&serde_json::json!({"eventRetentionDays": 365}))
+    ///         .event_retention_days(),
+    ///     Some(365)
+    /// );
+    /// ```
+    #[must_use]
+    pub fn event_retention_days(&self) -> Option<u32> {
+        self.event_retention_days
+    }
+}
+
+/// The request body of
+/// `PUT /v3/analytics/call-events/settings/retention`: the number of days call
+/// events are retained.
+///
+/// ```
+/// use sipgate_flow::{SetAccountRetentionSettings, MAX_EVENT_RETENTION_DAYS};
+///
+/// let request = SetAccountRetentionSettings::new(90)?;
+/// assert_eq!(request.event_retention_days(), 90);
+/// assert_eq!(request.to_json()["eventRetentionDays"], 90);
+///
+/// assert!(SetAccountRetentionSettings::new(0).is_err());
+/// assert!(SetAccountRetentionSettings::new(MAX_EVENT_RETENTION_DAYS).is_ok());
+/// assert!(SetAccountRetentionSettings::new(MAX_EVENT_RETENTION_DAYS + 1).is_err());
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SetAccountRetentionSettings {
+    event_retention_days: u32,
+}
+
+impl SetAccountRetentionSettings {
+    /// Validates the documented retention range
+    /// [`MIN_EVENT_RETENTION_DAYS`]`..=`[`MAX_EVENT_RETENTION_DAYS`] before the
+    /// value can reach the wire.
+    ///
+    /// ```
+    /// use sipgate_flow::SetAccountRetentionSettings;
+    ///
+    /// assert!(SetAccountRetentionSettings::new(1).is_ok());
+    /// assert!(SetAccountRetentionSettings::new(2).is_ok());
+    /// assert!(SetAccountRetentionSettings::new(0).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `days` is `0` (the schema's exclusive
+    /// minimum) or above [`MAX_EVENT_RETENTION_DAYS`].
+    pub fn new(days: u32) -> Result<Self> {
+        if days < MIN_EVENT_RETENTION_DAYS {
+            return Err(Error::validation(
+                "event_retention_days",
+                format!(
+                    "must be at least {MIN_EVENT_RETENTION_DAYS} day (0 would mean keep indefinitely)"
+                ),
+            ));
+        }
+        if days > MAX_EVENT_RETENTION_DAYS {
+            return Err(Error::validation(
+                "event_retention_days",
+                format!("must be at most {MAX_EVENT_RETENTION_DAYS} days"),
+            ));
+        }
+        Ok(Self {
+            event_retention_days: days,
+        })
+    }
+
+    /// The validated retention in days.
+    ///
+    /// ```
+    /// use sipgate_flow::SetAccountRetentionSettings;
+    ///
+    /// assert_eq!(SetAccountRetentionSettings::new(30)?.event_retention_days(), 30);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn event_retention_days(&self) -> u32 {
+        self.event_retention_days
+    }
+
+    /// Renders the request body exactly as the `OpenAPI` schema names it.
+    ///
+    /// ```
+    /// use sipgate_flow::SetAccountRetentionSettings;
+    ///
+    /// assert_eq!(
+    ///     SetAccountRetentionSettings::new(90)?.to_json(),
+    ///     serde_json::json!({"eventRetentionDays": 90})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "eventRetentionDays": self.event_retention_days })
+    }
+}
+
+/// Rejects a value that is not a plausible enum wire token: non-empty, within
+/// [`MAX_ACCOUNT_SETTING_TOKEN_BYTES`], and ASCII letters, digits or
+/// underscores only.
+fn validate_wire_token(field: &'static str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::validation(field, "must not be empty"));
+    }
+    if value.len() > MAX_ACCOUNT_SETTING_TOKEN_BYTES {
+        return Err(Error::validation(
+            field,
+            format!("must be at most {MAX_ACCOUNT_SETTING_TOKEN_BYTES} bytes"),
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(Error::validation(
+            field,
+            "must contain only ASCII letters, digits and underscores",
+        ));
+    }
+    Ok(())
 }
 
 // ===========================================================================

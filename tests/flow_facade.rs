@@ -89,6 +89,24 @@ const _: fn(sipgate_flow::flow::client::AgentVoices) = |v| {
 const _: fn(sipgate_flow::flow::client::CurrentVoice) = |v| {
     let _: sipgate_flow::flow::CurrentVoice = v;
 };
+const _: fn(sipgate_flow::flow::client::RecordingAnnouncementMode) = |v| {
+    let _: sipgate_flow::flow::RecordingAnnouncementMode = v;
+};
+const _: fn(sipgate_flow::flow::client::TranscriptionAnnouncementMode) = |v| {
+    let _: sipgate_flow::flow::TranscriptionAnnouncementMode = v;
+};
+const _: fn(sipgate_flow::flow::client::TransferCallerIdSource) = |v| {
+    let _: sipgate_flow::flow::TransferCallerIdSource = v;
+};
+const _: fn(sipgate_flow::flow::client::AccountRetentionSettings) = |v| {
+    let _: sipgate_flow::flow::AccountRetentionSettings = v;
+};
+const _: fn(sipgate_flow::flow::client::SetAccountRetentionSettings) = |v| {
+    let _: sipgate_flow::flow::SetAccountRetentionSettings = v;
+};
+const _: usize = sipgate_flow::flow::MAX_ACCOUNT_SETTING_TOKEN_BYTES;
+const _: u32 = sipgate_flow::flow::MIN_EVENT_RETENTION_DAYS;
+const _: u32 = sipgate_flow::flow::MAX_EVENT_RETENTION_DAYS;
 // `FlowClient` is generic over its transport; a bound-checked helper proves the
 // facade path is the same type without naming a concrete transport.
 #[allow(dead_code)]
