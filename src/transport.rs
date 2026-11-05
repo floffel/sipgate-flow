@@ -567,11 +567,22 @@ impl Transport for ReqwestTransport {
         if let Some(timeout) = request.timeout {
             builder = builder.timeout(timeout);
         }
-        builder = match request.body {
-            RequestBody::Empty => builder,
-            RequestBody::Json(value) => builder.json(value),
-            RequestBody::Form(fields) => builder.form(fields),
-        };
+        match request.body {
+            RequestBody::Empty => {}
+            RequestBody::Json(value) => {
+                builder = builder
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(serialize_json_body(value)?);
+            }
+            RequestBody::Form(fields) => {
+                builder = builder
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(serialize_form_body(fields)?);
+            }
+        }
 
         let method = request.method;
         let response = builder
@@ -604,13 +615,20 @@ impl Transport for ReqwestTransport {
 ///
 /// * `connect` needs a TCP/TLS handshake that never completed: nothing was
 ///   written, so the attempt is retryable for every method.
-/// * `timeout`, `body`, `decode` and `request` mean bytes were on the wire and
-///   the peer did not answer. For an idempotent method that is worth another
-///   attempt; for `POST` it is [`Error::ambiguous`] - the SMS, fax or call may
-///   exist and only the response was lost.
+/// * `builder`, `request` and `redirect` do not carry the post-write
+///   ambiguity signal from `reqwest`, so they are terminal.
+/// * `timeout`, `body` and `decode` mean bytes were on the wire and the peer
+///   did not answer. For an idempotent method that is worth another attempt;
+///   for `POST` it is [`Error::ambiguous`] - the SMS, fax or call may exist and
+///   only the response was lost.
 #[cfg(feature = "http")]
 fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
-    let kind = if error.is_timeout() {
+    let after_write = error.is_timeout() || error.is_body() || error.is_decode();
+    let kind = if error.is_builder() {
+        "builder"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_timeout() {
         "timeout"
     } else if error.is_connect() {
         "connect"
@@ -623,6 +641,8 @@ fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
     let message = format!("{kind}: {error}");
     if error.is_connect() {
         Error::transport_before_write(message)
+    } else if !after_write {
+        Error::transport_terminal(message)
     } else if method.is_idempotent() {
         Error::Transport {
             message,
@@ -630,6 +650,63 @@ fn describe_reqwest_error(error: &reqwest::Error, method: Method) -> Error {
         }
     } else {
         Error::ambiguous(None, message)
+    }
+}
+
+#[cfg(feature = "http")]
+fn serialize_json_body<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    serde_json::to_vec(value)
+        .map_err(|error| Error::transport_terminal(format!("body serialization failed: {error}")))
+}
+
+#[cfg(feature = "http")]
+fn serialize_form_body<T: serde::Serialize + ?Sized>(fields: &T) -> Result<Vec<u8>> {
+    serde_urlencoded::to_string(fields)
+        .map(String::into_bytes)
+        .map_err(|error| Error::transport_terminal(format!("body serialization failed: {error}")))
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use super::{serialize_form_body, serialize_json_body};
+
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(<S::Error as serde::ser::Error>::custom(
+                "intentional serialization failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn json_body_serialization_failure_is_terminal() {
+        let error = serialize_json_body(&FailingSerialize).expect_err("serialization fails");
+        assert!(!error.is_retryable(), "{error:?}");
+        assert!(!error.is_ambiguous(), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .starts_with("transport error: body serialization failed: "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn form_body_serialization_failure_is_terminal() {
+        let error = serialize_form_body(&FailingSerialize).expect_err("serialization fails");
+        assert!(!error.is_retryable(), "{error:?}");
+        assert!(!error.is_ambiguous(), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .starts_with("transport error: body serialization failed: "),
+            "{error}"
+        );
     }
 }
 

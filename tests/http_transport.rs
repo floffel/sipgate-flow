@@ -327,6 +327,83 @@ async fn a_post_that_cannot_connect_stays_retryable() {
 }
 
 #[tokio::test]
+async fn a_post_bad_scheme_is_terminal_not_ambiguous() {
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(
+        Method::Post,
+        "file:///tmp/sipgate-flow.sock",
+        Security::Bearer("t"),
+        &body,
+    );
+
+    let error = ReqwestTransport::new()
+        .execute(request)
+        .await
+        .expect_err("the scheme is rejected before any write");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert!(!error.is_ambiguous(), "{error:?}");
+    match error {
+        Error::Transport { message, .. } => assert!(message.starts_with("builder: "), "{message}"),
+        other => panic!("expected a terminal transport error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_post_redirect_policy_failure_is_terminal_not_ambiguous() {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().is_empty() {
+                attempt.follow()
+            } else {
+                attempt.error("redirect blocked for test")
+            }
+        }))
+        .build()
+        .expect("redirect client");
+    let mut server = TestServer::start_sequence(
+        vec![
+            "HTTP/1.1 302 Found\r\nLocation: /v2/sessions/sms-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            OK_JSON,
+        ],
+        Duration::ZERO,
+    );
+    let url = server.url("/v2/sessions/sms");
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(Method::Post, &url, Security::Bearer("t"), &body);
+
+    let error = ReqwestTransport::from_client(client)
+        .execute(request)
+        .await
+        .expect_err("the redirect policy rejects the second hop");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert!(!error.is_ambiguous(), "{error:?}");
+    match error {
+        Error::Transport { message, .. } => assert!(message.starts_with("redirect: "), "{message}"),
+        other => panic!("expected a terminal transport error, got {other:?}"),
+    }
+    let _ = server.received();
+}
+
+#[tokio::test]
+async fn a_post_send_failure_is_terminal_not_ambiguous() {
+    let server = TestServer::start("", Duration::ZERO);
+    let url = server.url("/v2/sessions/sms");
+    let body = serde_json::json!({"recipient": "+4915112345678"});
+    let request = Request::json(Method::Post, &url, Security::Bearer("t"), &body);
+
+    let error = ReqwestTransport::new()
+        .execute(request)
+        .await
+        .expect_err("the peer closes before sending a response");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert!(!error.is_ambiguous(), "{error:?}");
+    match error {
+        Error::Transport { message, .. } => assert!(message.starts_with("request: "), "{message}"),
+        other => panic!("expected a terminal transport error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_non_success_status_is_returned_rather_than_raised() {
     let mut server = TestServer::start(
         "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\nContent-Length: 5\r\n\r\nbusy!",
