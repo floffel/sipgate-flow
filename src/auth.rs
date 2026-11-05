@@ -111,6 +111,21 @@ fn token_lifetime(seconds: u64) -> Result<Duration> {
     Ok(lifetime)
 }
 
+fn cached_lifetime(lifetime: Duration, margin: Duration) -> Result<Duration> {
+    if lifetime.is_zero() {
+        return Err(Error::TokenResponse(
+            "expires_in of 0 seconds leaves no usable token lifetime".into(),
+        ));
+    }
+    // The margin may be validly configured for a long-lived issuer and still be
+    // too large for a shorter-lived one. Clamp in that direction so a token is
+    // never stored with an expiry at or before the moment it was stored.
+    let margin = margin.min(lifetime / 2);
+    lifetime
+        .checked_sub(margin)
+        .ok_or_else(|| Error::TokenResponse("refresh margin leaves no usable lifetime".into()))
+}
+
 /// A source of "now", so token expiry is testable without waiting.
 ///
 /// ```
@@ -878,23 +893,47 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
 
     /// Sets how long before expiry the token is refreshed.
     ///
+    /// A margin at or above the announced lifetime is clamped to half that
+    /// lifetime when a token is stored, so a shorter-lived issuer cannot turn
+    /// the cache into a no-op. An `expires_in` of zero is refused as
+    /// [`Error::TokenResponse`] because the token is unusable.
+    ///
     /// ```
     /// use std::time::Duration;
-    /// use sipgate_flow::{ClientCredentials, OAuth2Client};
+    /// use sipgate_flow::auth::MAX_TOKEN_LIFETIME;
+    /// use sipgate_flow::{ClientCredentials, Error, OAuth2Client};
     /// # use sipgate_flow::{Result, Transport};
     /// # use sipgate_flow::transport::{Request, Response};
     /// # struct Mock;
     /// # impl Transport for Mock {
     /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> { Ok(Response::new(200, std::iter::empty(), b"{}".to_vec())) }
     /// # }
-    /// let auth = OAuth2Client::new(Mock, ClientCredentials::new("id", "secret").unwrap())
-    ///     .with_refresh_margin(Duration::from_secs(30));
+    /// let auth = OAuth2Client::new(Mock, ClientCredentials::new("id", "secret")?)
+    ///     .with_refresh_margin(Duration::from_secs(30))?;
     /// assert_eq!(auth.refresh_margin(), Duration::from_secs(30));
+    ///
+    /// let refused = OAuth2Client::new(Mock, ClientCredentials::new("id", "secret")?)
+    ///     .with_refresh_margin(MAX_TOKEN_LIFETIME);
+    /// assert!(matches!(refused, Err(Error::Validation { field: "refresh_margin", .. })));
+    /// # Ok::<(), Error>(())
     /// ```
-    #[must_use]
-    pub fn with_refresh_margin(mut self, margin: Duration) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `margin` is not strictly smaller than
+    /// [`MAX_TOKEN_LIFETIME`].
+    pub fn with_refresh_margin(mut self, margin: Duration) -> Result<Self> {
+        if margin >= MAX_TOKEN_LIFETIME {
+            return Err(Error::Validation {
+                field: "refresh_margin",
+                message: format!(
+                    "must be smaller than the accepted maximum token lifetime of {} seconds",
+                    MAX_TOKEN_LIFETIME.as_secs()
+                ),
+            });
+        }
         self.refresh_margin = margin;
-        self
+        Ok(self)
     }
 
     /// Sets a per-request timeout for the token call.
@@ -1054,7 +1093,7 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
 
     fn store(&self, token: Token, generation: u64) -> Result<()> {
         let lifetime = token.expires_in().unwrap_or(DEFAULT_LIFETIME);
-        let usable_for = lifetime.saturating_sub(self.refresh_margin);
+        let usable_for = cached_lifetime(lifetime, self.refresh_margin)?;
         // `Duration` add panics on overflow (release builds included), so a clock
         // reading near the end of the representable range must surface as a typed
         // error instead of taking the process down.

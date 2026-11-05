@@ -166,6 +166,7 @@ fn the_oauth_client_accessors_report_what_was_configured() {
         .with_clock(clock)
         .with_token_url("https://proxy.test/token")
         .with_refresh_margin(Duration::from_secs(30))
+        .expect("valid margin")
         .with_timeout(Some(Duration::from_secs(7)));
     assert_eq!(auth.token_url(), "https://proxy.test/token");
     assert_eq!(auth.refresh_margin(), Duration::from_secs(30));
