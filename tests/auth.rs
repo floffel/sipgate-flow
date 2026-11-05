@@ -815,10 +815,110 @@ async fn thirty_two_tasks_share_one_token_cache_without_corruption() {
     }
 
     assert_eq!(fetches.load(Ordering::Relaxed), 32 * 4);
-    // Concurrent misses may each fetch (the issuer grants several), but the
-    // cache must never hand out a mixture or blow up the request count.
+    // The cache single-flights the miss, so 32 concurrent tasks that all start
+    // cold cost exactly one token request no matter how the runtime interleaves
+    // them; the remaining 127 reads are cache hits.
     let calls = transport.call_count();
-    assert!((1..=32).contains(&calls), "token requests: {calls}");
+    assert_eq!(calls, 1, "token requests: {calls}");
+}
+
+/// The single-flight guarantee, stated directly: with the fetch held open,
+/// every concurrent miss joins the one in-flight request and reads the same
+/// stored token afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_cache_misses_share_one_in_flight_fetch() {
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let transport = DelayedFirstTransport::new(Arc::clone(&release), Arc::clone(&started));
+    let calls = Arc::clone(&transport.calls);
+    let auth = Arc::new(OAuth2Client::new(transport, credentials()));
+
+    let leader = {
+        let auth = Arc::clone(&auth);
+        tokio::spawn(async move { auth.access_token(false).await })
+    };
+    wait_until(&started).await;
+
+    // Every follower misses the cache too, but the fetch is already owned, so
+    // each parks rather than issuing a request of its own.
+    let mut followers = Vec::new();
+    for _ in 0..31 {
+        let auth = Arc::clone(&auth);
+        followers.push(tokio::spawn(async move {
+            auth.access_token(false)
+                .await
+                .expect("token")
+                .access_token()
+                .to_string()
+        }));
+    }
+    // Give the followers a chance to run up to their park point before the
+    // leader is released; a non-single-flight implementation would already have
+    // recorded far more than one call here.
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "followers must wait, not fetch"
+    );
+
+    release.store(true, Ordering::SeqCst);
+    assert_eq!(
+        leader.await.expect("task").expect("token").access_token(),
+        "stale"
+    );
+    for follower in followers {
+        assert_eq!(follower.await.expect("task"), "stale");
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "one request for the whole cold burst"
+    );
+    assert!(auth.has_valid_token());
+}
+
+/// A failed single-flight fetch must not strand its waiters: they wake, find
+/// the cache still empty, and one of them retries.
+#[tokio::test]
+async fn a_failed_single_flight_fetch_releases_its_waiters() {
+    let transport = MockTransport::new();
+    transport.push_transient_failure("connection reset");
+    transport.push_response(json_response(&token_value("recovered")));
+    let auth = Arc::new(client(transport.clone()));
+
+    let first = {
+        let auth = Arc::clone(&auth);
+        tokio::spawn(async move { auth.access_token(false).await })
+    };
+    let second = {
+        let auth = Arc::clone(&auth);
+        tokio::spawn(async move { auth.access_token(false).await })
+    };
+
+    let mut errors = 0;
+    let mut successes = 0;
+    for result in [first.await.expect("task"), second.await.expect("task")] {
+        match result {
+            Ok(token) => {
+                assert_eq!(token.access_token(), "recovered");
+                successes += 1;
+            }
+            Err(error) => {
+                assert!(error.is_retryable(), "{error:?}");
+                errors += 1;
+            }
+        }
+    }
+    assert_eq!(successes + errors, 2, "both waiters resolve");
+    assert_eq!(
+        transport.call_count(),
+        2,
+        "one failed fetch, then one retry"
+    );
+    assert!(auth.has_valid_token());
 }
 
 #[tokio::test]

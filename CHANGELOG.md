@@ -39,6 +39,16 @@ with the pre-1.0 reading described in the README section *Versioning*.
   transport read: it documents that it caps the string copied into an error
   message at 512 bytes by byte length, backing up to a UTF-8 boundary. The
   exact-limit, one-past-limit and multibyte boundary cases now have tests.
+* The `OAuth2Client` token cache is now single-flight. Concurrent cache misses
+  no longer each call the token endpoint: the first miss starts the request and
+  every other miss waits for it, so `N` simultaneous cold reads cost exactly one
+  token request instead of up to `N`. The cache read and the fetch reservation
+  share one lock (never held across the `.await`), a failed fetch releases its
+  waiters to retry, and `force_refresh` still bypasses the gate because a
+  rejected credential needs a genuinely new token. This removes the
+  intermittently failing
+  `thirty_two_tasks_share_one_token_cache_without_corruption` test, whose bound
+  is now tightened to exactly one request.
 * `RetryPolicy::delay(0, ...)` no longer schedules a full backoff step. The
   parameter is documented as completed *failures*, so zero completed failures
   now returns `None` instead of treating the first caller attempt index as an
