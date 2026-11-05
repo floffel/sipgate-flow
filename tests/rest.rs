@@ -11,8 +11,8 @@ use common::{
     json_response, no_content, response, static_auth, Body, MockTransport, RecordingSleeper,
 };
 use sipgate_flow::rest::{
-    Announcement, Call, ChannelCall, Dtmf, Fax, PlayVoicemail, Recording, RecordingSession,
-    ResendFax, Sms, TransferRequest,
+    Announcement, Call, ChannelCall, DeviceKind, Dtmf, Fax, HistoryEntryKind, PlayVoicemail,
+    Recording, RecordingSession, ResendFax, Sms, TransferRequest,
 };
 use sipgate_flow::{
     ClientCredentials, Error, OAuth2Client, RestClient, Result, RetryPolicy, RetryPolicy as Policy,
@@ -313,6 +313,241 @@ async fn the_call_list_is_parsed_into_types() {
     let recorded = transport.only_call();
     assert_eq!(recorded.method.as_str(), "GET");
     assert_eq!(recorded.url, "https://api.sipgate.com/v2/calls");
+}
+
+#[tokio::test]
+async fn devices_contacts_history_and_phonelines_are_typed_get_reads() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({
+        "id": "e0",
+        "alias": "Desk phone",
+        "type": "REGISTER",
+        "dnd": false,
+        "online": true,
+        "activeGroups": [{"id": "g0", "alias": "Sales"}],
+        "activePhonelines": [{"id": "p0", "alias": "Front desk"}],
+        "futureField": 1
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "contact-1",
+            "name": "Ada Lovelace",
+            "givenname": "Ada",
+            "familyname": "Lovelace",
+            "scope": "PRIVATE",
+            "numbers": [{"id": "n1", "number": "+4915112345678", "localized": "01579-9912345", "type": "MOBILE"}],
+            "futureField": true
+        }]
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "id": "contact-1",
+        "name": "Ada Lovelace",
+        "givenname": "Ada",
+        "familyname": "Lovelace",
+        "scope": "PRIVATE",
+        "numbers": [],
+        "futureField": true
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "100001234",
+            "type": "CALL",
+            "direction": "INCOMING",
+            "status": "PICKUP",
+            "created": "2016-02-10T14:19:39Z",
+            "endpoints": [{"type": "ROUTED", "endpoint": {"extension": "e0", "type": "REGISTER"}}],
+            "futureField": 1
+        }],
+        "totalCount": 1
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "p0",
+            "alias": "Front desk",
+            "userId": "w0",
+            "voicemails": [{"id": "v0", "active": true, "timeout": 20}],
+            "futureField": true
+        }]
+    })));
+
+    let device = client.device("e0").await.expect("device");
+    assert_eq!(device.id, "e0");
+    assert_eq!(device.kind, Some(DeviceKind::Register));
+    assert!(device.online);
+    assert_eq!(device.active_groups[0].alias, "Sales");
+
+    let contacts = client.contacts().await.expect("contacts");
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].name, "Ada Lovelace");
+    assert_eq!(contacts[0].numbers[0].number, "+4915112345678");
+
+    let contact = client.contact("contact-1").await.expect("contact");
+    assert_eq!(contact.familyname, "Lovelace");
+    assert_eq!(
+        contact
+            .scope
+            .as_ref()
+            .map(sipgate_flow::rest::ContactScope::as_str),
+        Some("private")
+    );
+
+    let history = client.history().await.expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, "100001234");
+    assert_eq!(history[0].kind, Some(HistoryEntryKind::Call));
+    assert_eq!(
+        history[0].endpoints[0].endpoint.as_ref().unwrap().extension,
+        "e0"
+    );
+
+    let phonelines = client.phonelines().await.expect("phonelines");
+    assert_eq!(phonelines.len(), 1);
+    assert_eq!(phonelines[0].user_id, "w0");
+    assert!(phonelines[0].voicemails[0].active);
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(calls[0].method.as_str(), "GET");
+    assert_eq!(calls[0].url, "https://api.sipgate.com/v2/devices/e0");
+    assert_eq!(calls[1].url, "https://api.sipgate.com/v2/contacts");
+    assert_eq!(
+        calls[2].url,
+        "https://api.sipgate.com/v2/contacts/contact-1"
+    );
+    assert_eq!(calls[3].url, "https://api.sipgate.com/v2/history");
+    assert_eq!(calls[4].url, "https://api.sipgate.com/v2/phonelines");
+    for call in calls {
+        assert_eq!(call.body, Body::Empty);
+        assert_eq!(call.auth.bearer(), Some("access-token"));
+    }
+}
+
+#[tokio::test]
+async fn empty_rest_lists_and_empty_objects_still_decode_permissively() {
+    let (transport, _, client) = harness();
+    let empty_list = serde_json::json!({"items": null, "totalCount": 0});
+    for _ in 0..3 {
+        transport.push_response(json_response(&empty_list));
+    }
+    transport.push_response(json_response(&serde_json::json!({})));
+
+    assert_eq!(client.contacts().await.expect("contacts"), []);
+    assert_eq!(client.history().await.expect("history"), []);
+    assert_eq!(client.phonelines().await.expect("phonelines"), []);
+    let device = client.device("e0").await.expect("empty device defaults");
+    assert_eq!(device, sipgate_flow::rest::Device::default());
+}
+
+#[tokio::test]
+async fn the_account_admin_id_parameters_are_validated_before_the_wire() {
+    let (transport, _, client) = harness();
+    for bad in [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "../devices",
+        "a?b",
+        "a b",
+        "a#b",
+        "a\tb",
+    ] {
+        let device_error = client.device(bad).await.expect_err(bad);
+        let contact_error = client.contact(bad).await.expect_err(bad);
+        assert!(
+            matches!(
+                device_error,
+                Error::Validation {
+                    field: "device_id",
+                    ..
+                }
+            ),
+            "{bad:?} produced {device_error:?}"
+        );
+        assert!(
+            matches!(
+                contact_error,
+                Error::Validation {
+                    field: "contact_id",
+                    ..
+                }
+            ),
+            "{bad:?} produced {contact_error:?}"
+        );
+    }
+    assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn rest_admin_list_envelopes_accept_just_inside_ids_and_just_outside_ids() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({"items": []})));
+    transport.push_response(json_response(&serde_json::json!({"items": []})));
+
+    let just_inside = "a".repeat(200);
+    let just_outside = "a".repeat(201);
+    assert!(client.device(&just_inside).await.is_ok());
+    assert!(matches!(
+        client.device(&just_outside).await,
+        Err(Error::Validation {
+            field: "device_id",
+            ..
+        })
+    ));
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn device_and_contact_get_responses_reject_a_type_mismatch() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({"id": 1})));
+    transport.push_response(json_response(&serde_json::json!({"id": 1})));
+
+    assert!(client.device("e0").await.is_err());
+    assert!(client.contact("c1").await.is_err());
+}
+
+#[tokio::test]
+async fn account_admin_models_decode_camel_case_and_snake_case_aliases() {
+    let (transport, _, client) = harness();
+    transport.push_response(json_response(&serde_json::json!({
+        "id": "e0",
+        "alias": "Desk phone",
+        "type": "appliance",
+        "active_groups": [{"id": "g0", "alias": "Sales"}],
+        "active_phonelines": []
+    })));
+    transport.push_response(json_response(&serde_json::json!({
+        "items": [{
+            "id": "100001234",
+            "type": "page",
+            "direction": "missed_incoming",
+            "last_modified": "2016-02-10T14:19:39Z",
+            "source_alias": "Dennis Ritchie",
+            "target_alias": "Ken Thompson",
+            "connection_ids": ["c1"],
+            "endpoints": [{
+                "type": "telepathy",
+                "endpoint": {"extension": "e0", "type": "future"}
+            }]
+        }]
+    })));
+
+    let device = client.device("e0").await.expect("device");
+    assert_eq!(device.kind, Some(DeviceKind::Other("appliance".into())));
+    assert_eq!(device.active_groups[0].alias, "Sales");
+
+    let history = client.history().await.expect("history");
+    assert_eq!(history[0].last_modified, "2016-02-10T14:19:39Z");
+    assert_eq!(history[0].source_alias, "Dennis Ritchie");
+    assert_eq!(history[0].target_alias, "Ken Thompson");
+    assert_eq!(history[0].connection_ids, ["c1"]);
+    assert_eq!(
+        history[0].endpoints[0].kind,
+        Some(sipgate_flow::rest::RoutedEndpointKind::Other(
+            "telepathy".into()
+        ))
+    );
 }
 
 #[tokio::test]

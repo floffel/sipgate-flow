@@ -545,6 +545,137 @@ impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
             .into_entries())
     }
 
+    /// `GET /v2/devices/{deviceId}` — one device, typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{rest::DeviceKind, ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let device = client.device("e0").await?;
+    /// println!("{} is {}", device.id, device.alias);
+    /// let _: Option<DeviceKind> = device.kind;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable device id, [`Error::Json`] when
+    /// the body is not a device object, plus transport and auth errors.
+    pub async fn device(&self, device_id: &str) -> Result<Device> {
+        validate::path_segment("device_id", device_id)?;
+        let path = format!("/v2/devices/{device_id}");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/contacts` — every contact visible to the credential, typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for contact in client.contacts().await? {
+    ///     println!("{}", contact.name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not the documented `{"items": [...]}`
+    /// envelope, plus transport and auth errors.
+    pub async fn contacts(&self) -> Result<Vec<Contact>> {
+        self.get_items("/v2/contacts").await
+    }
+
+    /// `GET /v2/contacts/{contactId}` — one contact, typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let contact = client.contact("b3d9af4a-78f9-11e6-8b77-86f30ca893d3").await?;
+    /// println!("{}", contact.name);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an unusable contact id, [`Error::Json`] when
+    /// the body is not a contact object, plus transport and auth errors.
+    pub async fn contact(&self, contact_id: &str) -> Result<Contact> {
+        validate::path_segment("contact_id", contact_id)?;
+        let path = format!("/v2/contacts/{contact_id}");
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/history` — recent calls, faxes, SMS messages and voicemails,
+    /// typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for entry in client.history().await? {
+    ///     println!("{}", entry.id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not the documented `{"items": [...]}`
+    /// envelope, plus transport and auth errors.
+    pub async fn history(&self) -> Result<Vec<HistoryEntry>> {
+        self.get_items("/v2/history").await
+    }
+
+    /// `GET /v2/phonelines` — every phone line of the account, typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    ///
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for phoneline in client.phonelines().await? {
+    ///     println!("{}", phoneline.alias);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is not the documented `{"items": [...]}`
+    /// envelope, plus transport and auth errors.
+    pub async fn phonelines(&self) -> Result<Vec<Phoneline>> {
+        self.get_items("/v2/phonelines").await
+    }
+
+    async fn get_items<I>(&self, path: &str) -> Result<Vec<I>>
+    where
+        I: serde::de::DeserializeOwned + Default,
+    {
+        let value = self.send(Method::Get, path, None).await?;
+        Ok(serde_json::from_value::<Items<I>>(value)
+            .map_err(Error::json_parse)?
+            .into_entries())
+    }
+
     /// `DELETE /v2/calls/{callId}` — hang up.
     ///
     /// ```no_run
@@ -1651,6 +1782,20 @@ struct CallList {
     data: Option<Vec<CallInfo>>,
 }
 
+#[derive(Deserialize)]
+struct Items<T> {
+    // `null` and an absent key both mean "no items"; only a wrong *type* is an
+    // error, matching the REST v2 list envelope's permissive direction.
+    #[serde(default)]
+    items: Option<Vec<T>>,
+}
+
+impl<T> Items<T> {
+    fn into_entries(self) -> Vec<T> {
+        self.items.unwrap_or_default()
+    }
+}
+
 impl CallList {
     fn into_entries(self) -> Vec<CallInfo> {
         self.data.unwrap_or_default()
@@ -1759,4 +1904,620 @@ pub struct Participant {
     /// Whether this participant owns the call.
     #[serde(default)]
     pub owner: bool,
+}
+
+macro_rules! wire_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(#[$first_meta:meta])*
+            $first:ident => $first_wire:literal,
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident => $wire:literal,
+            )*
+        }
+    ) => {
+        $(#[$meta])*
+        #[doc = concat!(
+            "\n```\n",
+            "use sipgate_flow::rest::", stringify!($name), ";\n",
+            "assert_eq!(", stringify!($name), "::from_wire(", stringify!($first_wire), "), ", stringify!($name), "::", stringify!($first), ");\n",
+            "```"
+        )]
+        #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+        #[serde(from = "String")]
+        #[non_exhaustive]
+        $vis enum $name {
+            $(#[$first_meta])*
+            $first,
+            $(
+                $(#[$variant_meta])*
+                $variant,
+            )*
+            #[doc = "A value this crate does not model yet, kept verbatim."]
+            Other(String),
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                let folded = fold_wire(&value);
+                if folded == fold_wire($first_wire) {
+                    return Self::$first;
+                }
+                $(
+                    if folded == fold_wire($wire) {
+                        return Self::$variant;
+                    }
+                )*
+                Self::Other(value)
+            }
+        }
+
+        impl $name {
+            /// Maps the wire value, keeping unknown values verbatim.
+            #[doc = concat!(
+                "\n```\n",
+                "use sipgate_flow::rest::", stringify!($name), ";\n",
+                "assert_eq!(", stringify!($name), "::from_wire(", stringify!($first_wire), "), ", stringify!($name), "::", stringify!($first), ");\n",
+                "```"
+            )]
+            #[must_use]
+            pub fn from_wire(value: &str) -> Self {
+                Self::from(value.to_string())
+            }
+
+            /// The canonical wire value.
+            #[doc = concat!(
+                "\n```\n",
+                "use sipgate_flow::rest::", stringify!($name), ";\n",
+                "assert_eq!(", stringify!($name), "::", stringify!($first), ".as_str(), ", stringify!($first_wire), ");\n",
+                "```"
+            )]
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                match self {
+                    Self::$first => $first_wire,
+                    $(Self::$variant => $wire,)*
+                    Self::Other(value) => value,
+                }
+            }
+        }
+    };
+}
+
+wire_enum! {
+    /// Device kind, from the `type` field of `GET /v2/devices/{deviceId}`.
+    pub enum DeviceKind {
+        /// A registered SIP device.
+        Register => "register",
+        /// A mobile phone device.
+        Mobile => "mobile",
+        /// An external number or endpoint.
+        External => "external",
+    }
+}
+
+wire_enum! {
+    /// Contact scope, from the `scope` field.
+    pub enum ContactScope {
+        /// Visible only to the owning user.
+        Private => "private",
+        /// Shared with other account users.
+        Shared => "shared",
+        /// Internal sipgate content.
+        Internal => "internal",
+    }
+}
+
+wire_enum! {
+    /// Address verification state, from `emergencyState`.
+    pub enum AddressEmergencyState {
+        /// No emergency address is configured.
+        None => "none",
+        /// Emergency-address validation failed.
+        Failed => "failed",
+        /// Emergency-address validation is pending.
+        Pending => "pending",
+        /// Emergency address is active.
+        Activated => "activated",
+        /// The address is being submitted.
+        Submit => "submit",
+        /// The address is being deleted.
+        SubmitDelete => "submit_delete",
+        /// Deletion is pending.
+        PendingDelete => "pending_delete",
+        /// Submission without validation.
+        SubmitNoValidate => "submitnovalidate",
+    }
+}
+
+wire_enum! {
+    /// Address type, from `type`.
+    pub enum AddressKind {
+        /// A verified address.
+        Verified => "verified",
+        /// A pending address.
+        Pending => "pending",
+        /// A failed address.
+        Failed => "failed",
+        /// A blocked address.
+        Blocked => "blocked",
+        /// No address type is set.
+        None => "none",
+    }
+}
+
+wire_enum! {
+    /// Contact number kind, from `type`.
+    pub enum ContactNumberKind {
+        /// A mobile number.
+        Mobile => "mobile",
+        /// A landline number.
+        Landline => "landline",
+        /// A quick-dial number.
+        Quickdial => "quickdial",
+        /// An international number.
+        International => "international",
+    }
+}
+
+wire_enum! {
+    /// History entry kind, from `type`.
+    pub enum HistoryEntryKind {
+        /// A call.
+        Call => "call",
+        /// A voicemail.
+        Voicemail => "voicemail",
+        /// An SMS message.
+        Sms => "sms",
+        /// A fax.
+        Fax => "fax",
+    }
+}
+
+wire_enum! {
+    /// History direction, from `direction`.
+    pub enum HistoryDirection {
+        /// An incoming event.
+        Incoming => "incoming",
+        /// An outgoing event.
+        Outgoing => "outgoing",
+        /// A missed incoming event.
+        MissedIncoming => "missedincoming",
+        /// A missed outgoing event.
+        MissedOutgoing => "missedoutgoing",
+    }
+}
+
+wire_enum! {
+    /// History status, from `status`.
+    pub enum HistoryStatus {
+        /// The callee did not pick up.
+        Nopickup => "nopickup",
+        /// The line was busy.
+        Busy => "busy",
+        /// The call was picked up.
+        Pickup => "pickup",
+        /// The call was forwarded.
+        Forward => "forward",
+    }
+}
+
+wire_enum! {
+    /// Endpoint kind, from `endpoint.type`.
+    pub enum EndpointKind {
+        /// A channel endpoint.
+        Channel => "channel",
+        /// A number endpoint.
+        Number => "number",
+        /// An SMS endpoint.
+        Sms => "sms",
+        /// A registered device.
+        Register => "register",
+        /// An external endpoint.
+        External => "external",
+        /// A fax endpoint.
+        Fax => "fax",
+        /// A mobile endpoint.
+        Mobile => "mobile",
+        /// A group endpoint.
+        Group => "group",
+        /// A voicemail endpoint.
+        Voicemail => "voicemail",
+        /// A phoneline endpoint.
+        Phoneline => "phoneline",
+        /// A user endpoint.
+        User => "user",
+    }
+}
+
+wire_enum! {
+    /// Routed endpoint kind, from `endpoints[].type`.
+    pub enum RoutedEndpointKind {
+        /// The event moved to a forwarded endpoint.
+        Forwarded => "forwarded",
+        /// The event was routed.
+        Routed => "routed",
+        /// The event was picked up.
+        Pickup => "pickup",
+    }
+}
+
+fn fold_wire(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !matches!(character, '_' | '-' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// One device from `GET /v2/devices/{deviceId}`.
+///
+/// ```
+/// use sipgate_flow::rest::{Device, DeviceKind};
+///
+/// let device: Device = serde_json::from_value(serde_json::json!({
+///     "id": "e0",
+///     "alias": "Desk phone",
+///     "type": "REGISTER",
+///     "online": true,
+///     "dnd": false,
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(device.id, "e0");
+/// assert_eq!(device.kind, Some(DeviceKind::Register));
+/// assert!(device.online);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Device {
+    /// Unique device identifier, the `deviceId` path parameter.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable device name.
+    #[serde(default)]
+    pub alias: String,
+    /// Device kind. A future value is carried as [`DeviceKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<DeviceKind>,
+    /// Whether do-not-disturb is active.
+    #[serde(default)]
+    pub dnd: bool,
+    /// Whether the device is currently online.
+    #[serde(default)]
+    pub online: bool,
+    /// Active routing groups, when the device is registered.
+    #[serde(default, alias = "active_groups")]
+    pub active_groups: Vec<ActiveRouting>,
+    /// Active phone lines, when the device is registered.
+    #[serde(default, alias = "active_phonelines")]
+    pub active_phonelines: Vec<ActiveRouting>,
+}
+
+/// One active routing target on a device.
+///
+/// ```
+/// use sipgate_flow::rest::ActiveRouting;
+///
+/// let routing: ActiveRouting = serde_json::from_value(serde_json::json!({
+///     "id": "w0",
+///     "alias": "Ada Lovelace"
+/// }))
+/// .unwrap();
+/// assert_eq!(routing.id, "w0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ActiveRouting {
+    /// Identifier of the routed user, group or endpoint.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable routing target name.
+    #[serde(default)]
+    pub alias: String,
+}
+
+/// One contact from `GET /v2/contacts` or `GET /v2/contacts/{contactId}`.
+///
+/// ```
+/// use sipgate_flow::rest::Contact;
+///
+/// let contact: Contact = serde_json::from_value(serde_json::json!({
+///     "id": "b3d9af4a-78f9-11e6-8b77-86f30ca893d3",
+///     "name": "Ada Lovelace",
+///     "givenname": "Ada",
+///     "familyname": "Lovelace",
+///     "scope": "PRIVATE",
+///     "numbers": [],
+///     "future_field": true
+/// }))
+/// .unwrap();
+/// assert_eq!(contact.name, "Ada Lovelace");
+/// assert_eq!(contact.familyname, "Lovelace");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Contact {
+    /// Unique contact identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// Given name.
+    #[serde(default)]
+    pub givenname: String,
+    /// Family name.
+    #[serde(default)]
+    pub familyname: String,
+    /// Note text.
+    #[serde(default)]
+    pub note: String,
+    /// Base64-encoded contact picture, when one exists.
+    #[serde(default)]
+    pub picture: String,
+    /// Contact scope. A future value is carried as [`ContactScope::Other`].
+    #[serde(default)]
+    pub scope: Option<ContactScope>,
+    /// Postal addresses.
+    #[serde(default)]
+    pub addresses: Vec<ContactAddress>,
+    /// Email addresses.
+    #[serde(default)]
+    pub emails: Vec<ContactEmail>,
+    /// Phone numbers.
+    #[serde(default)]
+    pub numbers: Vec<ContactNumber>,
+    /// Websites.
+    #[serde(default)]
+    pub websites: Vec<ContactWebsite>,
+    /// Structured organization data.
+    #[serde(default)]
+    pub organization: Vec<Vec<String>>,
+}
+
+/// One postal address on a contact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactAddress {
+    /// Address identifier.
+    #[serde(default, alias = "address_id")]
+    pub address_id: String,
+    /// First address line.
+    #[serde(default)]
+    pub address1: String,
+    /// Second address line.
+    #[serde(default)]
+    pub address2: String,
+    /// City or locality.
+    #[serde(default)]
+    pub city: String,
+    /// Postal code.
+    #[serde(default)]
+    pub postcode: String,
+    /// Street.
+    #[serde(default)]
+    pub street: String,
+    /// State or region.
+    #[serde(default)]
+    pub state: String,
+    /// ISO country code.
+    #[serde(default)]
+    pub countrycode: String,
+    /// House number.
+    #[serde(default)]
+    pub number: String,
+    /// URL for the address' numbers, when sipgate reports one.
+    #[serde(default, alias = "numbers_url")]
+    pub numbers_url: String,
+    /// Address kind. A future value is carried as [`AddressKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<AddressKind>,
+    /// Emergency-address state.
+    #[serde(default, alias = "emergency_state")]
+    pub emergency_state: Option<AddressEmergencyState>,
+}
+
+/// One email address on a contact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactEmail {
+    /// Email address.
+    #[serde(default)]
+    pub email: String,
+    /// Email labels.
+    #[serde(default, rename = "type")]
+    pub kind: Vec<String>,
+}
+
+/// One phone number on a contact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactNumber {
+    /// Number identifier.
+    #[serde(default)]
+    pub id: String,
+    /// E.164 number.
+    #[serde(default)]
+    pub number: String,
+    /// Locally formatted number.
+    #[serde(default)]
+    pub localized: String,
+    /// Number kind. A future value is carried as [`ContactNumberKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<ContactNumberKind>,
+}
+
+/// One website on a contact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ContactWebsite {
+    /// Website URL.
+    #[serde(default)]
+    pub url: String,
+    /// Website labels.
+    #[serde(default, rename = "type")]
+    pub kind: Vec<String>,
+}
+
+/// One history entry from `GET /v2/history`.
+///
+/// ```
+/// use sipgate_flow::rest::{HistoryDirection, HistoryEntry, HistoryEntryKind};
+///
+/// let entry: HistoryEntry = serde_json::from_value(serde_json::json!({
+///     "id": "100001234",
+///     "type": "CALL",
+///     "direction": "INCOMING",
+///     "created": "2016-02-10T14:19:39Z",
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert_eq!(entry.id, "100001234");
+/// assert_eq!(entry.kind, Some(HistoryEntryKind::Call));
+/// assert_eq!(entry.direction, Some(HistoryDirection::Incoming));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)]
+pub struct HistoryEntry {
+    /// Unique history entry identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Entry kind. A future value is carried as [`HistoryEntryKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<HistoryEntryKind>,
+    /// Direction. A future value is carried as [`HistoryDirection::Other`].
+    #[serde(default)]
+    pub direction: Option<HistoryDirection>,
+    /// Event status. A future value is carried as [`HistoryStatus::Other`].
+    #[serde(default)]
+    pub status: Option<HistoryStatus>,
+    /// Creation timestamp, as the ISO-8601 string sipgate sends.
+    #[serde(default)]
+    pub created: String,
+    /// Last-modification timestamp, as sipgate sends it.
+    #[serde(default, alias = "last_modified")]
+    pub last_modified: String,
+    /// Source number.
+    #[serde(default)]
+    pub source: String,
+    /// Source alias.
+    #[serde(default, alias = "source_alias")]
+    pub source_alias: String,
+    /// Target number.
+    #[serde(default)]
+    pub target: String,
+    /// Target alias.
+    #[serde(default, alias = "target_alias")]
+    pub target_alias: String,
+    /// User note on the entry.
+    #[serde(default)]
+    pub note: String,
+    /// Whether the entry is archived.
+    #[serde(default)]
+    pub archived: bool,
+    /// Whether the entry was incoming.
+    #[serde(default)]
+    pub incoming: bool,
+    /// Whether the entry is starred.
+    #[serde(default)]
+    pub starred: bool,
+    /// Whether the entry is read.
+    #[serde(default)]
+    pub read: bool,
+    /// Labels applied to the entry.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Connection identifiers attached to the entry.
+    #[serde(default, alias = "connection_ids")]
+    pub connection_ids: Vec<String>,
+    /// Ordered endpoints the event moved through.
+    #[serde(default)]
+    pub endpoints: Vec<RoutedEndpoint>,
+}
+
+/// One endpoint on a history entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct RoutedEndpoint {
+    /// Routing kind. A future value is carried as [`RoutedEndpointKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<RoutedEndpointKind>,
+    /// Endpoint details.
+    #[serde(default)]
+    pub endpoint: Option<Endpoint>,
+}
+
+/// The endpoint a history entry reached.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Endpoint {
+    /// Endpoint extension.
+    #[serde(default)]
+    pub extension: String,
+    /// Endpoint kind. A future value is carried as [`EndpointKind::Other`].
+    #[serde(default, rename = "type")]
+    pub kind: Option<EndpointKind>,
+}
+
+/// One phone line from `GET /v2/phonelines`.
+///
+/// ```
+/// use sipgate_flow::rest::Phoneline;
+///
+/// let phoneline: Phoneline = serde_json::from_value(serde_json::json!({
+///     "id": "p0",
+///     "alias": "Front desk",
+///     "userId": "w0",
+///     "futureField": true
+/// }))
+/// .unwrap();
+/// assert_eq!(phoneline.id, "p0");
+/// assert_eq!(phoneline.user_id, "w0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Phoneline {
+    /// Unique phoneline identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable phoneline name.
+    #[serde(default)]
+    pub alias: String,
+    /// Owning user id.
+    #[serde(default, alias = "user_id")]
+    pub user_id: String,
+    /// Voicemail settings, when the account returns them.
+    #[serde(default)]
+    pub voicemails: Vec<VoicemailSettings>,
+}
+
+/// One voicemail configuration on a phoneline.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct VoicemailSettings {
+    /// Voicemail identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Whether the voicemail is active.
+    #[serde(default)]
+    pub active: bool,
+    /// Ring timeout before voicemail starts.
+    #[serde(default)]
+    pub timeout: u32,
 }

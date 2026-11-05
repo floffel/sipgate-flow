@@ -251,6 +251,11 @@ Source: <https://api.sipgate.com/v2/swagger.json> (`host` `api.sipgate.com`,
 | POST | `/sessions/voicemail/recording` | `newRecording` | `NewVoicemailRecordingRecordingRequest` | 200 | `record_voicemail` |
 | POST | `/sessions/voicemail/play` | `playRecording` | `PlayRecordingRequest` | 200 | `play_voicemail` |
 | GET | `/calls` | `getCalls` | — | 200 → `Calls` | `calls` |
+| GET | `/devices/{deviceId}` | `getDevice` | — | 200 → `DeviceResponse` | `device` |
+| GET | `/contacts` | `getContacts_1` | — | 200 → `ContactsResponse` | `contacts` |
+| GET | `/contacts/{contactId}` | `getContactById` | — | 200 → `ContactResponse` | `contact` |
+| GET | `/history` | `getHistory` | — | 200 → `HistoryResponse` | `history` |
+| GET | `/phonelines` | `getAllPhonelines` | — | 200 → `AccountPhonelinesResponse` | `phonelines` |
 | POST | `/calls` | `createCall` | inline object | 200 → `CreateCallResponse` | `channel_call` |
 | DELETE | `/calls/{callId}` | `hangupCall` | — | 204 | `hangup` |
 | POST | `/calls/{callId}/dtmf` | `sendCallDtmf` | `DtmfRequest` | 204 | `send_dtmf` |
@@ -283,6 +288,11 @@ Bodies (all from the Swagger `definitions`, rendered as fixtures under
 * `Call` / `Participant` — `callId`, `hold`, `muted`, `recording`,
   `participants[]`; participant `participantId`, `phoneNumber` (may be the
   literal `<unknown>`), `hold`, `muted`, `owner`.
+* `DeviceResponse` / `ContactResponse` / `HistoryEntryResponse` /
+  `AccountPhonelineResponse` — the core REST v2 administration read models are
+  typed, with the list envelopes `ContactsResponse`, `HistoryResponse` and
+  `AccountPhonelinesResponse`; unknown fields are ignored and unknown enum
+  values are carried verbatim.
 
 Documented error statuses: 400 (invalid request), 402 (insufficient funds), 403
 (not allowed), 404 (unknown call), 409 (call not yet established for hold and
@@ -512,7 +522,9 @@ in this document — `tests/docs.rs` fails on it. Order of work is the order bel
 
 * **REST v2 account administration** (devices, contacts, history, phonelines,
   numbers, …) — <https://api.sipgate.com/v2/swagger.json>. Tracked in
-  [#12](https://github.com/floffel/sipgate-flow/issues/12).
+  [#12](https://github.com/floffel/sipgate-flow/issues/12). Core read paths are
+  modelled; the remaining account-administration endpoints are still documented
+  but not modelled yet.
 * **v3 webhook and TTS configuration** — <https://api.sipgate.com/v3/openapi.json>,
   `PUT /ai-webhooks` and the TTS provider catalogue. Tracked in
   [#15](https://github.com/floffel/sipgate-flow/issues/15).

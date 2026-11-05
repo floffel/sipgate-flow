@@ -10,6 +10,16 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Added
 
+* The **core REST v2 account-administration reads** (#12): typed models and
+  `RestClient` methods for the four documented families previewed in the gap
+  list — `device` (`GET /v2/devices/{deviceId}`), `contacts` / `contact`
+  (`GET /v2/contacts`, `GET /v2/contacts/{contactId}`), `history`
+  (`GET /v2/history`) and `phonelines` (`GET /v2/phonelines`). Path parameters
+  reuse the crate's `path_segment` gate, list responses accept the documented
+  `{"items": [...]}` envelope tolerantly, and every typed enum carries unknown
+  provider values verbatim instead of failing the decode. The full REST v2
+  administration surface, including all write and nested setting endpoints,
+  remains tracked as open issue #12.
 * The **classic Push API** (<https://en.sipgate.io/push-api/api-references>),
   promoted from the README's gap list (#10). Its own `push` module: all four
   documented events (`newCall`, `answer`, `hangup`, `dtmf`) decoded from
