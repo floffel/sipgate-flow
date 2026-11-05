@@ -606,12 +606,28 @@ async fn the_two_401_attempts_share_the_caller_timeout_budget() {
 async fn a_second_401_is_terminal() {
     let transport = MockTransport::new();
     transport.push_response(response(401, &[], b"no"));
-    transport.push_response(response(401, &[], b"still no"));
+    transport.push_response(response(
+        401,
+        &[("Retry-After", "11"), ("X-Request-ID", "req-second-401")],
+        b"still no",
+    ));
     let client = RestClient::new(transport.clone(), RotatingToken::new())
         .with_sleeper(RecordingSleeper::new());
 
     let error = client.hangup("c1").await.expect_err("terminal");
-    assert!(matches!(error, Error::Unauthorized));
+    assert!(matches!(
+        error,
+        Error::Unauthorized {
+            status: 401,
+            ref body,
+            retry_after: Some(retry_after),
+            request_id: Some(ref request_id),
+            ..
+        } if body == b"still no"
+            && retry_after == Duration::from_secs(11)
+            && request_id == "req-second-401"
+    ));
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(11)));
     assert_eq!(transport.call_count(), 2, "refresh once, never loop");
 }
 
