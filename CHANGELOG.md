@@ -31,6 +31,10 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `auth::MAX_TOKEN_LIFETIME` (24 hours) with `Error::TokenResponse`, and the
   cache computes the expiry with `checked_add`, so an unusable value becomes a
   typed error instead of an overflow panic in `Duration` addition.
+* `WebhookVerifier::verify_reader` bounds body reads before parsing, returning
+  `Error::BodyTooLarge` as soon as `max_body_bytes + 1` bytes have been
+  observed. The existing buffered `verify_and_parse` path now documents that it
+  only bounds parsing work after the framework has collected the body.
 
 ## [0.1.0] — not yet published
 

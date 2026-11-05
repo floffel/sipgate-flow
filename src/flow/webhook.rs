@@ -19,6 +19,8 @@
 //! # Ok::<(), sipgate_flow::Error>(())
 //! ```
 
+use std::io::Read;
+
 use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
@@ -32,10 +34,17 @@ pub const SECRET_HEADER_LEGACY: &str = "x-api-key";
 
 /// Default body limit for [`WebhookVerifier`], in bytes.
 ///
-/// Real events are a few KiB. This webhook-level limit bounds work after the
-/// shared secret is checked; [`crate::Event::parse`] has its own smaller
-/// parser-level ceiling for code that calls it directly.
+/// Real events are a few KiB. [`WebhookVerifier::verify_reader`] uses this as a
+/// read bound and stops after `limit + 1` bytes, so an unauthenticated caller
+/// cannot force an unbounded body allocation through that entry point.
+/// [`WebhookVerifier::verify_and_parse`] applies the same ceiling to an already
+/// buffered body; it cannot bound the framework's body collection.
+/// [`crate::Event::parse`] has its own smaller parser-level ceiling for code
+/// that calls it directly.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Read buffer used by [`WebhookVerifier::verify_reader`].
+const BODY_READ_CHUNK_BYTES: usize = 8 * 1024;
 
 /// Verifies the shared secret and parses the event.
 ///
@@ -153,7 +162,7 @@ impl WebhookVerifier {
         }
     }
 
-    /// Verifies, enforces the body limit and content type, then parses.
+    /// Verifies, enforces the body limit on an already-buffered body, and parses.
     ///
     /// A missing, empty, or whitespace-only `Content-Type` is accepted — some
     /// frameworks strip it or report the missing header as an empty string, and
@@ -178,6 +187,11 @@ impl WebhookVerifier {
     ///
     /// # Errors
     ///
+    /// This method receives a `&[u8]`, so the caller has already materialised
+    /// the body. It therefore bounds parsing work, not the framework's body
+    /// collection. Use [`WebhookVerifier::verify_reader`] when the body still
+    /// comes from a reader.
+    ///
     /// [`Error::MissingSecret`], [`Error::SecretMismatch`],
     /// [`Error::UnsupportedContentType`], [`Error::BodyTooLarge`], or whatever
     /// [`Event::parse`] reports.
@@ -188,11 +202,7 @@ impl WebhookVerifier {
         body: &[u8],
     ) -> Result<Event> {
         self.verify(provided)?;
-        if let Some(content_type) = content_type.map(str::trim).filter(|ct| !ct.is_empty()) {
-            if !is_json_content_type(content_type) {
-                return Err(Error::unsupported_content_type(content_type));
-            }
-        }
+        Self::check_content_type(content_type)?;
         if body.len() > self.max_body_bytes {
             return Err(Error::BodyTooLarge {
                 size: body.len(),
@@ -200,6 +210,83 @@ impl WebhookVerifier {
             });
         }
         Event::parse(body)
+    }
+
+    /// Reads a bounded body, verifies the shared secret, and parses the event.
+    ///
+    /// The read stops as soon as `max_body_bytes + 1` bytes have been observed,
+    /// returning [`Error::BodyTooLarge`] without draining the reader. This
+    /// bounds the allocation made by this method; any signature or HMAC scheme
+    /// that needs the whole payload still verifies the complete bounded body
+    /// before parsing. The secret is checked before JSON parsing.
+    ///
+    /// ```
+    /// use sipgate_flow::{EventPayload, WebhookVerifier};
+    ///
+    /// let verifier = WebhookVerifier::new("s3cret")?;
+    /// let mut body = br#"{"type":"session_start","session":{"id":"s1"}}"#.as_slice();
+    /// let event = verifier.verify_reader(
+    ///     Some("s3cret"),
+    ///     Some("application/json; charset=utf-8"),
+    ///     &mut body,
+    /// )?;
+    /// assert!(matches!(event.payload(), EventPayload::SessionStart { .. }));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BodyTooLarge`] when `max_body_bytes + 1` bytes are observed,
+    /// [`Error::BodyRead`] when the reader fails, [`Error::MissingSecret`],
+    /// [`Error::SecretMismatch`], [`Error::UnsupportedContentType`], or
+    /// whatever [`Event::parse`] reports.
+    pub fn verify_reader(
+        &self,
+        provided: Option<&str>,
+        content_type: Option<&str>,
+        r: impl Read,
+    ) -> Result<Event> {
+        let body = self.read_bounded_body(r)?;
+        self.verify(provided)?;
+        Self::check_content_type(content_type)?;
+        Event::parse(&body)
+    }
+
+    /// Reads at most `max_body_bytes + 1` bytes from `r`.
+    fn read_bounded_body(&self, mut r: impl Read) -> Result<Vec<u8>> {
+        let read_limit = self.max_body_bytes.saturating_add(1);
+        let mut body = Vec::new();
+        let mut buffer = [0_u8; BODY_READ_CHUNK_BYTES];
+
+        while body.len() < read_limit {
+            let remaining = read_limit - body.len();
+            let wanted = remaining.min(buffer.len());
+            match r.read(&mut buffer[..wanted]) {
+                Ok(0) => break,
+                Ok(read) => {
+                    body.extend_from_slice(&buffer[..read]);
+                    if body.len() > self.max_body_bytes {
+                        return Err(Error::BodyTooLarge {
+                            size: body.len(),
+                            limit: self.max_body_bytes,
+                        });
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(Error::body_read(error)),
+            }
+        }
+
+        Ok(body)
+    }
+
+    fn check_content_type(content_type: Option<&str>) -> Result<()> {
+        if let Some(content_type) = content_type.map(str::trim).filter(|ct| !ct.is_empty()) {
+            if !is_json_content_type(content_type) {
+                return Err(Error::unsupported_content_type(content_type));
+            }
+        }
+        Ok(())
     }
 }
 

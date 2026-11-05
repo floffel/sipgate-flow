@@ -198,14 +198,31 @@ pub enum Error {
         content_type: String,
     },
 
-    /// The body exceeded the configured limit, rejected before parsing so an
-    /// unauthenticated caller cannot force a large allocation.
+    /// The body exceeded the configured limit.
+    ///
+    /// [`crate::WebhookVerifier::verify_reader`] returns this as soon as
+    /// `limit + 1` bytes are observed, so it bounds the read that method
+    /// performs. [`crate::WebhookVerifier::verify_and_parse`] receives an
+    /// already-buffered body and therefore bounds parsing work only; callers
+    /// using that method must enforce their framework's own body limit.
     #[error("payload of {size} bytes exceeds the {limit} byte limit")]
     BodyTooLarge {
-        /// Size the request delivered.
+        /// Size observed. For [`crate::WebhookVerifier::verify_reader`] this is
+        /// `limit + 1`, because the bounded read stops there.
         size: usize,
         /// Configured ceiling.
         limit: usize,
+    },
+
+    /// Reading a webhook body from a reader failed.
+    #[non_exhaustive]
+    #[error("could not read webhook body: {message}")]
+    BodyRead {
+        /// Reader-supplied description.
+        message: String,
+        /// The underlying reader error.
+        #[source]
+        source: std::io::Error,
     },
 
     /// The token endpoint rejected the client credentials.
@@ -531,6 +548,23 @@ impl Error {
         Self::InvalidRequest {
             field,
             message: safe_text(&message.into()),
+        }
+    }
+
+    /// Builds a webhook body read error.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::body_read(std::io::Error::other("connection lost"));
+    /// assert!(matches!(err, Error::BodyRead { .. }));
+    /// assert!(std::error::Error::source(&err).is_some());
+    /// ```
+    #[must_use]
+    pub fn body_read(source: std::io::Error) -> Self {
+        Self::BodyRead {
+            message: safe_text(&source.to_string()),
+            source,
         }
     }
 
