@@ -1,23 +1,32 @@
-//! Retry budget: exponential backoff with an explicit ceiling.
+//! Retry budget: exponential backoff with equal jitter and an explicit ceiling.
 //!
-//! The policy is pure data plus one pure decision function, so the request loop
-//! in [`crate::RestClient`] stays a thin shell and the arithmetic is testable —
-//! including property tests over arbitrary delays and attempt counts.
+//! The policy is pure data plus one decision function, so the request loop in
+//! [`crate::RestClient`] stays a thin shell. Locally computed backoff uses equal
+//! jitter in `[d/2, d]` to avoid fleet-wide lockstep; a server-provided
+//! `Retry-After` is honoured exactly (after clamping) because it is already the
+//! peer's pacing instruction.
 //!
 //! This crate never sleeps: the loop awaits a caller-supplied [`Sleeper`], so
 //! pacing (and therefore cancellation) stays under the caller's control.
+//!
+//! A maintained backoff crate is not used here because [`RetryPolicy`] and
+//! [`Sleeper`] must stay runtime-free and source-compatible; the jitter uses
+//! the standard library's cheap randomized hasher seed instead.
 //!
 //! ```
 //! use std::time::Duration;
 //! use sipgate_flow::RetryPolicy;
 //!
 //! let policy = RetryPolicy::default();
-//! assert_eq!(policy.delay(1, None), Some(Duration::from_millis(250)));
-//! assert_eq!(policy.delay(2, None), Some(Duration::from_millis(500)));
+//! let delay = policy.delay(1, None).expect("first retry");
+//! assert!(delay >= Duration::from_millis(125));
+//! assert!(delay <= Duration::from_millis(250));
 //! // Third attempt failed: the budget is spent.
 //! assert_eq!(policy.delay(3, None), None);
 //! ```
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
 use crate::error::Error;
@@ -26,9 +35,11 @@ use crate::transport::Method;
 /// How often, and how long, the client retries transient failures.
 ///
 /// The default is three attempts (two retries) with 250 ms doubling to an
-/// 8 s ceiling, honouring `Retry-After`. Every wait is capped by
-/// [`RetryPolicy::max_delay`], so a hostile or broken proxy cannot park the
-/// caller for an unbounded time.
+/// 8 s ceiling, honouring `Retry-After`. Backoff steps are jittered uniformly
+/// in `[d/2, d]`, where `d` is the uncapped step clamped to
+/// [`RetryPolicy::max_delay`], so independent callers do not retry in lockstep.
+/// Every wait is capped by [`RetryPolicy::max_delay`], so a hostile or broken
+/// proxy cannot park the caller for an unbounded time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetryPolicy {
@@ -82,14 +93,16 @@ impl RetryPolicy {
         }
     }
 
-    /// Overrides the first backoff step.
+    /// Overrides the first backoff step before jitter.
     ///
     /// ```
     /// use std::time::Duration;
     /// use sipgate_flow::RetryPolicy;
     ///
     /// let policy = RetryPolicy::default().with_base_delay(Duration::from_secs(1));
-    /// assert_eq!(policy.delay(1, None), Some(Duration::from_secs(1)));
+    /// let delay = policy.delay(1, None).expect("first retry");
+    /// assert!(delay >= Duration::from_millis(500));
+    /// assert!(delay <= Duration::from_secs(1));
     /// ```
     #[must_use]
     pub fn with_base_delay(mut self, delay: Duration) -> Self {
@@ -104,7 +117,9 @@ impl RetryPolicy {
     /// use sipgate_flow::RetryPolicy;
     ///
     /// let policy = RetryPolicy::new(10).with_max_delay(Duration::from_secs(2));
-    /// assert_eq!(policy.delay(9, None), Some(Duration::from_secs(2)));
+    /// let delay = policy.delay(9, None).expect("within budget");
+    /// assert!(delay >= Duration::from_secs(1));
+    /// assert!(delay <= Duration::from_secs(2));
     /// ```
     #[must_use]
     pub fn with_max_delay(mut self, delay: Duration) -> Self {
@@ -119,10 +134,9 @@ impl RetryPolicy {
     /// use sipgate_flow::RetryPolicy;
     ///
     /// let policy = RetryPolicy::default().without_retry_after();
-    /// assert_eq!(
-    ///     policy.delay(1, Some(Duration::from_secs(30))),
-    ///     Some(Duration::from_millis(250))
-    /// );
+    /// let delay = policy.delay(1, Some(Duration::from_secs(30))).expect("first retry");
+    /// assert!(delay >= Duration::from_millis(125));
+    /// assert!(delay <= Duration::from_millis(250));
     /// ```
     #[must_use]
     pub fn without_retry_after(mut self) -> Self {
@@ -134,7 +148,9 @@ impl RetryPolicy {
     /// budget is spent and the caller must surface the error.
     ///
     /// `attempts_failed` counts completed attempts: `1` means the first try
-    /// just failed.
+    /// just failed. Local exponential backoff is jittered uniformly in
+    /// `[d/2, d]` after applying the ceiling; `Retry-After` is returned exactly
+    /// after applying the ceiling.
     ///
     /// ```
     /// use std::time::Duration;
@@ -165,8 +181,35 @@ impl RetryPolicy {
         let exponent = attempts_failed.saturating_sub(1).min(30);
         let factor = 1_u32 << exponent;
         let backoff = self.base_delay.saturating_mul(factor);
-        Some(backoff.min(self.max_delay))
+        Some(equal_jitter(backoff, self.max_delay))
     }
+}
+
+fn equal_jitter(backoff: Duration, max_delay: Duration) -> Duration {
+    let capped = backoff.min(max_delay);
+    let lower = capped / 2;
+    let span = capped.as_nanos() - lower.as_nanos();
+    if span == 0 {
+        return capped;
+    }
+
+    let offset = random_u128() % (span + 1);
+    duration_from_nanos(lower.as_nanos() + offset)
+}
+
+fn random_u128() -> u128 {
+    let high = RandomState::new().build_hasher().finish();
+    let low = RandomState::new().build_hasher().finish();
+    (u128::from(high) << 64) | u128::from(low)
+}
+
+fn duration_from_nanos(nanos: u128) -> Duration {
+    const NANOS_PER_SECOND: u128 = 1_000_000_000;
+    let seconds = nanos / NANOS_PER_SECOND;
+    let subsecond = nanos % NANOS_PER_SECOND;
+    let seconds = u64::try_from(seconds).unwrap_or(u64::MAX);
+    let subsecond = u32::try_from(subsecond).unwrap_or(999_999_999);
+    Duration::new(seconds, subsecond)
 }
 
 /// Paces retries. The client awaits this and never calls `sleep` itself, so a

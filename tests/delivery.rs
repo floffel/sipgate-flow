@@ -109,7 +109,10 @@ async fn a_5xx_after_a_get_is_retried() {
     let calls = client.calls().await.expect("second attempt");
     assert_eq!(calls.len(), 0, "the list is empty, not an error");
     assert_eq!(transport.call_count(), 2);
-    assert_eq!(sleeper.delays(), [Duration::from_millis(250)]);
+    let delays = sleeper.delays();
+    assert_eq!(delays.len(), 1);
+    assert!(delays[0] >= Duration::from_millis(125));
+    assert!(delays[0] <= Duration::from_millis(250));
 }
 
 #[tokio::test]

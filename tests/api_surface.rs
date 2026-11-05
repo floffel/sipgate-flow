@@ -218,10 +218,11 @@ fn the_rest_client_accessors_report_what_was_configured() {
 #[test]
 fn a_retry_after_hint_is_ignored_when_the_policy_says_so() {
     let policy = RetryPolicy::default().without_retry_after();
-    assert_eq!(
-        policy.delay(1, Some(Duration::from_secs(30))),
-        Some(Duration::from_millis(250))
-    );
+    let delay = policy
+        .delay(1, Some(Duration::from_secs(30)))
+        .expect("first retry");
+    assert!(delay >= Duration::from_millis(125));
+    assert!(delay <= Duration::from_millis(250));
     // An exhausted budget stays exhausted whatever the hint says.
     let exhausted = RetryPolicy::new(1);
     assert_eq!(exhausted.delay(1, Some(Duration::from_secs(1))), None);

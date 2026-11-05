@@ -60,10 +60,11 @@
 //!
 //! # Retries never sleep inside the library
 //!
-//! [`RestClient`] computes a bounded backoff (honouring `Retry-After`) and then
-//! awaits a caller-supplied [`Sleeper`]. Pass `FnSleeper::new(tokio::time::sleep)`
-//! in production — the wait is then cancellation safe because it is *your*
-//! future, not a task the library spawned.
+//! [`RestClient`] computes a bounded, jittered backoff (honouring
+//! `Retry-After`) and then awaits a caller-supplied [`Sleeper`]. Pass
+//! `FnSleeper::new(tokio::time::sleep)` in production — the wait is then
+//! cancellation safe because it is *your* future, not a task the library
+//! spawned.
 //!
 //! # A request is repeated only when a repeat is harmless
 //!
