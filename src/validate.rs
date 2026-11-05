@@ -28,10 +28,57 @@ pub(crate) const MAX_LANGUAGE_TAG: usize = 35;
 /// to be long. The cap keeps an unbounded caller string out of the JSON body.
 pub(crate) const MAX_BILLING_DEVICE: usize = 8;
 
-/// Rejects empty or over-long identifiers.
-pub(crate) fn non_empty(field: &'static str, value: &str) -> Result<()> {
+/// Largest single Flow action string accepted by this crate.
+///
+/// sipgate does not publish a body-size limit for webhook responses, but the
+/// response is the same JSON document this crate receives under the default
+/// webhook body ceiling. Keeping one action field below that bound prevents a
+/// caller bug from turning a single string into a multi-megabyte allocation.
+pub(crate) const MAX_FLOW_ACTION_FIELD_BYTES: usize = 1024 * 1024;
+
+/// Largest SMS body accepted by an action or REST request.
+///
+/// The Flow documentation says there is no hard service-side length limit for
+/// SMS bodies and bills long texts by segment. This crate still refuses a body
+/// above the same 1 MiB ceiling used for other action fields, so a caller
+/// mistake cannot allocate and send an unbounded payload.
+pub(crate) const MAX_SMS_MESSAGE_BYTES: usize = MAX_FLOW_ACTION_FIELD_BYTES;
+
+/// Largest byte length that can represent the documented 200-character
+/// vocabulary entry limit in UTF-8 (200 chars * 4 bytes). The exact character
+/// limit is still enforced separately below.
+pub(crate) const MAX_CUSTOM_VOCABULARY_ENTRY_BYTES: usize = 200 * 4;
+
+/// Largest base64 string accepted for Flow audio.
+///
+/// This is the encoded length of [`crate::base64::MAX_DECODED_BYTES`], the same
+/// ceiling used by [`crate::base64::decode`] and [`crate::base64::is_valid`].
+pub(crate) const MAX_AUDIO_BASE64_CHARS: usize =
+    match crate::base64::encoded_len(crate::base64::MAX_DECODED_BYTES) {
+        Some(len) => len,
+        None => usize::MAX,
+    };
+
+/// Generic ceiling for request fields without a smaller documented limit.
+///
+/// This keeps the helper bounded everywhere while preserving the service's
+/// permissive acceptance for fields such as device ids, filenames and URLs:
+/// only multi-megabyte values are refused.
+pub(crate) const MAX_REST_FIELD_BYTES: usize = MAX_FLOW_ACTION_FIELD_BYTES;
+
+/// Rejects empty or over-long string fields.
+///
+/// `max_bytes` is the field-specific ceiling. The caller supplies it at every
+/// call site so a later field cannot accidentally inherit an unbounded helper.
+pub(crate) fn non_empty(field: &'static str, value: &str, max_bytes: usize) -> Result<()> {
     if value.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
+    }
+    if value.len() > max_bytes {
+        return Err(Error::validation(
+            field,
+            format!("must be at most {max_bytes} bytes"),
+        ));
     }
     Ok(())
 }
@@ -45,13 +92,7 @@ pub(crate) fn non_empty(field: &'static str, value: &str) -> Result<()> {
 /// This is intentionally scoped to the field; the general [`non_empty`]
 /// contract is tracked separately.
 pub(crate) fn billing_device(field: &'static str, value: &str) -> Result<()> {
-    non_empty(field, value)?;
-    if value.len() > MAX_BILLING_DEVICE {
-        return Err(Error::validation(
-            field,
-            format!("must be at most {MAX_BILLING_DEVICE} bytes"),
-        ));
-    }
+    non_empty(field, value, MAX_BILLING_DEVICE)?;
     let mut bytes = value.bytes();
     if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase()) {
         return Err(Error::validation(
@@ -74,13 +115,7 @@ pub(crate) fn billing_device(field: &'static str, value: &str) -> Result<()> {
 /// `:`, `@` and `-`. A bare `.` or `..` segment is refused even though its
 /// characters are otherwise allowed.
 pub(crate) fn path_segment(field: &'static str, value: &str) -> Result<()> {
-    non_empty(field, value)?;
-    if value.len() > MAX_SESSION_ID {
-        return Err(Error::validation(
-            field,
-            format!("must be at most {MAX_SESSION_ID} bytes"),
-        ));
-    }
+    non_empty(field, value, MAX_SESSION_ID)?;
     if value == "." || value == ".." {
         return Err(Error::validation(field, "must not be . or .."));
     }
@@ -154,7 +189,7 @@ pub(crate) fn phone(field: &'static str, value: &str) -> Result<String> {
 
 /// Validates an absolute `http(s)` URL with a host and no credentials.
 pub(crate) fn http_url(field: &'static str, value: &str) -> Result<()> {
-    non_empty(field, value)?;
+    non_empty(field, value, MAX_REST_FIELD_BYTES)?;
 
     if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(Error::validation(
@@ -202,13 +237,7 @@ pub(crate) fn http_url(field: &'static str, value: &str) -> Result<()> {
 /// Validates a BCP-47 language tag as far as the API cares: non-empty, short,
 /// ASCII, with a `-` separator in the common case.
 pub(crate) fn language_tag(field: &'static str, value: &str) -> Result<()> {
-    non_empty(field, value)?;
-    if value.len() > MAX_LANGUAGE_TAG {
-        return Err(Error::validation(
-            field,
-            format!("must be at most {MAX_LANGUAGE_TAG} characters"),
-        ));
-    }
+    non_empty(field, value, MAX_LANGUAGE_TAG)?;
     if !value.is_ascii()
         || value
             .chars()
@@ -224,6 +253,8 @@ pub(crate) fn language_tag(field: &'static str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -386,6 +417,42 @@ mod tests {
             "e/2",
         ] {
             assert!(billing_device("id", value).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn non_empty_accepts_one_character_and_rejects_empty() {
+        assert!(non_empty("field", "x", 1).is_ok());
+        assert!(non_empty("field", "", 1).is_err());
+    }
+
+    #[test]
+    fn non_empty_accepts_the_exact_limit_and_rejects_one_byte_over() {
+        let limit = 8;
+        assert!(non_empty("field", &"x".repeat(limit), limit).is_ok());
+        assert!(non_empty("field", &"x".repeat(limit + 1), limit).is_err());
+    }
+
+    #[test]
+    fn non_empty_counts_utf8_bytes_not_characters() {
+        let limit = 4;
+        assert!(non_empty("field", "\u{00e9}\u{00e9}", limit).is_ok());
+        assert!(non_empty("field", "\u{00e9}\u{00e9}\u{00e9}", limit).is_err());
+    }
+
+    #[test]
+    fn non_empty_rejects_a_zero_ceiling_even_for_one_character() {
+        assert!(non_empty("field", "x", 0).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn non_empty_accepts_exactly_the_non_empty_bounded_inputs(
+            value in ".{0,64}",
+            max_bytes in 0_usize..=64,
+        ) {
+            let expected = !value.is_empty() && value.len() <= max_bytes;
+            prop_assert_eq!(non_empty("field", &value, max_bytes).is_ok(), expected);
         }
     }
 }

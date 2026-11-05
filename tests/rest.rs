@@ -904,6 +904,40 @@ fn fax_refuses_an_empty_line_a_relative_name_and_bad_base64() {
 }
 
 #[test]
+fn sms_request_fields_are_bounded_before_the_body_is_built() {
+    assert!(Sms::new("s0", "4915112345678", "x").is_ok());
+    assert!(Sms::new("s0", "4915112345678", "x".repeat(1024 * 1024)).is_ok());
+    assert!(Sms::new("s0", "4915112345678", "x".repeat(1024 * 1024 + 1)).is_err());
+}
+
+#[test]
+fn fax_request_identifiers_are_bounded_before_the_body_is_built() {
+    assert!(Fax::new("f0", "4915112345678", "fax.pdf", "JVBERi0=").is_ok());
+    let limit = 1024 * 1024;
+    assert!(Fax::new("s".repeat(limit), "4915112345678", "fax.pdf", "JVBERi0=").is_ok());
+    assert!(Fax::new(
+        "s".repeat(limit + 1),
+        "4915112345678",
+        "fax.pdf",
+        "JVBERi0="
+    )
+    .is_err());
+    assert!(Fax::new("f0", "4915112345678", "f".repeat(limit), "JVBERi0=").is_ok());
+    assert!(Fax::new("f0", "4915112345678", "f".repeat(limit + 1), "JVBERi0=").is_err());
+}
+
+#[test]
+fn dtmf_and_call_identifiers_are_bounded_before_the_body_is_built() {
+    let limit = 1024 * 1024;
+    assert!(Dtmf::new("1").is_ok());
+    assert!(Dtmf::new("1".repeat(limit)).is_ok());
+    assert!(Dtmf::new("1".repeat(limit + 1)).is_err());
+    assert!(Call::new("e0", "4915112345678").is_ok());
+    assert!(Call::new("e".repeat(limit), "4915112345678").is_ok());
+    assert!(Call::new("e".repeat(limit + 1), "4915112345678").is_err());
+}
+
+#[test]
 fn resend_fax_omits_an_unset_line() {
     assert!(ResendFax::new("1").to_json().get("faxlineId").is_none());
     assert_eq!(

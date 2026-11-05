@@ -439,10 +439,11 @@ impl Speak {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the text is empty.
+    /// [`Error::Validation`] when the text is empty or above the action-field
+    /// byte ceiling.
     pub fn text(text: impl Into<String>) -> Result<Self> {
         let text = text.into();
-        validate::non_empty("text", &text)?;
+        validate::non_empty("text", &text, validate::MAX_FLOW_ACTION_FIELD_BYTES)?;
         Ok(Self {
             text: Some(text),
             ..Self::default()
@@ -459,10 +460,11 @@ impl Speak {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the SSML is empty.
+    /// [`Error::Validation`] when the SSML is empty or above the action-field
+    /// byte ceiling.
     pub fn ssml(ssml: impl Into<String>) -> Result<Self> {
         let ssml = ssml.into();
-        validate::non_empty("ssml", &ssml)?;
+        validate::non_empty("ssml", &ssml, validate::MAX_FLOW_ACTION_FIELD_BYTES)?;
         Ok(Self {
             ssml: Some(ssml),
             ..Self::default()
@@ -1115,10 +1117,10 @@ impl Audio {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for empty or malformed base64.
+    /// [`Error::Validation`] for empty, oversized or malformed base64.
     pub fn base64(data: impl Into<String>) -> Result<Self> {
         let data = data.into();
-        validate::non_empty("audio", &data)?;
+        validate::non_empty("audio", &data, validate::MAX_AUDIO_BASE64_CHARS)?;
         if !base64::is_valid(&data) {
             return Err(Error::validation(
                 "audio",
@@ -1402,14 +1404,19 @@ impl Transfer {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an empty name or an unusable number.
+    /// [`Error::Validation`] for an empty or oversized name, or an unusable
+    /// number.
     pub fn with_caller_id(
         mut self,
         name: impl Into<String>,
         number: impl Into<String>,
     ) -> Result<Self> {
         let name = name.into();
-        validate::non_empty("caller_id_name", &name)?;
+        validate::non_empty(
+            "caller_id_name",
+            &name,
+            validate::MAX_FLOW_ACTION_FIELD_BYTES,
+        )?;
         self.caller_id_number = Some(validate::phone("caller_id_number", &number.into())?);
         self.caller_id_name = Some(name);
         Ok(self)
@@ -1673,7 +1680,11 @@ impl ConfigureTranscription {
             ));
         }
         for entry in &vocabulary {
-            validate::non_empty("custom_vocabulary", entry)?;
+            validate::non_empty(
+                "custom_vocabulary",
+                entry,
+                validate::MAX_CUSTOM_VOCABULARY_ENTRY_BYTES,
+            )?;
             if entry.chars().count() > 200 {
                 return Err(Error::validation(
                     "custom_vocabulary",
@@ -1773,11 +1784,12 @@ impl SendSms {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a non-E.164 number or an empty message.
+    /// [`Error::Validation`] for a non-E.164 number, or an empty or oversized
+    /// message.
     pub fn new(phone_number: impl Into<String>, message: impl Into<String>) -> Result<Self> {
         let phone_number = validate::phone("phone_number", &phone_number.into())?;
         let message = message.into();
-        validate::non_empty("message", &message)?;
+        validate::non_empty("message", &message, validate::MAX_SMS_MESSAGE_BYTES)?;
         Ok(Self {
             phone_number,
             message,
