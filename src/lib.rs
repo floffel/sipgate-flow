@@ -156,18 +156,67 @@
 //! documentation states the PAT wire form:
 //! `Authorization: Basic base64(<token id>:<token>)`.
 //!
-//! ```no_run
-//! # #[cfg(feature = "http")]
-//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! use sipgate_flow::{rest::Sms, PersonalAccessToken, ReqwestTransport, RestClient};
+//! [`RestClient`] is generic over the public [`Transport`] trait, so the same
+//! client runs against `reqwest`, a test double, or any other HTTP stack. This
+//! example drives it with an in-memory mock — no socket, no feature gate — and
+//! proves the request the client sends is exactly `POST /v2/sessions/sms` with
+//! the PAT rendered as a Basic credential:
 //!
-//! // A PAT goes out as `Authorization: Basic base64(<token id>:<token>)`, as documented.
+//! ```
+//! use sipgate_flow::{rest::Sms, PersonalAccessToken, Request, Response, RestClient};
+//! use sipgate_flow::{Result, Transport};
+//!
+//! #[derive(Clone, Default)]
+//! struct Mock(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+//!
+//! impl Transport for Mock {
+//!     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+//!         self.0.lock().unwrap().push(request.url.to_string());
+//!         // A 2xx answer with a JSON body is what `send_sms` decodes.
+//!         Ok(Response::new(200, std::iter::empty(), b"{}".to_vec()))
+//!     }
+//! }
+//!
+//! # tokio::runtime::Builder::new_current_thread().build().expect("runtime").block_on(async {
+//! let transport = Mock::default();
+//! let auth = PersonalAccessToken::new("token-FQ1V12", "e68ead46")?;
+//! let client = RestClient::new(transport.clone(), auth);
+//!
+//! let sms = Sms::new("s0", "4915112345678", "Hallo!")?;
+//! client.send_sms(&sms).await?;
+//!
+//! assert_eq!(
+//!     *transport.0.lock().unwrap(),
+//!     vec!["https://api.sipgate.com/v2/sessions/sms".to_string()],
+//! );
+//! # Ok::<(), sipgate_flow::Error>(())
+//! # });
+//! ```
+//!
+//! Against the real API the only change is the transport; the PAT still goes
+//! out as `Authorization: Basic base64(<token id>:<token>)`, as documented.
+//! Only the transport choice is feature-gated, so the credential and request
+//! build stay compiled (and honest) even with `http` off:
+//!
+//! ```no_run
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! use sipgate_flow::{rest::Sms, PersonalAccessToken, RestClient};
+//!
 //! let auth = PersonalAccessToken::new(
 //!     std::env::var("SIPGATE_TOKEN_ID")?,
 //!     std::env::var("SIPGATE_TOKEN")?,
 //! )?;
+//! let sms = Sms::new("s0", "4915112345678", "Hallo!")?;
+//!
+//! # #[cfg(feature = "http")]
+//! # {
+//! use sipgate_flow::ReqwestTransport;
+//!
 //! let client = RestClient::new(ReqwestTransport::new(), auth);
-//! client.send_sms(&Sms::new("s0", "4915112345678", "Hallo!")?).await?;
+//! client.send_sms(&sms).await?;
+//! # }
+//! # #[cfg(not(feature = "http"))]
+//! # let _ = (auth, sms);
 //! # Ok(())
 //! # }
 //! ```
