@@ -275,7 +275,26 @@ fn zero_max_attempts_still_has_no_retry_after_the_first_failure() {
         policy.max_attempts, 0,
         "the builder keeps the caller's value"
     );
+    assert_eq!(policy.delay(0, None), None);
     assert_eq!(policy.delay(1, None), None);
+}
+
+#[test]
+fn zero_completed_failures_never_schedules_a_delay() {
+    let policy = RetryPolicy::default();
+    assert_eq!(
+        policy.delay(0, Some(Duration::from_secs(30))),
+        None,
+        "no completed failure means no wait, even with a Retry-After hint"
+    );
+
+    // Boundary sweep: the first retry is due after one completed failure, all
+    // in-budget values before the final attempt schedule one, and the budget is
+    // spent at `max_attempts` and beyond.
+    assert!(policy.delay(1, None).is_some());
+    assert!(policy.delay(policy.max_attempts - 1, None).is_some());
+    assert_eq!(policy.delay(policy.max_attempts, None), None);
+    assert_eq!(policy.delay(u32::MAX, None), None);
 }
 
 #[test]
