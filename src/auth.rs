@@ -303,6 +303,17 @@ impl ClientCredentials {
     /// ```
     #[must_use]
     pub fn token_request_body(&self) -> Vec<(String, String)> {
+        // "Reuse before build" would normally push this mapping into a
+        // maintained OAuth2 crate, but every candidate token client owns its
+        // own HTTP stack (or is reqwest-bound, as `aliri_reqwest` is), while
+        // this crate deliberately routes every request through the generic
+        // [`Transport`] trait so a caller can supply the mock, proxy, or
+        // custom client that fits their deployment. The form body itself is
+        // three documented `application/x-www-form-urlencoded` fields plus an
+        // optional space-delimited `scope` list; building a crate-owned struct
+        // around that would only re-encode the same wire contract. The
+        // relationship to a maintained type is the *response* shape, which
+        // [`Token::from_json`] maps below.
         let mut body = vec![
             ("grant_type".to_string(), "client_credentials".to_string()),
             ("client_id".to_string(), self.client_id.clone()),
@@ -385,6 +396,19 @@ impl Token {
     /// [`Error::TokenResponse`] for a missing or empty `access_token`, a
     /// non-object body, or an `expires_in` above [`MAX_TOKEN_LIFETIME`].
     pub fn from_json(value: &Value) -> Result<Self> {
+        // A maintained OAuth2 crate (for example `openid`) models this
+        // response, but adopting its type here would tie the public
+        // [`Token`] to that crate's own HTTP/transport and error surface,
+        // which this crate intentionally keeps behind [`Transport`] and
+        // [`Error`]. The wire shape is small and permissively specified
+        // (RFC 6749 §5.1): `access_token` is the only required field, so the
+        // remaining fields are read defensively rather than via a strict
+        // `Deserialize`. The local mapping also enforces this crate's own edge
+        // cases: an empty or non-string `access_token` fails closed, a
+        // missing `token_type` defaults to `bearer`, a non-integer
+        // `expires_in` is treated as absent so [`DEFAULT_LIFETIME`] applies,
+        // and an `expires_in` above [`MAX_TOKEN_LIFETIME`] is refused instead
+        // of producing a duration the cache clock cannot safely add.
         let access_token = match value.get("access_token") {
             Some(Value::String(token)) if !token.is_empty() => token,
             Some(Value::String(_)) => {
@@ -1190,6 +1214,14 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
     }
 
     async fn fetch(&self) -> Result<Token> {
+        // This is the deliberate deviation from "reuse before build" for the
+        // whole exchange: the request is built through [`ClientCredentials`]
+        // and sent over the caller-supplied [`Transport`] with
+        // [`Security::None`] (the credentials travel in the form body, not a
+        // header), and the response is mapped by [`Token::from_json`]. Keeping
+        // the two halves local is what lets a single [`Transport`]
+        // implementation serve both this crate's REST calls and its token
+        // endpoint, without pulling in a crate that owns its own client.
         let body = self.credentials.token_request_body();
         let request = Request::form(Method::Post, &self.token_url, Security::None, &body)
             .with_timeout(self.timeout);
