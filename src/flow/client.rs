@@ -27,7 +27,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::auth::{StaticToken, TokenSource};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::exchange;
 use crate::transport::{Method, Transport};
 use crate::validate;
@@ -79,7 +79,7 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
         }
     }
 
-    /// Overrides the base URL.
+    /// Overrides the base URL with a validated `https://` URL.
     ///
     /// ```
     /// use sipgate_flow::{FlowClient, StaticToken};
@@ -90,13 +90,91 @@ impl<T: Transport, A: TokenSource> FlowClient<T, A> {
     /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> { Ok(Response::new(201, std::iter::empty(), b"{}".to_vec())) }
     /// # }
     /// let client = FlowClient::new(Mock, StaticToken::new("t").unwrap())
-    ///     .with_base_url("http://localhost:8080/");
-    /// assert_eq!(client.base_url(), "http://localhost:8080");
+    ///     .with_base_url("https://proxy.test/")?;
+    /// assert_eq!(client.base_url(), "https://proxy.test");
+    /// # Ok::<(), sipgate_flow::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into().trim_end_matches('/').to_string();
-        self
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty value, a relative or host-less URL,
+    /// a non-http(s) scheme, credentials, whitespace, control characters or a
+    /// plain `http://` URL. Use [`Self::with_base_url_for_local_testing`] only
+    /// for local test servers where sending credentials in cleartext is
+    /// intentional.
+    pub fn with_base_url(self, url: impl Into<String>) -> Result<Self> {
+        self.try_with_base_url(url)
+    }
+
+    /// Overrides the base URL with a validated `https://` URL.
+    ///
+    /// This is the explicit fallible form of [`Self::with_base_url`].
+    ///
+    /// ```
+    /// use sipgate_flow::{FlowClient, StaticToken};
+    /// # use sipgate_flow::{Result, Transport};
+    /// # use sipgate_flow::transport::{Request, Response};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> { Ok(Response::new(201, std::iter::empty(), b"{}".to_vec())) }
+    /// # }
+    /// let client = FlowClient::new(Mock, StaticToken::new("t").unwrap())
+    ///     .try_with_base_url("https://proxy.test/")?;
+    /// assert_eq!(client.base_url(), "https://proxy.test");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty value, a relative or host-less URL,
+    /// a non-http(s) scheme, credentials, whitespace, control characters or a
+    /// plain `http://` URL.
+    pub fn try_with_base_url(self, url: impl Into<String>) -> Result<Self> {
+        self.set_base_url(&url.into(), false)
+    }
+
+    /// Overrides the base URL with a validated `http(s)` URL for local testing.
+    ///
+    /// Prefer [`Self::try_with_base_url`] in production. This method allows
+    /// plaintext `http://` so credentials can be sent to a local test server;
+    /// TLS remains required unless this method is chosen explicitly.
+    ///
+    /// ```
+    /// use sipgate_flow::{FlowClient, StaticToken};
+    /// # use sipgate_flow::{Result, Transport};
+    /// # use sipgate_flow::transport::{Request, Response};
+    /// # struct Mock;
+    /// # impl Transport for Mock {
+    /// #     async fn execute(&self, _: Request<'_>) -> Result<Response> { Ok(Response::new(201, std::iter::empty(), b"{}".to_vec())) }
+    /// # }
+    /// let client = FlowClient::new(Mock, StaticToken::new("t").unwrap())
+    ///     .with_base_url_for_local_testing("http://localhost:8080/")?;
+    /// assert_eq!(client.base_url(), "http://localhost:8080");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty value, a relative or host-less URL,
+    /// a non-http(s) scheme, credentials, whitespace or control characters.
+    pub fn with_base_url_for_local_testing(self, url: impl Into<String>) -> Result<Self> {
+        self.set_base_url(&url.into(), true)
+    }
+
+    fn set_base_url(mut self, url: &str, allow_http: bool) -> Result<Self> {
+        validate::http_url("base_url", url)?;
+        if !allow_http
+            && url
+                .get(..7)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+        {
+            return Err(Error::validation(
+                "base_url",
+                "must use https:// unless local testing is explicitly enabled",
+            ));
+        }
+        self.base_url = url.trim_end_matches('/').to_string();
+        Ok(self)
     }
 
     /// Sets a per-request timeout.

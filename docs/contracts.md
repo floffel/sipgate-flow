@@ -192,7 +192,8 @@ Content-Type: application/json
 
 The resulting session carries `"direction": "outbound"` (guide, §"Outbound Call
 Flow"). `FlowClient` composes the base URL from the v3 `servers` entry and keeps
-`with_base_url` for a proxy or a test double.
+`try_with_base_url` for a proxy or a regional host; `with_base_url_for_local_testing`
+is the explicit opt-in for plaintext local test doubles.
 
 ## 5. REST API v2 — verified against the public Swagger
 

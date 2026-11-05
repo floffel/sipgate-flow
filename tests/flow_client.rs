@@ -189,7 +189,8 @@ async fn base_url_and_timeout_are_configurable() {
     let transport = MockTransport::new();
     transport.push_response(no_content());
     let client = client(transport.clone())
-        .with_base_url("http://localhost:8080/")
+        .with_base_url_for_local_testing("http://localhost:8080/")
+        .expect("local test server")
         .with_timeout(Some(Duration::from_secs(2)));
     assert_eq!(client.base_url(), "http://localhost:8080");
     assert_eq!(client.timeout(), Some(Duration::from_secs(2)));
@@ -208,6 +209,62 @@ async fn base_url_and_timeout_are_configurable() {
         format!("http://localhost:8080/v3/ai-flows/{FLOW_ID}/call")
     );
     assert_eq!(recorded.timeout, Some(Duration::from_secs(2)));
+}
+
+#[test]
+fn base_url_override_validates_and_requires_https_by_default() {
+    assert_eq!(
+        client(MockTransport::new())
+            .try_with_base_url("https://proxy.test/")
+            .expect("valid https URL")
+            .base_url(),
+        "https://proxy.test"
+    );
+    assert_eq!(
+        client(MockTransport::new())
+            .with_base_url("https://proxy.test/")
+            .expect("valid https URL")
+            .base_url(),
+        "https://proxy.test"
+    );
+    assert_eq!(
+        client(MockTransport::new())
+            .with_base_url_for_local_testing("http://localhost:8080/")
+            .expect("explicit local-testing opt-in accepts http")
+            .base_url(),
+        "http://localhost:8080"
+    );
+
+    for url in [
+        "",
+        "api.sipgate.com",
+        "/v3/ai-flows",
+        "https://",
+        "file:///tmp/token",
+        "http://api.sipgate.com",
+        "HTTP://api.sipgate.com",
+        "https://user:secret@proxy.test",
+        "https://proxy.test/path with space",
+    ] {
+        assert!(
+            client(MockTransport::new()).try_with_base_url(url).is_err(),
+            "{url:?} must be rejected"
+        );
+        assert!(
+            client(MockTransport::new()).with_base_url(url).is_err(),
+            "{url:?} must be rejected"
+        );
+    }
+
+    assert!(client(MockTransport::new())
+        .with_base_url_for_local_testing("api.sipgate.com")
+        .is_err());
+    assert!(client(MockTransport::new())
+        .with_base_url_for_local_testing("file:///tmp/token")
+        .is_err());
+    assert!(client(MockTransport::new())
+        .with_base_url_for_local_testing("")
+        .is_err());
 }
 
 #[test]
