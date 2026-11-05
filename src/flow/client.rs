@@ -344,7 +344,7 @@ impl OutboundCall {
         to_phone_number: impl Into<String>,
     ) -> Result<Self> {
         let ai_flow_id = ai_flow_id.into();
-        validate::path_segment("ai_flow_id", &ai_flow_id)?;
+        validate::ai_flow_id("ai_flow_id", &ai_flow_id)?;
         let billing_device = billing_device.into();
         validate::non_empty("billing_device", &billing_device)?;
         let digits = validate::phone("to_phone_number", &to_phone_number.into())?;
