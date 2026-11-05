@@ -376,6 +376,13 @@ fn the_request_validates_its_three_fields() {
 }
 
 #[test]
+fn billing_device_stays_at_the_documented_suffix_ceiling() {
+    assert!(OutboundCall::new(FLOW_ID, "e", "4915112345678").is_ok());
+    assert!(OutboundCall::new(FLOW_ID, "e1234567", "4915112345678").is_ok());
+    assert!(OutboundCall::new(FLOW_ID, "e12345678", "4915112345678").is_err());
+}
+
+#[test]
 fn accessors_expose_the_normalised_values() {
     let call = OutboundCall::new(FLOW_ID, "e2", "+4915112345678").expect("valid");
     assert_eq!(call.ai_flow_id(), FLOW_ID);

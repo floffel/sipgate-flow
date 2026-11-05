@@ -74,6 +74,34 @@ fn empty_text_and_ssml_are_refused() {
 }
 
 #[test]
+fn speak_payloads_are_bounded_at_the_action_ceiling() {
+    let limit = 1024 * 1024;
+    assert!(Speak::text("x").is_ok());
+    assert!(Speak::text("x".repeat(limit)).is_ok());
+    assert!(Speak::text("x".repeat(limit + 1)).is_err());
+    assert!(Speak::ssml("x").is_ok());
+    assert!(Speak::ssml("x".repeat(limit)).is_ok());
+    assert!(Speak::ssml("x".repeat(limit + 1)).is_err());
+}
+
+#[test]
+fn transfer_caller_id_name_is_bounded_at_the_action_ceiling() {
+    let limit = 1024 * 1024;
+    assert!(Transfer::new("4915112345678")
+        .unwrap()
+        .with_caller_id("S", "4921112345678")
+        .is_ok());
+    assert!(Transfer::new("4915112345678")
+        .unwrap()
+        .with_caller_id("x".repeat(limit), "4921112345678")
+        .is_ok());
+    assert!(Transfer::new("4915112345678")
+        .unwrap()
+        .with_caller_id("x".repeat(limit + 1), "4921112345678")
+        .is_err());
+}
+
+#[test]
 fn an_unusable_session_id_never_reaches_an_action() {
     for bad in [
         "",
@@ -124,6 +152,15 @@ fn audio_requires_valid_base64() {
     for bad in ["", "not base64!", "A", "A==="] {
         assert!(Action::audio_base64(SESSION, bad).is_err(), "{bad:?}");
     }
+}
+
+#[test]
+fn audio_base64_is_bounded_before_it_reaches_the_payload() {
+    let limit = sipgate_flow::base64::encoded_len(sipgate_flow::base64::MAX_DECODED_BYTES)
+        .expect("representable ceiling");
+    assert!(Audio::base64("AA==").is_ok());
+    assert!(Audio::base64("A".repeat(limit)).is_ok());
+    assert!(Audio::base64("A".repeat(limit + 1)).is_err());
 }
 
 #[test]
@@ -343,6 +380,14 @@ fn configure_transcription_bounds_languages_and_vocabulary() {
         .with_vocabulary(["x".repeat(201)])
         .is_err());
     assert!(ConfigureTranscription::new().with_vocabulary([""]).is_err());
+}
+
+#[test]
+fn sms_message_is_bounded_at_the_action_ceiling() {
+    let limit = 1024 * 1024;
+    assert!(SendSms::new("4915112345678", "x").is_ok());
+    assert!(SendSms::new("4915112345678", "x".repeat(limit)).is_ok());
+    assert!(SendSms::new("4915112345678", "x".repeat(limit + 1)).is_err());
 }
 
 #[test]

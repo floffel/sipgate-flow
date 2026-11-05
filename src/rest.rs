@@ -758,18 +758,18 @@ impl Sms {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an empty device id or message, or a recipient
-    /// that is not `+`-prefixed E.164 digits.
+    /// [`Error::Validation`] for an empty or oversized device id or message, or
+    /// a recipient that is not `+`-prefixed E.164 digits.
     pub fn new(
         sms_id: impl Into<String>,
         recipient: impl Into<String>,
         message: impl Into<String>,
     ) -> Result<Self> {
         let sms_id = sms_id.into();
-        validate::non_empty("sms_id", &sms_id)?;
+        validate::non_empty("sms_id", &sms_id, validate::MAX_REST_FIELD_BYTES)?;
         let recipient = validate::phone("recipient", &recipient.into())?;
         let message = message.into();
-        validate::non_empty("message", &message)?;
+        validate::non_empty("message", &message, validate::MAX_SMS_MESSAGE_BYTES)?;
         Ok(Self {
             sms_id,
             // The schema shows "+49…", so keep the plus the validator stripped.
@@ -863,9 +863,9 @@ impl Fax {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an empty faxline id or filename, a filename
-    /// containing a path separator, empty or oversized content, or a recipient
-    /// that is not E.164 digits.
+    /// [`Error::Validation`] for an empty or oversized faxline id or filename,
+    /// a filename containing a path separator, empty or oversized content, or a
+    /// recipient that is not E.164 digits.
     pub fn new(
         faxline_id: impl Into<String>,
         recipient: impl Into<String>,
@@ -873,10 +873,10 @@ impl Fax {
         base64_content: impl Into<String>,
     ) -> Result<Self> {
         let faxline_id = faxline_id.into();
-        validate::non_empty("faxline_id", &faxline_id)?;
+        validate::non_empty("faxline_id", &faxline_id, validate::MAX_REST_FIELD_BYTES)?;
         let recipient = validate::phone("recipient", &recipient.into())?;
         let filename = filename.into();
-        validate::non_empty("filename", &filename)?;
+        validate::non_empty("filename", &filename, validate::MAX_REST_FIELD_BYTES)?;
         if filename
             .chars()
             .any(|c| c == '/' || c == '\\' || c.is_control())
@@ -887,13 +887,7 @@ impl Fax {
             ));
         }
         let base64_content = base64_content.into();
-        validate::non_empty("base64Content", &base64_content)?;
-        if base64_content.len() > MAX_FAX_BASE64_LEN {
-            return Err(Error::validation(
-                "base64Content",
-                format!("must be at most {MAX_FAX_BASE64_LEN} characters"),
-            ));
-        }
+        validate::non_empty("base64Content", &base64_content, MAX_FAX_BASE64_LEN)?;
         if !crate::base64::is_valid(&base64_content) {
             return Err(Error::validation(
                 "base64Content",
@@ -1033,12 +1027,12 @@ impl Call {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an empty caller or a callee that is not E.164
-    /// digits.
+    /// [`Error::Validation`] for an empty or oversized caller, or a callee that
+    /// is not E.164 digits.
     #[allow(clippy::similar_names)] // `caller`/`callee` are the schema's names
     pub fn new(caller: impl Into<String>, callee: impl Into<String>) -> Result<Self> {
         let caller = caller.into();
-        validate::non_empty("caller", &caller)?;
+        validate::non_empty("caller", &caller, validate::MAX_REST_FIELD_BYTES)?;
         let callee = validate::phone("callee", &callee.into())?;
         Ok(Self {
             caller,
@@ -1221,11 +1215,11 @@ impl Dtmf {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an empty sequence or a character outside the
-    /// DTMF alphabet.
+    /// [`Error::Validation`] for an empty or oversized sequence, or a character
+    /// outside the DTMF alphabet.
     pub fn new(sequence: impl Into<String>) -> Result<Self> {
         let sequence = sequence.into();
-        validate::non_empty("sequence", &sequence)?;
+        validate::non_empty("sequence", &sequence, validate::MAX_REST_FIELD_BYTES)?;
         if !sequence
             .bytes()
             .all(|byte| byte.is_ascii_digit() || b"*#ABCD".contains(&byte))

@@ -38,6 +38,10 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `credential`, `auth`, `verifier`, `code` and `cert`. These names fail closed,
   so ambiguous fields such as `error_code` are hidden too instead of risking a
   log-time secret leak.
+* `validate::non_empty` now enforces the byte ceilings its documentation
+  promised. The public action and REST builders pass the documented limits for
+  their fields, so a multi-megabyte caller string is refused before it is
+  copied into a request body.
 * Retry pacing now has a hard `MIN_RETRY_DELAY` floor. `with_base_delay`,
   `with_max_delay`, local backoff and `Retry-After` values can no longer produce
   a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer
