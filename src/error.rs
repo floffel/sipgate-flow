@@ -900,7 +900,11 @@ impl Error {
     ///
     /// This is the crate-internal constructor the `reqwest` adapter uses so the
     /// real transport error, which answers `is_timeout()`/`is_connect()`,
-    /// survives on the cause chain.
+    /// survives on the cause chain. It exists only for that adapter, hence the
+    /// `http` gate: without the feature nothing calls it and a
+    /// `-D warnings` build of the minimal configuration would fail on dead
+    /// code.
+    #[cfg(feature = "http")]
     pub(crate) fn transport_with_source(
         message: impl Into<String>,
         retryable: bool,
