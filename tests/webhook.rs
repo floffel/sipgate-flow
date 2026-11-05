@@ -1,6 +1,8 @@
 //! Webhook authentication: fail closed, constant time, and picky about the
 //! content type but not about how a framework spells the header.
 
+use std::io::{Cursor, Read};
+
 use sipgate_flow::webhook::{is_json_content_type, DEFAULT_MAX_BODY_BYTES};
 use sipgate_flow::{Error, EventPayload, WebhookVerifier};
 
@@ -139,6 +141,102 @@ fn oversized_bodies_are_rejected_before_parsing() {
         .verify_and_parse(Some("s"), Some("application/json"), BODY)
         .expect_err("fixture is larger than 64 bytes");
     assert!(matches!(error, Error::BodyTooLarge { limit: 64, .. }));
+}
+
+#[test]
+fn verify_reader_accepts_exactly_the_limit() {
+    let verifier = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(BODY.len());
+    let event = verifier
+        .verify_reader(Some("s"), Some("application/json"), Cursor::new(BODY))
+        .expect("exactly the limit is allowed");
+    assert!(matches!(event.payload(), EventPayload::SessionStart { .. }));
+}
+
+#[test]
+fn verify_reader_rejects_limit_plus_one_immediately() {
+    let limit = BODY.len();
+    let verifier = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(limit);
+    let mut oversized = BODY.to_vec();
+    oversized.extend_from_slice(b"x");
+
+    let error = verifier
+        .verify_reader(
+            Some("s"),
+            Some("application/json"),
+            OneChunkThenPanic::new(oversized),
+        )
+        .expect_err("one byte past the limit must be refused");
+    assert!(matches!(
+        error,
+        Error::BodyTooLarge {
+            size,
+            limit: refused_limit
+        } if size == limit + 1 && refused_limit == limit
+    ));
+}
+
+#[test]
+fn verify_reader_rejects_limit_plus_one_without_draining_the_reader() {
+    let limit = 4;
+    let verifier = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(limit);
+
+    let error = verifier
+        .verify_reader(
+            Some("s"),
+            Some("application/json"),
+            OneChunkThenPanic::new(b"12345".to_vec()),
+        )
+        .expect_err("one byte past the limit must be refused");
+    assert!(matches!(error, Error::BodyTooLarge { size: 5, limit: 4 }));
+}
+
+#[test]
+fn verify_reader_maps_reader_failures_to_body_read() {
+    let verifier = WebhookVerifier::new("s").expect("valid");
+    let error = verifier
+        .verify_reader(Some("s"), Some("application/json"), FailingReader)
+        .expect_err("reader failure must be reported");
+    assert!(matches!(error, Error::BodyRead { .. }));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+struct OneChunkThenPanic {
+    body: Vec<u8>,
+    offset: usize,
+}
+
+impl OneChunkThenPanic {
+    fn new(body: Vec<u8>) -> Self {
+        Self { body, offset: 0 }
+    }
+}
+
+impl Read for OneChunkThenPanic {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        assert!(
+            self.offset < self.body.len(),
+            "reader was drained after the limit was already exceeded"
+        );
+        let remaining = &self.body[self.offset..];
+        let read = remaining.len().min(buffer.len());
+        buffer[..read].copy_from_slice(&remaining[..read]);
+        self.offset += read;
+        Ok(read)
+    }
+}
+
+struct FailingReader;
+
+impl Read for FailingReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("broken body stream"))
+    }
 }
 
 #[test]
