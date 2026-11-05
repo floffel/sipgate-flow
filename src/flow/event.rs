@@ -744,13 +744,18 @@ impl Event {
         }
     }
 
-    fn from_raw(raw: RawEvent) -> Result<Self> {
+    fn from_raw(mut raw: RawEvent) -> Result<Self> {
         let session = raw.session.as_ref().map(RawSession::to_session);
         // Compatibility: the 0.1 stub accepted a top-level `callId`, and the
-        // Push API uses exactly that name. It only fills a gap, never wins.
-        let session = match (session, raw.call_id) {
+        // Push API uses exactly that name. It only fills a gap, never wins; a
+        // conflicting value stays visible in `extra` under the Push API name.
+        let session = match (session, raw.call_id.take()) {
             (Some(mut session), Some(call_id)) if session.id.is_empty() => {
                 session.id = call_id;
+                Some(session)
+            }
+            (Some(session), Some(call_id)) if session.id != call_id => {
+                raw.extra.insert("callId".into(), Value::String(call_id));
                 Some(session)
             }
             (Some(session), _) => Some(session),
@@ -901,11 +906,20 @@ impl Event {
 
     /// Fields on the event this crate does not model, preserved verbatim.
     ///
+    /// A top-level `callId` that conflicts with `session.id` is also kept here
+    /// under `callId`; `session.id` remains the authoritative Flow session id.
+    ///
     /// ```
     /// use sipgate_flow::Event;
     ///
     /// let event = Event::parse(br#"{"type":"session_end","session":{"id":"s"},"new_field":7}"#)?;
     /// assert_eq!(event.extra().get("new_field"), Some(&serde_json::json!(7)));
+    ///
+    /// let conflict = Event::parse(
+    ///     br#"{"type":"session_end","callId":"push-call","session":{"id":"flow-session"}}"#,
+    /// )?;
+    /// assert_eq!(conflict.session_id(), Some("flow-session"));
+    /// assert_eq!(conflict.extra().get("callId"), Some(&serde_json::json!("push-call")));
     /// # Ok::<(), sipgate_flow::Error>(())
     /// ```
     #[must_use]
