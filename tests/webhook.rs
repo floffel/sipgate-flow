@@ -3,6 +3,7 @@
 
 use std::io::{Cursor, Read};
 
+use proptest::prelude::*;
 use sipgate_flow::webhook::{is_json_content_type, DEFAULT_MAX_BODY_BYTES};
 use sipgate_flow::{Error, EventPayload, WebhookVerifier};
 
@@ -65,6 +66,55 @@ fn json_content_types_are_accepted_with_parameters_and_casing() {
         "",
     ] {
         assert!(!is_json_content_type(value), "{value:?}");
+    }
+}
+
+#[test]
+fn json_suffixes_without_a_media_type_are_not_accepted() {
+    for value in ["+json", "foo+json", "json", "application+json"] {
+        assert!(!is_json_content_type(value), "{value:?}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn json_content_type_detection_is_ascii_case_idempotent(value in ".{0,128}") {
+        let upper = value.to_ascii_uppercase();
+        let lower = value.to_ascii_lowercase();
+        prop_assert_eq!(
+            is_json_content_type(&value),
+            is_json_content_type(&upper),
+            "uppercasing {:?} changed the result",
+            value
+        );
+        prop_assert_eq!(
+            is_json_content_type(&value),
+            is_json_content_type(&lower),
+            "lowercasing {:?} changed the result",
+            value
+        );
+    }
+
+    #[test]
+    fn application_json_with_arbitrary_parameters_is_json(
+        name in "[A-Za-z0-9_.-]{1,24}",
+        value in "[A-Za-z0-9_.-]{1,48}",
+    ) {
+        let content_type = format!("application/json; {name}={value}");
+        prop_assert!(
+            is_json_content_type(&content_type),
+            "{content_type:?} should be JSON"
+        );
+    }
+
+    #[test]
+    fn strings_without_a_slash_are_not_json(content_type in "[^/]{0,96}") {
+        prop_assert!(
+            !is_json_content_type(&content_type),
+            "{content_type:?} has no media type slash"
+        );
     }
 }
 
@@ -132,6 +182,19 @@ fn verification_happens_before_parsing() {
 }
 
 #[test]
+fn a_wrong_secret_is_refused_before_content_type_and_size_checks() {
+    let verifier = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(4)
+        .expect("valid limit");
+    let oversized = b"12345";
+    let error = verifier
+        .verify_and_parse(Some("wrong"), Some("text/plain"), oversized)
+        .expect_err("the secret check must run first");
+    assert!(matches!(error, Error::SecretMismatch));
+}
+
+#[test]
 fn oversized_bodies_are_rejected_before_parsing() {
     let verifier = WebhookVerifier::new("s")
         .expect("valid")
@@ -142,6 +205,33 @@ fn oversized_bodies_are_rejected_before_parsing() {
         .verify_and_parse(Some("s"), Some("application/json"), BODY)
         .expect_err("fixture is larger than 64 bytes");
     assert!(matches!(error, Error::BodyTooLarge { limit: 64, .. }));
+}
+
+#[test]
+fn buffered_body_limit_accepts_exactly_max_and_rejects_max_plus_one() {
+    let limit = BODY.len();
+    let verifier = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(limit)
+        .expect("valid limit");
+
+    let event = verifier
+        .verify_and_parse(Some("s"), Some("application/json"), BODY)
+        .expect("exactly the limit is allowed");
+    assert!(matches!(event.payload(), EventPayload::SessionStart { .. }));
+
+    let mut oversized = BODY.to_vec();
+    oversized.push(b'x');
+    let error = verifier
+        .verify_and_parse(Some("s"), Some("application/json"), &oversized)
+        .expect_err("one byte past the limit must be refused");
+    assert!(matches!(
+        error,
+        Error::BodyTooLarge {
+            size,
+            limit: refused_limit
+        } if size == limit + 1 && refused_limit == limit
+    ));
 }
 
 #[test]
