@@ -15,6 +15,9 @@ with the pre-1.0 reading described in the README section *Versioning*.
   now returns `None` instead of treating the first caller attempt index as an
   already-failed try; the boundary is pinned in tests for 0, 1,
   `max_attempts - 1`, `max_attempts` and `u32::MAX`.
+* The crate-root REST example now states the PAT wire form accurately again:
+  `PersonalAccessToken` sends `Authorization: Basic base64(<token id>:<token>)`
+  and links to `transport::Security::Basic` for the same contract.
 * The minimal configuration (`--no-default-features`) now builds clean under
   `-D warnings`: the crate-internal transport-error constructor is `http`-gated
   (nothing outside the `reqwest` adapter calls it), and the two intra-doc links
