@@ -33,10 +33,10 @@ pub use action::{
     SendSms, Speak, TranscriptionProvider, Transfer, Tts, Vad,
 };
 pub use client::{
-    AccountRetentionSettings, AgentVoices, AiWebhookSettings, CurrentVoice, FlowClient,
-    OutboundCall, OutboundCallReceipt, RecordingAnnouncementMode, SetAccountRetentionSettings,
-    SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio, TranscriptionAnnouncementMode,
-    TransferCallerIdSource, TtsSetting, TtsVoice, DEFAULT_BASE_URL,
+    AccountRetentionSettings, AgentVoices, AiWebhookConfig, AiWebhookHeader, AiWebhookSettings,
+    CurrentVoice, FlowClient, OutboundCall, OutboundCallReceipt, RecordingAnnouncementMode,
+    SetAccountRetentionSettings, SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio,
+    TranscriptionAnnouncementMode, TransferCallerIdSource, TtsSetting, TtsVoice, DEFAULT_BASE_URL,
     MAX_ACCOUNT_SETTING_TOKEN_BYTES, MAX_EVENT_RETENTION_DAYS, MIN_EVENT_RETENTION_DAYS,
 };
 pub use event::{
