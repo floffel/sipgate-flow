@@ -465,6 +465,9 @@ pub enum EventPayload {
     /// A keypad press.
     DtmfReceived {
         /// The key pressed: `0`-`9`, `*` or `#`.
+        ///
+        /// [`Event::parse`] rejects a `dtmf_received` event that carries no
+        /// key, an empty key, or anything outside this alphabet.
         digit: String,
     },
     /// The assistant started speaking.
@@ -603,12 +606,14 @@ impl Event {
     /// * [`Error::EmptyBody`] when the body is empty or only whitespace.
     /// * [`Error::Json`] when the body is not JSON, is not an object, has a
     ///   strict field of the wrong type, or repeats a known key.
+    /// * [`Error::Validation`] when a `dtmf_received` event does not carry
+    ///   exactly one key from `0`-`9`, `*` or `#`.
     pub fn parse(body: &[u8]) -> Result<Self> {
         if body.iter().all(u8::is_ascii_whitespace) {
             return Err(Error::EmptyBody);
         }
         let raw: RawEvent = serde_json::from_slice(body)?;
-        let mut event = Self::from_raw(raw);
+        let mut event = Self::from_raw(raw)?;
         if event.is_unknown() {
             // Only unknown shapes need the whole document; keeping the second
             // parse off the hot path preserves serde's line/column errors for
@@ -618,7 +623,7 @@ impl Event {
         Ok(event)
     }
 
-    fn from_raw(raw: RawEvent) -> Self {
+    fn from_raw(raw: RawEvent) -> Result<Self> {
         let session = raw.session.as_ref().map(RawSession::to_session);
         // Compatibility: the 0.1 stub accepted a top-level `callId`, and the
         // Push API uses exactly that name. It only fills a gap, never wins.
@@ -657,8 +662,7 @@ impl Event {
                 text: raw.text.unwrap_or_default(),
             },
             Some("dtmf_received") => EventPayload::DtmfReceived {
-                // `digits` is the Push API spelling; accept it as a fallback.
-                digit: raw.digit.or(raw.digits).unwrap_or_default(),
+                digit: dtmf_digit(raw.digit, raw.digits)?,
             },
             Some("assistant_speak") => EventPayload::AssistantSpeak {
                 text: raw.text,
@@ -683,12 +687,12 @@ impl Event {
             _ => EventPayload::Unknown(Value::Null),
         };
 
-        Self {
+        Ok(Self {
             kind,
             session,
             payload,
             extra: raw.extra,
-        }
+        })
     }
 
     /// The wire `type` value, empty when the payload carried none.
@@ -914,6 +918,28 @@ impl Event {
         }
         Value::Object(object)
     }
+}
+
+fn dtmf_digit(digit: Option<String>, digits: Option<String>) -> Result<String> {
+    let singular = digit.filter(|value| !value.is_empty());
+    let plural = digits.filter(|value| !value.is_empty());
+    let candidate = match (singular, plural) {
+        (Some(singular), None) | (None, Some(singular)) => singular,
+        (Some(singular), Some(plural)) if singular == plural => singular,
+        _ => return Err(dtmf_digit_error()),
+    };
+
+    if candidate.len() == 1
+        && (candidate.as_bytes()[0].is_ascii_digit() || b"*#".contains(&candidate.as_bytes()[0]))
+    {
+        Ok(candidate)
+    } else {
+        Err(dtmf_digit_error())
+    }
+}
+
+fn dtmf_digit_error() -> Error {
+    Error::validation("digit", "must contain exactly one key from 0-9, *, or #")
 }
 
 impl Session {

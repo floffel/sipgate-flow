@@ -157,6 +157,67 @@ fn dtmf_digit_is_a_string_not_a_number() {
 }
 
 #[test]
+fn dtmf_digit_accepts_only_one_documented_key() {
+    for (body, expected) in [
+        (
+            r#"{"type":"dtmf_received","digit":"0","session":{"id":"s"}}"#,
+            "0",
+        ),
+        (
+            r#"{"type":"dtmf_received","digit":"9","session":{"id":"s"}}"#,
+            "9",
+        ),
+        (
+            r#"{"type":"dtmf_received","digit":"*","session":{"id":"s"}}"#,
+            "*",
+        ),
+        (
+            r##"{"type":"dtmf_received","digit":"#","session":{"id":"s"}}"##,
+            "#",
+        ),
+        (
+            r#"{"type":"dtmf_received","digits":"5","session":{"id":"s"}}"#,
+            "5",
+        ),
+        (
+            r#"{"type":"dtmf_received","digit":"","digits":"5","session":{"id":"s"}}"#,
+            "5",
+        ),
+        (
+            r#"{"type":"dtmf_received","digit":"5","digits":"5","session":{"id":"s"}}"#,
+            "5",
+        ),
+    ] {
+        let event = parse(body);
+        assert!(
+            matches!(event.payload(), EventPayload::DtmfReceived { digit } if digit == expected),
+            "for {body}"
+        );
+    }
+}
+
+#[test]
+fn dtmf_digit_rejects_missing_empty_multi_key_and_out_of_alphabet_values() {
+    for body in [
+        r#"{"type":"dtmf_received","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digit":"","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digits":"","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digit":"12","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digits":"12","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digit":"a","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digits":"a","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digit":"5","digits":"6","session":{"id":"s"}}"#,
+        r#"{"type":"dtmf_received","digit":"5","digits":"12","session":{"id":"s"}}"#,
+    ] {
+        let error = Event::parse(body.as_bytes()).expect_err(body);
+        assert!(
+            matches!(error, Error::Validation { field: "digit", .. }),
+            "{body} produced {error:?}"
+        );
+    }
+}
+
+#[test]
 fn sms_failure_reasons_round_trip_and_unknown_ones_survive() {
     let event = parse(SMS_FAILED);
     let EventPayload::SmsFailed {
