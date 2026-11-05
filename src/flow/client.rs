@@ -335,14 +335,16 @@ impl OutboundCall {
     /// assert!(OutboundCall::new("flow-1", "e2", "4915112345678").is_ok());
     /// assert!(OutboundCall::new("", "e2", "4915112345678").is_err());
     /// assert!(OutboundCall::new("flow-1", "", "4915112345678").is_err());
+    /// assert!(OutboundCall::new("flow-1", "E2", "4915112345678").is_err());
     /// assert!(OutboundCall::new("flow-1", "e2", "0151 1234").is_err());
     /// # Ok::<(), sipgate_flow::Error>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] for an empty or path-unsafe Flow id, an empty
-    /// billing device, or a number that is not E.164 digits.
+    /// [`crate::Error::Validation`] for an empty or path-unsafe Flow id, a
+    /// billing device outside the documented short suffix shape, or a number
+    /// that is not E.164 digits.
     pub fn new(
         ai_flow_id: impl Into<String>,
         billing_device: impl Into<String>,
@@ -351,7 +353,7 @@ impl OutboundCall {
         let ai_flow_id = ai_flow_id.into();
         validate::ai_flow_id("ai_flow_id", &ai_flow_id)?;
         let billing_device = billing_device.into();
-        validate::non_empty("billing_device", &billing_device)?;
+        validate::billing_device("billing_device", &billing_device)?;
         let digits = validate::phone("to_phone_number", &to_phone_number.into())?;
         Ok(Self {
             ai_flow_id,
@@ -375,6 +377,12 @@ impl OutboundCall {
     }
 
     /// The billing device suffix, provided by sipgate during onboarding.
+    ///
+    /// The value is validated on construction as an ASCII lowercase letter
+    /// followed by at most seven more lowercase letters or digits. sipgate
+    /// documents it as a short suffix such as `e2` whose `masterSipId` is
+    /// prepended automatically, so a small explicit cap is enough and keeps
+    /// control characters, whitespace and unicode out of the request body.
     ///
     /// ```
     /// use sipgate_flow::OutboundCall;

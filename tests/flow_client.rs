@@ -291,6 +291,15 @@ fn the_request_validates_its_three_fields() {
     assert!(OutboundCall::new("abc\u{202e}gnp.exe", "e2", "4915112345678").is_err());
     assert!(OutboundCall::new("abc\u{200b}def", "e2", "4915112345678").is_err());
     assert!(OutboundCall::new(FLOW_ID, "", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "e1234567", "4915112345678").is_ok());
+    assert!(OutboundCall::new(FLOW_ID, "e12345678", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "E2", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "2e", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "e 2", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "e\t2", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "e\n2", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "e2\u{202e}", "4915112345678").is_err());
+    assert!(OutboundCall::new(FLOW_ID, "e\u{e9}", "4915112345678").is_err());
     assert!(OutboundCall::new(FLOW_ID, "e2", "0151 1234").is_err());
     assert!(OutboundCall::new(FLOW_ID, "e2", "1".repeat(16)).is_err());
     assert!(OutboundCall::new(FLOW_ID, "e2", "1".repeat(15)).is_ok());
