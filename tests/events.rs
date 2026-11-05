@@ -394,9 +394,37 @@ fn a_top_level_call_id_fills_a_missing_session_id() {
     // so it stays accepted without ever overriding a real session id.
     let event = parse(r#"{"type":"session_end","callId":"legacy-1"}"#);
     assert_eq!(event.session_id(), Some("legacy-1"));
+    assert!(!event.extra().contains_key("callId"));
 
-    let both = parse(r#"{"type":"session_end","callId":"legacy","session":{"id":"real"}}"#);
-    assert_eq!(both.session_id(), Some("real"));
+    let no_ids = parse(r#"{"type":"session_end"}"#);
+    assert_eq!(no_ids.session_id(), None);
+    assert!(!no_ids.extra().contains_key("callId"));
+}
+
+#[test]
+fn a_top_level_call_id_equal_to_session_id_is_not_kept_as_extra() {
+    let event = parse(r#"{"type":"session_end","callId":"same","session":{"id":"same"}}"#);
+    assert_eq!(event.session_id(), Some("same"));
+    assert!(!event.extra().contains_key("callId"));
+    assert_eq!(
+        event.to_json()["session"],
+        serde_json::json!({"id": "same"})
+    );
+}
+
+#[test]
+fn a_conflicting_top_level_call_id_stays_recoverable() {
+    let event =
+        parse(r#"{"type":"session_end","callId":"push-call","session":{"id":"flow-session"}}"#);
+    assert_eq!(event.session_id(), Some("flow-session"));
+    assert_eq!(event.extra()["callId"], "push-call");
+
+    let rendered = event.to_json();
+    assert_eq!(rendered["session"]["id"], "flow-session");
+    assert_eq!(rendered["callId"], "push-call");
+
+    let again = Event::parse(rendered.to_string().as_bytes()).expect("round-trips");
+    assert_eq!(again, event);
 }
 
 #[test]
