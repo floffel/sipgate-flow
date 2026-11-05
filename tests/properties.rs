@@ -43,19 +43,34 @@ fn documented_event() -> impl Strategy<Value = Value> {
         Just("sms_failed"),
         Just("error"),
     ];
-    (kind, "[ -~]{0,32}", "[ -~]{0,32}", any::<bool>()).prop_map(|(kind, text, extra_key, flag)| {
-        let mut object = serde_json::Map::new();
-        object.insert("type".into(), json!(kind));
-        object.insert("text".into(), json!(text));
-        if !extra_key.is_empty() {
-            object.insert(extra_key, json!(flag));
-        }
-        object.insert(
-            "session".into(),
-            json!({"id": "s1", "account_id": "a1", "direction": "inbound"}),
-        );
-        Value::Object(object)
-    })
+    (
+        kind,
+        "[ -~]{0,32}",
+        "[ -~]{0,32}",
+        any::<bool>(),
+        prop_oneof![Just('0'), Just('*'), Just('#')],
+    )
+        .prop_map(|(kind, text, extra_key, flag, digit)| {
+            let mut object = serde_json::Map::new();
+            object.insert("type".into(), json!(kind));
+            object.insert("text".into(), json!(text));
+            if kind == "dtmf_received" {
+                object.insert("digit".into(), json!(digit.to_string()));
+            }
+            if !extra_key.is_empty()
+                && !matches!(
+                    extra_key.as_str(),
+                    "type" | "text" | "digit" | "digits" | "session"
+                )
+            {
+                object.insert(extra_key, json!(flag));
+            }
+            object.insert(
+                "session".into(),
+                json!({"id": "s1", "account_id": "a1", "direction": "inbound"}),
+            );
+            Value::Object(object)
+        })
 }
 
 proptest! {
