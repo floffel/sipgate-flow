@@ -201,9 +201,14 @@ proptest! {
     }
 
     #[test]
-    fn phone_numbers_are_accepted_up_to_the_e164_length(digits in "[1-9][0-9]{0,14}") {
+    fn phone_numbers_are_accepted_within_the_e164_length(digits in "[1-9][0-9]{6,14}") {
         let action = Action::send_sms("s1", sipgate_flow::SendSms::new(&digits, "hi").expect("valid"));
         prop_assert!(action.is_ok());
+    }
+
+    #[test]
+    fn too_short_phone_numbers_are_refused(digits in "[1-9][0-9]{0,5}") {
+        prop_assert!(sipgate_flow::SendSms::new(&digits, "hi").is_err());
     }
 
     #[test]

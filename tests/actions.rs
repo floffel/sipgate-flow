@@ -183,14 +183,45 @@ fn transfer_validates_number_and_timeout() {
     assert!(Transfer::new("49 151").is_err());
     assert!(Transfer::new("1".repeat(16)).is_err());
     assert!(Transfer::new("1".repeat(15)).is_ok());
-    assert!(Transfer::new("49").unwrap().with_timeout(4).is_err());
-    assert!(Transfer::new("49").unwrap().with_timeout(5).is_ok());
-    assert!(Transfer::new("49").unwrap().with_timeout(120).is_ok());
-    assert!(Transfer::new("49").unwrap().with_timeout(121).is_err());
-    assert!(Transfer::new("49")
+    assert!(Transfer::new("4915112345678")
+        .unwrap()
+        .with_timeout(4)
+        .is_err());
+    assert!(Transfer::new("4915112345678")
+        .unwrap()
+        .with_timeout(5)
+        .is_ok());
+    assert!(Transfer::new("4915112345678")
+        .unwrap()
+        .with_timeout(120)
+        .is_ok());
+    assert!(Transfer::new("4915112345678")
+        .unwrap()
+        .with_timeout(121)
+        .is_err());
+    assert!(Transfer::new("4915112345678")
         .unwrap()
         .with_caller_id("", "49")
         .is_err());
+}
+
+#[test]
+fn phone_validation_enforces_e164_country_code_and_bounds() {
+    for good in ["+1234567", "123456789012345"] {
+        assert!(SendSms::new(good, "hi").is_ok(), "{good}");
+    }
+    for bad in ["1", "123456", "1234567890123456", "0123456", "0012345"] {
+        assert!(SendSms::new(bad, "hi").is_err(), "{bad}");
+    }
+
+    let error = SendSms::new("0123456", "hi").expect_err("local number");
+    assert!(matches!(
+        error,
+        Error::Validation {
+            field: "phone_number",
+            message,
+        } if message.contains("E.164") && message.contains("country code")
+    ));
 }
 
 #[test]
@@ -316,7 +347,7 @@ fn send_sms_normalises_the_number() {
     assert!(SendSms::new("4915112345678", "").is_err());
     assert!(SendSms::new("1".repeat(16), "hi").is_err());
     // The documentation promises no length limit on the message.
-    assert!(SendSms::new("49", "x".repeat(10_000)).is_ok());
+    assert!(SendSms::new("4915112345678", "x".repeat(10_000)).is_ok());
 }
 
 #[test]
@@ -337,7 +368,7 @@ fn no_action_exceeds_the_documented_type_names() {
         Action::audio_base64(SESSION, "UklGRiQ=").unwrap().kind(),
         Action::stop_audio(SESSION).unwrap().kind(),
         Action::hangup(SESSION).unwrap().kind(),
-        Action::transfer(SESSION, Transfer::new("49").unwrap())
+        Action::transfer(SESSION, Transfer::new("4915112345678").unwrap())
             .unwrap()
             .kind(),
         Action::barge_in(SESSION).unwrap().kind(),
@@ -347,7 +378,7 @@ fn no_action_exceeds_the_documented_type_names() {
         )
         .unwrap()
         .kind(),
-        Action::send_sms(SESSION, SendSms::new("49", "x").unwrap())
+        Action::send_sms(SESSION, SendSms::new("4915112345678", "x").unwrap())
             .unwrap()
             .kind(),
     ];
