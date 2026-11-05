@@ -318,7 +318,19 @@ async fn the_call_list_is_parsed_into_types() {
 #[tokio::test]
 async fn a_call_id_that_would_escape_the_path_is_refused_before_sending() {
     let (transport, _, client) = harness();
-    for bad in ["", "a/b", "../calls", "a?b", "a b", "a#b", "a\tb"] {
+    for bad in [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "../calls",
+        "a?b",
+        "a b",
+        "a#b",
+        "a\tb",
+        "abc\u{202e}gnp.exe",
+        "abc\u{200b}def",
+    ] {
         let error = client.hangup(bad).await.expect_err(bad);
         assert!(
             matches!(

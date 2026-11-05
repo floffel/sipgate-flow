@@ -223,6 +223,12 @@ proptest! {
     }
 
     #[test]
+    fn session_ids_outside_the_path_alphabet_are_refused(id in "[^A-Za-z0-9._~:@-]{1,4}") {
+        let candidate = format!("a{id}b");
+        prop_assert!(Action::hangup(&candidate).is_err());
+    }
+
+    #[test]
     fn generated_wav_headers_always_validate(
         samples in prop::collection::vec(any::<u8>(), 0..2048),
         rate in prop_oneof![Just(8_000_u32), Just(16_000_u32)],

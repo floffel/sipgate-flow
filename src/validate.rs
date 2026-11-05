@@ -30,6 +30,10 @@ pub(crate) fn non_empty(field: &'static str, value: &str) -> Result<()> {
 }
 
 /// Validates an identifier that ends up in a URL path or a log line.
+///
+/// The accepted alphabet is exactly ASCII `A-Z`, `a-z`, `0-9`, `.`, `_`, `~`,
+/// `:`, `@` and `-`. A bare `.` or `..` segment is refused even though its
+/// characters are otherwise allowed.
 pub(crate) fn path_segment(field: &'static str, value: &str) -> Result<()> {
     non_empty(field, value)?;
     if value.len() > MAX_SESSION_ID {
@@ -38,16 +42,20 @@ pub(crate) fn path_segment(field: &'static str, value: &str) -> Result<()> {
             format!("must be at most {MAX_SESSION_ID} bytes"),
         ));
     }
-    if value
-        .chars()
-        .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\\' | '%'))
-    {
+    if value == "." || value == ".." {
+        return Err(Error::validation(field, "must not be . or .."));
+    }
+    if !value.bytes().all(is_path_segment_byte) {
         return Err(Error::validation(
             field,
-            "must not contain whitespace, control characters or any of / ? # \\ %",
+            "must contain only ASCII letters, digits, or . _ ~ : @ -",
         ));
     }
     Ok(())
+}
+
+fn is_path_segment_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b':' | b'@' | b'-')
 }
 
 /// Validates and normalises a phone number: an optional leading `+` followed by
@@ -154,4 +162,67 @@ pub(crate) fn language_tag(field: &'static str, value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_segment_accepts_the_exact_ascii_alphabet() {
+        for value in [
+            "A",
+            "Z",
+            "a",
+            "z",
+            "0",
+            "9",
+            "_",
+            "~",
+            ":",
+            "@",
+            "-",
+            ".x",
+            "a.b",
+            "AZaz09._~:@-",
+        ] {
+            assert!(path_segment("id", value).is_ok(), "{value:?}");
+        }
+        assert!(path_segment("id", &"a".repeat(MAX_SESSION_ID)).is_ok());
+    }
+
+    #[test]
+    fn path_segment_rejects_outside_the_ascii_alphabet() {
+        for value in [
+            "/",
+            "?",
+            "#",
+            "\\",
+            "%",
+            " ",
+            "!",
+            "\t",
+            "\u{7f}",
+            "\u{80}",
+            "\u{e9}",
+            "\u{202e}",
+            "\u{200b}",
+            "\u{2066}",
+            "\u{2069}",
+            "abc\u{202e}gnp.exe",
+            "abc\u{200b}def",
+        ] {
+            assert!(path_segment("id", value).is_err(), "{value:?}");
+        }
+        assert!(path_segment("id", &"a".repeat(MAX_SESSION_ID + 1)).is_err());
+    }
+
+    #[test]
+    fn path_segment_refuses_dot_segments() {
+        assert!(path_segment("id", ".").is_err());
+        assert!(path_segment("id", "..").is_err());
+        for value in [".a", "a.", "..."] {
+            assert!(path_segment("id", value).is_ok(), "{value:?}");
+        }
+    }
 }
