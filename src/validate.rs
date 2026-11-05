@@ -58,6 +58,25 @@ fn is_path_segment_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b':' | b'@' | b'-')
 }
 
+/// Validates the documented AI Flow path parameter: a UUID or slug.
+///
+/// The accepted alphabet is exactly ASCII `A-Z`, `a-z`, `0-9`, `_` and `-`.
+/// This is narrower than [`path_segment`] because the endpoint documents a
+/// UUID/slug, not an arbitrary URL path segment.
+pub(crate) fn ai_flow_id(field: &'static str, value: &str) -> Result<()> {
+    path_segment(field, value)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(Error::validation(
+            field,
+            "must contain only ASCII letters, digits, _ or -",
+        ));
+    }
+    Ok(())
+}
+
 /// Validates and normalises a phone number: an optional leading `+` followed by
 /// 7..=15 digits whose first digit is 1-9. Returns the digits, because
 /// sipgate's Flow actions expect E.164 *without* the `+` (it strips one if
@@ -224,5 +243,59 @@ mod tests {
         for value in [".a", "a.", "..."] {
             assert!(path_segment("id", value).is_ok(), "{value:?}");
         }
+    }
+
+    #[test]
+    fn ai_flow_id_accepts_the_documented_uuid_slug_shape() {
+        for value in [
+            "A",
+            "Z",
+            "a",
+            "z",
+            "0",
+            "9",
+            "_",
+            "-",
+            "flow-1",
+            "e3670012-96a3-4ae5-ac42-87abe22015c3",
+            "AZaz09_-",
+        ] {
+            assert!(ai_flow_id("id", value).is_ok(), "{value:?}");
+        }
+        assert!(ai_flow_id("id", &"a".repeat(MAX_SESSION_ID)).is_ok());
+    }
+
+    #[test]
+    fn ai_flow_id_rejects_outside_the_uuid_slug_shape() {
+        for value in [
+            "",
+            ".",
+            "..",
+            ".a",
+            "a.",
+            "...",
+            "a.b",
+            "~",
+            ":",
+            "@",
+            "AZaz09._~:@-",
+            "/",
+            "?",
+            "#",
+            "\\",
+            "%",
+            " ",
+            "\t",
+            "\u{7f}",
+            "\u{80}",
+            "\u{e9}",
+            "\u{202e}",
+            "\u{200b}",
+            "abc\u{202e}gnp.exe",
+            "abc\u{200b}def",
+        ] {
+            assert!(ai_flow_id("id", value).is_err(), "{value:?}");
+        }
+        assert!(ai_flow_id("id", &"a".repeat(MAX_SESSION_ID + 1)).is_err());
     }
 }

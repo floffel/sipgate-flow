@@ -270,10 +270,14 @@ fn base_url_override_validates_and_requires_https_by_default() {
 #[test]
 fn the_request_validates_its_three_fields() {
     assert!(OutboundCall::new(FLOW_ID, "e2", "+4915112345678").is_ok());
-    assert!(OutboundCall::new("AZaz09._~:@-", "e2", "4915112345678").is_ok());
+    assert!(OutboundCall::new("AZaz09_-", "e2", "4915112345678").is_ok());
     assert!(OutboundCall::new("", "e2", "4915112345678").is_err());
     assert!(OutboundCall::new(".", "e2", "4915112345678").is_err());
     assert!(OutboundCall::new("..", "e2", "4915112345678").is_err());
+    assert!(OutboundCall::new("a.b", "e2", "4915112345678").is_err());
+    assert!(OutboundCall::new("a~b", "e2", "4915112345678").is_err());
+    assert!(OutboundCall::new("a:b", "e2", "4915112345678").is_err());
+    assert!(OutboundCall::new("a@b", "e2", "4915112345678").is_err());
     assert!(OutboundCall::new("a/b", "e2", "4915112345678").is_err());
     assert!(OutboundCall::new("abc\u{202e}gnp.exe", "e2", "4915112345678").is_err());
     assert!(OutboundCall::new("abc\u{200b}def", "e2", "4915112345678").is_err());
