@@ -135,7 +135,8 @@ fn verification_happens_before_parsing() {
 fn oversized_bodies_are_rejected_before_parsing() {
     let verifier = WebhookVerifier::new("s")
         .expect("valid")
-        .with_max_body_bytes(64);
+        .with_max_body_bytes(64)
+        .expect("valid limit");
     assert_eq!(verifier.max_body_bytes(), 64);
     let error = verifier
         .verify_and_parse(Some("s"), Some("application/json"), BODY)
@@ -147,7 +148,8 @@ fn oversized_bodies_are_rejected_before_parsing() {
 fn verify_reader_accepts_exactly_the_limit() {
     let verifier = WebhookVerifier::new("s")
         .expect("valid")
-        .with_max_body_bytes(BODY.len());
+        .with_max_body_bytes(BODY.len())
+        .expect("valid limit");
     let event = verifier
         .verify_reader(Some("s"), Some("application/json"), Cursor::new(BODY))
         .expect("exactly the limit is allowed");
@@ -159,7 +161,8 @@ fn verify_reader_rejects_limit_plus_one_immediately() {
     let limit = BODY.len();
     let verifier = WebhookVerifier::new("s")
         .expect("valid")
-        .with_max_body_bytes(limit);
+        .with_max_body_bytes(limit)
+        .expect("valid limit");
     let mut oversized = BODY.to_vec();
     oversized.extend_from_slice(b"x");
 
@@ -184,7 +187,8 @@ fn verify_reader_rejects_limit_plus_one_without_draining_the_reader() {
     let limit = 4;
     let verifier = WebhookVerifier::new("s")
         .expect("valid")
-        .with_max_body_bytes(limit);
+        .with_max_body_bytes(limit)
+        .expect("valid limit");
 
     let error = verifier
         .verify_reader(
@@ -244,6 +248,51 @@ fn the_default_limit_is_one_mebibyte() {
     let verifier = WebhookVerifier::new("s").expect("valid");
     assert_eq!(verifier.max_body_bytes(), DEFAULT_MAX_BODY_BYTES);
     assert_eq!(DEFAULT_MAX_BODY_BYTES, 1024 * 1024);
+}
+
+#[test]
+fn max_body_bytes_accepts_the_boundaries_and_rejects_outside_them() {
+    let smallest = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(1)
+        .expect("one byte is the smallest valid body limit");
+    assert_eq!(smallest.max_body_bytes(), 1);
+
+    let midpoint = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(DEFAULT_MAX_BODY_BYTES / 2)
+        .expect("a mid-range limit is valid");
+    assert_eq!(midpoint.max_body_bytes(), DEFAULT_MAX_BODY_BYTES / 2);
+
+    let largest = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(DEFAULT_MAX_BODY_BYTES)
+        .expect("the default is also the documented maximum");
+    assert_eq!(largest.max_body_bytes(), DEFAULT_MAX_BODY_BYTES);
+
+    let zero = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(0)
+        .expect_err("zero would reject every non-empty body");
+    assert!(matches!(
+        zero,
+        Error::Validation {
+            field: "max_body_bytes",
+            ref message,
+        } if message.contains("between 1 and")
+    ));
+
+    let too_large = WebhookVerifier::new("s")
+        .expect("valid")
+        .with_max_body_bytes(DEFAULT_MAX_BODY_BYTES + 1)
+        .expect_err("one byte above the maximum is rejected");
+    assert!(matches!(
+        too_large,
+        Error::Validation {
+            field: "max_body_bytes",
+            ..
+        }
+    ));
 }
 
 #[test]

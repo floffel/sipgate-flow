@@ -32,7 +32,7 @@ pub const SECRET_HEADER: &str = "x-api-token";
 /// Header name used by the Webhooks page's request example.
 pub const SECRET_HEADER_LEGACY: &str = "x-api-key";
 
-/// Default body limit for [`WebhookVerifier`], in bytes.
+/// Default and maximum body limit for [`WebhookVerifier`], in bytes.
 ///
 /// Real events are a few KiB. [`WebhookVerifier::verify_reader`] uses this as a
 /// read bound and stops after `limit + 1` bytes, so an unauthenticated caller
@@ -41,6 +41,13 @@ pub const SECRET_HEADER_LEGACY: &str = "x-api-key";
 /// buffered body; it cannot bound the framework's body collection.
 /// [`crate::Event::parse`] has its own smaller parser-level ceiling for code
 /// that calls it directly.
+///
+/// [`WebhookVerifier::with_max_body_bytes`] accepts `1..=DEFAULT_MAX_BODY_BYTES`;
+/// the verifier can tighten the ceiling but cannot raise it.
+///
+/// ```
+/// assert_eq!(sipgate_flow::webhook::DEFAULT_MAX_BODY_BYTES, 1024 * 1024);
+/// ```
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Read buffer used by [`WebhookVerifier::verify_reader`].
@@ -101,20 +108,48 @@ impl WebhookVerifier {
         })
     }
 
-    /// Sets the largest body accepted by
-    /// [`WebhookVerifier::verify_and_parse`].
+    /// Sets the largest body accepted by [`WebhookVerifier::verify_and_parse`]
+    /// and the read bound used by [`WebhookVerifier::verify_reader`].
+    ///
+    /// The accepted range is `1..=DEFAULT_MAX_BODY_BYTES`. `0` is rejected
+    /// instead of turning every non-empty webhook into `BodyTooLarge`, and
+    /// values above [`DEFAULT_MAX_BODY_BYTES`] are rejected instead of making
+    /// the reader bound unbounded.
     ///
     /// ```
-    /// use sipgate_flow::WebhookVerifier;
+    /// use sipgate_flow::{webhook::DEFAULT_MAX_BODY_BYTES, Error, WebhookVerifier};
     ///
-    /// let verifier = WebhookVerifier::new("s")?.with_max_body_bytes(4096);
+    /// let verifier = WebhookVerifier::new("s")?.with_max_body_bytes(4096)?;
     /// assert_eq!(verifier.max_body_bytes(), 4096);
+    ///
+    /// assert!(WebhookVerifier::new("s")?.with_max_body_bytes(1).is_ok());
+    /// assert!(WebhookVerifier::new("s")?.with_max_body_bytes(DEFAULT_MAX_BODY_BYTES).is_ok());
+    ///
+    /// let zero = WebhookVerifier::new("s")?
+    ///     .with_max_body_bytes(0)
+    ///     .expect_err("zero would reject every non-empty body");
+    /// assert!(matches!(zero, Error::Validation { field: "max_body_bytes", .. }));
+    ///
+    /// let too_large = WebhookVerifier::new("s")?
+    ///     .with_max_body_bytes(DEFAULT_MAX_BODY_BYTES + 1)
+    ///     .expect_err("the reader bound must stay finite");
+    /// assert!(matches!(too_large, Error::Validation { field: "max_body_bytes", .. }));
     /// # Ok::<(), sipgate_flow::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_max_body_bytes(mut self, limit: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `limit` is `0` or greater than
+    /// [`DEFAULT_MAX_BODY_BYTES`].
+    pub fn with_max_body_bytes(mut self, limit: usize) -> Result<Self> {
+        if !(1..=DEFAULT_MAX_BODY_BYTES).contains(&limit) {
+            return Err(Error::validation(
+                "max_body_bytes",
+                format!("must be between 1 and {DEFAULT_MAX_BODY_BYTES} bytes"),
+            ));
+        }
         self.max_body_bytes = limit;
-        self
+        Ok(self)
     }
 
     /// The configured body limit.

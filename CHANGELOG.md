@@ -35,6 +35,11 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `Error::BodyTooLarge` as soon as `max_body_bytes + 1` bytes have been
   observed. The existing buffered `verify_and_parse` path now documents that it
   only bounds parsing work after the framework has collected the body.
+* `WebhookVerifier::with_max_body_bytes` now returns `Result<Self>` and accepts
+  only `1..=DEFAULT_MAX_BODY_BYTES`. A configured `0` is rejected at
+  construction instead of turning every non-empty webhook into a
+  `BodyTooLarge` failure, and values above the default cannot make the bounded
+  reader's limit unbounded.
 
 ## [0.1.0] — not yet published
 
