@@ -2,9 +2,15 @@
 //!
 //! The documentation puts the secret in `X-API-TOKEN`
 //! (<https://flow.sipgate.io/api/authentication>); one request example on the
-//! Webhooks page spells the header `X-API-Key`. Both names are exported as
-//! constants so a handler can read whichever its framework shows, and
-//! [`WebhookVerifier::verify`] only cares about the value.
+//! Webhooks page spells the header `X-API-Key`. HTTP header names are
+//! case-insensitive, so
+//! [`WebhookVerifier::verify_headers`] compares against both documented
+//! spellings ignoring case and refuses a request that carries both names with
+//! different values. The raw names are still exported as
+//! [`SECRET_HEADER`]/[`SECRET_HEADER_LEGACY`] for handlers that prefer to look
+//! them up themselves; those constants are already lowercased, so match header
+//! names case-insensitively (or use `verify_headers`) instead of comparing
+//! them byte-for-byte against a framework's map.
 //!
 //! Verification is constant time ([`subtle::ConstantTimeEq`]) and fails closed:
 //! an empty secret is refused at construction, because comparing against an
@@ -16,6 +22,10 @@
 //! let verifier = WebhookVerifier::new("shared-secret")?;
 //! assert!(verifier.verify(Some("shared-secret")).is_ok());
 //! assert!(verifier.verify(Some("wrong")).is_err());
+//!
+//! // Case-insensitive header lookup, tolerant of either documented spelling.
+//! let headers = [("X-API-TOKEN", "shared-secret")];
+//! assert!(verifier.verify_headers(headers).is_ok());
 //! # Ok::<(), sipgate_flow::Error>(())
 //! ```
 
@@ -27,9 +37,17 @@ use crate::error::{Error, Result};
 use crate::flow::event::Event;
 
 /// Header carrying the shared secret, per the authentication page.
+///
+/// The value is lowercased; HTTP header names are case-insensitive, so use
+/// [`WebhookVerifier::verify_headers`] or compare with
+/// [`str::eq_ignore_ascii_case`] rather than an exact match against a
+/// framework's header map.
 pub const SECRET_HEADER: &str = "x-api-token";
 
 /// Header name used by the Webhooks page's request example.
+///
+/// The value is lowercased; see [`SECRET_HEADER`] for the case-insensitive
+/// lookup caveat.
 pub const SECRET_HEADER_LEGACY: &str = "x-api-key";
 
 /// Default and maximum body limit for [`WebhookVerifier`], in bytes.
@@ -194,6 +212,73 @@ impl WebhookVerifier {
             Ok(())
         } else {
             Err(Error::SecretMismatch)
+        }
+    }
+
+    /// Verifies the shared secret from a request's headers, matching the
+    /// documented names case-insensitively.
+    ///
+    /// HTTP header names are case-insensitive, and a framework may preserve
+    /// whichever casing the sender used. This method therefore compares each
+    /// header name against both [`SECRET_HEADER`] and [`SECRET_HEADER_LEGACY`]
+    /// with [`str::eq_ignore_ascii_case`] instead of indexing a map with the
+    /// lowercased constant. When both spellings are present they must agree:
+    /// a request that carries two different secrets is refused, because there
+    /// is no correct value to accept.
+    ///
+    /// ```
+    /// use sipgate_flow::{Error, WebhookVerifier};
+    ///
+    /// let verifier = WebhookVerifier::new("abc")?;
+    /// assert!(verifier.verify_headers([("X-API-TOKEN", "abc")]).is_ok());
+    /// assert!(verifier.verify_headers([("X-Api-Key", "abc")]).is_ok());
+    /// assert!(verifier
+    ///     .verify_headers([("X-API-TOKEN", "abc"), ("X-API-Key", "abc")])
+    ///     .is_ok());
+    /// assert!(matches!(
+    ///     verifier.verify_headers([("X-API-TOKEN", "abc"), ("X-API-Key", "def")]),
+    ///     Err(Error::SecretMismatch)
+    /// ));
+    /// assert!(matches!(
+    ///     verifier.verify_headers([("Authorization", "Bearer abc")]),
+    ///     Err(Error::MissingSecret)
+    /// ));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MissingSecret`] when neither documented header is present or
+    /// the only matching value is empty, and [`Error::SecretMismatch`] when the
+    /// value does not match or two present spellings disagree.
+    pub fn verify_headers<'a>(
+        &self,
+        headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<()> {
+        let mut token: Option<&str> = None;
+        let mut legacy: Option<&str> = None;
+
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case(SECRET_HEADER) {
+                token = Some(value);
+            } else if name.eq_ignore_ascii_case(SECRET_HEADER_LEGACY) {
+                legacy = Some(value);
+            }
+        }
+
+        match (token, legacy) {
+            (Some(a), Some(b)) => {
+                // Only the header *names* are case-insensitive; a shared secret
+                // is compared byte-for-byte, so two present spellings must
+                // carry the identical value.
+                if a == b {
+                    self.verify(Some(a))
+                } else {
+                    Err(Error::SecretMismatch)
+                }
+            }
+            (Some(value), None) | (None, Some(value)) => self.verify(Some(value)),
+            (None, None) => Err(Error::MissingSecret),
         }
     }
 
