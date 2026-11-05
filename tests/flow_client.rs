@@ -220,7 +220,11 @@ async fn a_rate_limited_call_keeps_its_wait_hint_for_the_caller() {
 #[tokio::test]
 async fn a_post_with_401_is_not_resent() {
     let transport = MockTransport::new();
-    transport.push_response(response(401, &[], b"expired"));
+    transport.push_response(response(
+        401,
+        &[("Retry-After", "5"), ("X-Request-ID", "req-post-401")],
+        b"account disabled",
+    ));
     transport.push_response(response(201, &[], br#"{"callSid":"pbx-c-retry"}"#));
     let client = FlowClient::new(transport.clone(), Rotating);
 
@@ -228,7 +232,19 @@ async fn a_post_with_401_is_not_resent() {
         .call(&OutboundCall::new(FLOW_ID, "e2", "4915112345678").expect("valid"))
         .await
         .expect_err("POST must not be retried after 401");
-    assert!(matches!(error, Error::Unauthorized));
+    assert!(matches!(
+        error,
+        Error::Unauthorized {
+            status: 401,
+            ref body,
+            retry_after: Some(retry_after),
+            request_id: Some(ref request_id),
+            ..
+        } if body == b"account disabled"
+            && retry_after == Duration::from_secs(5)
+            && request_id == "req-post-401"
+    ));
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(5)));
 
     let calls = transport.calls();
     assert_eq!(calls.len(), 1, "a non-idempotent request is never resent");

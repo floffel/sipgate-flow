@@ -10,6 +10,7 @@ use proptest::prelude::*;
 use serde_json::json;
 use sipgate_flow::transport::{Method, Request, RequestBody, Security};
 use sipgate_flow::{Error, OutboundCall, OutboundCallReceipt};
+use std::time::Duration;
 
 /// A value that must never appear in any rendering.
 const SECRET: &str = "s3cr3t-B7-cr3dential";
@@ -259,6 +260,12 @@ fn remote_error_text_cannot_forge_log_lines() {
     for error in [
         Error::unsupported_content_type(hostile),
         Error::auth_rejected(401, hostile),
+        Error::unauthorized(
+            401,
+            hostile,
+            Some(Duration::from_secs(1)),
+            Some(hostile.to_string()),
+        ),
         Error::api(Method::Post, 400, hostile, None),
     ] {
         for rendered in [error.to_string(), format!("{error:?}")] {
@@ -278,10 +285,10 @@ fn remote_error_text_cannot_forge_log_lines() {
 #[test]
 fn remote_error_text_is_truncated_to_at_most_512_bytes() {
     let body = "x".repeat(700);
-    let error = Error::api(Method::Get, 500, body, None);
+    let error = Error::unauthorized(401, body, None, None);
     let rendered = error.to_string();
     assert!(
-        rendered.len() <= 512 + "api error 500: ".len(),
+        rendered.len() <= 512 + "unauthorized after refreshing the access token (http 401): ".len(),
         "body was not bounded: {}",
         rendered.len()
     );

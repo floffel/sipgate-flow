@@ -210,7 +210,7 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
         Error::auth_rejected(401, "denied"),
         Error::token_response("missing access token"),
         Error::invalid_request("path", "must start with /"),
-        Error::Unauthorized,
+        Error::unauthorized(401, "denied", None, None),
         Error::transport_before_write("connect: dns failure"),
         Error::transport("transport failure with unknown write phase"),
         Error::transport_terminal("unsupported scheme"),

@@ -101,7 +101,7 @@ where
     // operation such as sending an SMS. Both cases must be terminal instead of
     // pretending the retry fixed the rejection.
     if !auth.refreshable() || !method.is_idempotent() {
-        return Err(Error::Unauthorized);
+        return Err(terminal_unauthorized(&response));
     }
 
     let retry_after = retry_after_from(|name| response.header(name));
@@ -120,9 +120,33 @@ where
     )
     .await?;
     if response.status() == 401 {
-        return Err(Error::Unauthorized);
+        return Err(terminal_unauthorized(&response));
     }
     Ok(response)
+}
+
+/// Turns a terminal 401 into an error that keeps the provider's answer.
+fn terminal_unauthorized(response: &Response) -> Error {
+    Error::unauthorized(
+        response.status(),
+        response.text(),
+        retry_after_from(|name| response.header(name)),
+        request_id(response),
+    )
+}
+
+/// Reads the request id under the header names providers commonly use.
+fn request_id(response: &Response) -> Option<String> {
+    const HEADERS: &[&str] = &[
+        "x-request-id",
+        "request-id",
+        "x-correlation-id",
+        "correlation-id",
+        "x-sipgate-request-id",
+    ];
+    HEADERS
+        .iter()
+        .find_map(|name| response.header(name).map(str::to_string))
 }
 
 /// The single deadline for an exchange, or `None` when the caller set no
@@ -472,9 +496,81 @@ mod tests {
         .await
         .expect_err("401 from a non-refreshable source is terminal");
 
-        assert!(matches!(error, Error::Unauthorized));
+        assert!(matches!(
+            error,
+            Error::Unauthorized {
+                status: 401,
+                ref body,
+                retry_after: None,
+                request_id: None,
+            } if body == b"expired"
+        ));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_401_carries_a_bounded_sanitised_response() {
+        struct RejectingTransport;
+
+        impl Transport for RejectingTransport {
+            fn execute(
+                &self,
+                _: Request<'_>,
+            ) -> impl std::future::Future<Output = crate::Result<Response>> {
+                let mut body = "account disabled\r\n\u{1b}[31m".repeat(80).into_bytes();
+                body.extend_from_slice("should be cut".as_bytes());
+                std::future::ready(Ok(Response::new(
+                    401,
+                    [
+                        ("Retry-After".to_string(), "9".to_string()),
+                        ("X-Request-ID".to_string(), "req_123\r\nforged".to_string()),
+                    ],
+                    body,
+                )))
+            }
+        }
+
+        let auth = CountingAuth::default();
+        let error = authorized(
+            &RejectingTransport,
+            &auth,
+            Target {
+                base_url: "https://api.sipgate.com",
+                allow_http_base_url: false,
+                path: "/v2/calls",
+            },
+            Pacing {
+                timeout: None,
+                retry: &RetryPolicy::none(),
+                sleeper: &crate::retry::NoSleep,
+            },
+            Method::Get,
+            None,
+        )
+        .await
+        .expect_err("401 from a non-refreshable source is terminal");
+
+        assert!(matches!(
+            error,
+            Error::Unauthorized {
+                status: 401,
+                ref body,
+                retry_after: Some(retry_after),
+                request_id: Some(ref request_id),
+            } if body.len() <= 512
+                && retry_after == Duration::from_secs(9)
+                && request_id.contains('\u{FFFD}')
+                && !request_id.contains('\r')
+                && !request_id.contains('\n')
+        ));
+        let rendered = error.to_string();
+        assert!(rendered.contains("account disabled"), "{rendered:?}");
+        assert!(!rendered.contains('\r'), "{rendered:?}");
+        assert!(!rendered.contains('\n'), "{rendered:?}");
+        assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
+        assert!(!error.is_retryable());
+        assert!(!error.is_ambiguous());
     }
 
     #[tokio::test]
@@ -532,7 +628,7 @@ mod tests {
         .await
         .expect_err("post must not be resent");
 
-        assert!(matches!(error, Error::Unauthorized));
+        assert!(matches!(error, Error::Unauthorized { status: 401, .. }));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
     }
@@ -576,7 +672,7 @@ mod tests {
         .await
         .expect_err("second 401 is terminal");
 
-        assert!(matches!(error, Error::Unauthorized));
+        assert!(matches!(error, Error::Unauthorized { status: 401, .. }));
         assert_eq!(
             auth.calls.load(Ordering::SeqCst),
             2,

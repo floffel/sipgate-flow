@@ -898,7 +898,10 @@ async fn a_pat_401_is_terminal_without_a_resend() {
     let auth = PersonalAccessToken::new("token-FQ1V12", "e68ead46").expect("non-empty");
     let client = RestClient::new(transport.clone(), auth);
 
-    assert!(matches!(client.calls().await, Err(Error::Unauthorized)));
+    assert!(matches!(
+        client.calls().await,
+        Err(Error::Unauthorized { status: 401, .. })
+    ));
     assert_eq!(transport.call_count(), 1, "PAT cannot refresh");
 }
 
@@ -913,7 +916,7 @@ async fn a_pat_post_401_is_never_resent() {
 
     assert!(matches!(
         client.send_sms(&sms).await,
-        Err(Error::Unauthorized)
+        Err(Error::Unauthorized { status: 401, .. })
     ));
     assert_eq!(transport.call_count(), 1, "a POST is never auto-retried");
 }

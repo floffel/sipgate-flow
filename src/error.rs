@@ -65,6 +65,16 @@ fn safe_text(value: &str) -> String {
     sanitised
 }
 
+/// Bounds and sanitises a response body before it reaches a log sink.
+fn safe_body(body: &str) -> Vec<u8> {
+    safe_text(&crate::retry::truncate_body(body)).into_bytes()
+}
+
+/// Renders a sanitised response body held as bytes.
+fn display_body(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).into_owned()
+}
+
 /// Everything that can go wrong while parsing an event, verifying a webhook or
 /// calling an API.
 #[derive(Debug, Error)]
@@ -213,9 +223,26 @@ pub enum Error {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// A request was rejected with 401 even after refreshing the token once.
-    #[error("unauthorized after refreshing the access token")]
-    Unauthorized,
+    /// A request was rejected with 401 in a terminal way: the token source
+    /// cannot refresh, the method is not idempotent, or a second 401 arrived
+    /// after the one allowed refresh.
+    ///
+    /// Build this variant with [`Error::unauthorized`]. The response body is
+    /// truncated to at most 512 bytes at a UTF-8 boundary, and control
+    /// characters are replaced by `U+FFFD`, before it is stored on the variant
+    /// and rendered by `Display`.
+    #[non_exhaustive]
+    #[error("unauthorized after refreshing the access token (http {status}): {}", display_body(.body))]
+    Unauthorized {
+        /// HTTP status of the terminal response.
+        status: u16,
+        /// Sanitised response body, truncated to at most 512 bytes.
+        body: Vec<u8>,
+        /// Parsed `Retry-After` header, when the server sent one.
+        retry_after: Option<Duration>,
+        /// Provider request id, when the server sent one.
+        request_id: Option<String>,
+    },
 
     /// The transport failed before a usable response existed. `retryable` is
     /// true only when the failure provably happened before the request was
@@ -548,6 +575,47 @@ impl Error {
         }
     }
 
+    /// Builds a terminal 401 error from the rejected response.
+    ///
+    /// The body is truncated to at most 512 bytes at a UTF-8 boundary, and
+    /// control characters are replaced by `U+FFFD`, before it is stored on the
+    /// variant and rendered by `Display`. The request id is bounded and
+    /// sanitised the same way.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::unauthorized(
+    ///     401,
+    ///     "account disabled",
+    ///     Some(Duration::from_secs(7)),
+    ///     Some("req_123".to_string()),
+    /// );
+    /// assert!(matches!(err, Error::Unauthorized { status: 401, .. }));
+    /// assert_eq!(err.status(), Some(401));
+    /// assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
+    /// assert!(!err.is_retryable());
+    /// assert!(!err.is_ambiguous());
+    /// assert_eq!(err.to_string(), "unauthorized after refreshing the access token (http 401): account disabled");
+    /// ```
+    #[must_use]
+    pub fn unauthorized(
+        status: u16,
+        body: impl AsRef<[u8]>,
+        retry_after: Option<Duration>,
+        request_id: Option<String>,
+    ) -> Self {
+        let body = safe_body(&String::from_utf8_lossy(body.as_ref()));
+        let request_id = request_id.map(|value| safe_text(&value));
+        Self::Unauthorized {
+            status,
+            body,
+            retry_after,
+            request_id,
+        }
+    }
+
     /// Builds an API error from the request method, status, body and optional
     /// `Retry-After` hint.
     ///
@@ -763,7 +831,7 @@ impl Error {
     /// use sipgate_flow::Error;
     ///
     /// assert!(Error::transport_before_write("dns").is_retryable());
-    /// assert!(!Error::Unauthorized.is_retryable());
+    /// assert!(!Error::unauthorized(401, "expired", None, None).is_retryable());
     /// assert!(!Error::transport("timeout after write").is_retryable());
     /// assert!(!Error::ambiguous(None, "timeout after write").is_retryable());
     /// ```
@@ -809,7 +877,7 @@ impl Error {
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::Api { retry_after, .. } => *retry_after,
+            Self::Api { retry_after, .. } | Self::Unauthorized { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -819,7 +887,7 @@ impl Error {
     /// ```
     /// use sipgate_flow::Error;
     ///
-    /// assert_eq!(Error::Unauthorized.status(), None);
+    /// assert_eq!(Error::unauthorized(401, "expired", None, None).status(), Some(401));
     /// assert_eq!(Error::validation("x", "y").status(), None);
     /// assert_eq!(Error::ambiguous(Some(503), "after POST").status(), Some(503));
     /// assert_eq!(Error::CallStartedUnknown { status: 202, body: String::new() }.status(), Some(202));
@@ -829,6 +897,7 @@ impl Error {
         match self {
             Self::Api { status, .. }
             | Self::AuthRejected { status, .. }
+            | Self::Unauthorized { status, .. }
             | Self::CallStartedUnknown { status, .. }
             | Self::FlowNotCallable { status, .. }
             | Self::FlowNotFound { status, .. }
