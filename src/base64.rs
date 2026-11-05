@@ -27,6 +27,26 @@ use base64::DecodeError;
 
 use crate::error::{Error, Result};
 
+/// The largest decoded payload accepted by [`decode`], in bytes.
+///
+/// The ceiling is sized from the largest documented caller-controlled payload:
+/// fax `base64Content` has a documented `maxLength` of 28,330,000 characters,
+/// which decodes to at most 21,247,500 bytes. Flow `audio` and `mix_audio`
+/// values are bounded by the 1 MiB webhook body limit. This accepts every
+/// documented payload while preventing an arbitrary string from forcing an
+/// unbounded output allocation.
+///
+/// ```
+/// use sipgate_flow::base64;
+///
+/// assert_eq!(base64::MAX_DECODED_BYTES, 21_247_500);
+/// assert_eq!(base64::encoded_len(base64::MAX_DECODED_BYTES), 28_330_000);
+/// ```
+pub const MAX_DECODED_BYTES: usize = 21_247_500;
+
+/// The largest accepted encoded input length, in characters.
+const MAX_ENCODED_LEN: usize = encoded_len(MAX_DECODED_BYTES);
+
 /// The number of base64 characters `len` bytes encode to, padding included.
 ///
 /// Saturates at [`usize::MAX`] for a length whose encoding cannot be
@@ -83,10 +103,11 @@ pub fn encode(bytes: &[u8]) -> String {
 /// # Errors
 ///
 /// [`Error::Validation`] with `field = "base64"` and a reason naming the
-/// defect. The output buffer is sized from the input through the engine's
-/// estimate, so a hostile string cannot make the call allocate more than the
-/// input it already occupies.
+/// defect. Inputs longer than `encoded_len(MAX_DECODED_BYTES)` characters are
+/// rejected before decoding, so a hostile string cannot make the call allocate
+/// proportionally more memory than [`MAX_DECODED_BYTES`].
 pub fn decode(input: &str) -> Result<Vec<u8>> {
+    check_encoded_len(input.len())?;
     STANDARD
         .decode(input.as_bytes())
         .map_err(|err| Error::validation("base64", reason(&err)))
@@ -109,7 +130,22 @@ pub fn decode(input: &str) -> Result<Vec<u8>> {
 /// ```
 #[must_use]
 pub fn is_valid(input: &str) -> bool {
+    if check_encoded_len(input.len()).is_err() {
+        return false;
+    }
     STANDARD.decode(input.as_bytes()).is_ok()
+}
+
+/// Rejects an input length above the size ceiling without touching the input
+/// bytes, so the check runs before the decoder allocates its output buffer.
+fn check_encoded_len(input_len: usize) -> Result<()> {
+    if input_len > MAX_ENCODED_LEN {
+        return Err(Error::validation(
+            "base64",
+            format!("must be at most {MAX_ENCODED_LEN} characters"),
+        ));
+    }
+    Ok(())
 }
 
 /// A short, input-free reason per decoder error.
@@ -127,7 +163,8 @@ const fn reason(err: &DecodeError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::reason;
+    use super::{check_encoded_len, reason, MAX_ENCODED_LEN};
+    use crate::Error;
     use base64::DecodeError;
 
     #[test]
@@ -152,6 +189,18 @@ mod tests {
                 !reason.contains('!'),
                 "no reason echoes the offending input"
             );
+        }
+    }
+
+    #[test]
+    fn oversized_lengths_are_rejected_by_the_size_check_alone() {
+        assert!(check_encoded_len(MAX_ENCODED_LEN).is_ok());
+        match check_encoded_len(MAX_ENCODED_LEN + 1) {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "base64");
+                assert!(message.contains(&MAX_ENCODED_LEN.to_string()));
+            }
+            other => panic!("expected a validation error, got {other:?}"),
         }
     }
 }

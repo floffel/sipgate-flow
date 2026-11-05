@@ -7,6 +7,48 @@
 
 use sipgate_flow::{base64, Error};
 
+/// The size ceiling has a just-inside and just-outside value: the encoded
+/// length for [`base64::MAX_DECODED_BYTES`] decodes, one four-character group
+/// more is refused before the decoder runs.
+#[test]
+fn encoded_input_above_the_size_ceiling_is_rejected() {
+    let limit = base64::encoded_len(base64::MAX_DECODED_BYTES);
+    assert_eq!(limit, 28_330_000);
+
+    let just_inside = "A".repeat(limit);
+    let decoded = base64::decode(&just_inside).expect("the ceiling itself is accepted");
+    assert_eq!(decoded.len(), base64::MAX_DECODED_BYTES);
+
+    let just_outside = "A".repeat(limit + 4);
+    let err = base64::decode(&just_outside).expect_err("one group above the ceiling is rejected");
+    match err {
+        Error::Validation { field, message } => {
+            assert_eq!(field, "base64");
+            assert!(message.contains(&limit.to_string()), "{message:?}");
+        }
+        other => panic!("expected Error::Validation, got {other:?}"),
+    }
+    assert!(!base64::is_valid(&just_outside));
+}
+
+/// The ceiling is checked from the length before decoding. This oversized
+/// string starts with a byte outside the alphabet; the error still reports the
+/// size ceiling, proving the guard fired before the decoder saw the input.
+#[test]
+fn the_size_ceiling_fires_before_decoding() {
+    let limit = base64::encoded_len(base64::MAX_DECODED_BYTES);
+    let input = format!("!{}", "A".repeat(limit));
+    let err = base64::decode(&input).expect_err("oversized invalid input is rejected by size");
+    match err {
+        Error::Validation { field, message } => {
+            assert_eq!(field, "base64");
+            assert!(message.contains("must be at most"), "{message:?}");
+            assert!(!message.contains("alphabet"), "{message:?}");
+        }
+        other => panic!("expected Error::Validation, got {other:?}"),
+    }
+}
+
 /// Every byte value survives a round trip, including NUL and 0xFF.
 #[test]
 fn every_byte_value_round_trips() {
