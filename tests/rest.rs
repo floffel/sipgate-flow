@@ -695,7 +695,10 @@ fn dtmf_rejects_characters_outside_the_alphabet() {
 
 #[test]
 fn announcements_must_be_absolute_http_urls() {
+    assert!(Announcement::new("http://x").is_ok());
     assert!(Announcement::new("https://x.test/a.wav").is_ok());
+    assert!(Announcement::new("https://x.test/a.wav?cache=1#frag").is_ok());
+    assert!(Announcement::new("HTTPS://x.test/a.wav").is_ok());
     for bad in [
         "",
         "x.test/a.wav",
@@ -703,7 +706,16 @@ fn announcements_must_be_absolute_http_urls() {
         "file:///etc/passwd",
         "https://",
         "https:///path",
+        "https://:8080",
+        "http://?x=1",
+        "https://#frag",
+        "https://@x.test/a.wav",
+        "https://user:pw@x.test/a.wav",
         "https://x.test/a b.wav",
+        "https://x.test/a\n.wav",
+        "https://x.test/a\u{0}.wav",
+        "https://x.test/a\u{1}.wav",
+        "https://x.test/a\u{7f}.wav",
     ] {
         assert!(Announcement::new(bad).is_err(), "{bad:?}");
     }

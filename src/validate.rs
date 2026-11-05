@@ -6,6 +6,7 @@
 //! before the request exists. Parsing stays tolerant; sending does not.
 
 use crate::error::{Error, Result};
+use url::Url;
 
 /// Longest session id accepted: the documented value is a UUID (36 chars), and
 /// the cap keeps a hostile string out of headers and log lines.
@@ -69,21 +70,50 @@ pub(crate) fn phone(field: &'static str, value: &str) -> Result<String> {
     Ok(digits.to_string())
 }
 
-/// Validates an absolute `http(s)` URL without parsing it, which is enough to
-/// reject the mistakes that actually happen (relative paths, `file://`, values
-/// with embedded whitespace).
+/// Validates an absolute `http(s)` URL with a host and no credentials.
 pub(crate) fn http_url(field: &'static str, value: &str) -> Result<()> {
     non_empty(field, value)?;
-    let rest = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
-        .ok_or_else(|| Error::validation(field, "must start with http:// or https://"))?;
-    if rest.is_empty() || rest.starts_with('/') {
+
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(Error::validation(
+            field,
+            "must not contain whitespace or control characters",
+        ));
+    }
+
+    let url = Url::parse(value).map_err(|error| {
+        Error::validation(
+            field,
+            format!("must be an absolute http:// or https:// URL: {error}"),
+        )
+    })?;
+
+    let Some((_scheme, rest)) = value.split_once(':') else {
+        return Err(Error::validation(
+            field,
+            "must be an absolute http:// or https:// URL",
+        ));
+    };
+    let Some(authority_and_path) = rest.strip_prefix("//") else {
+        return Err(Error::validation(
+            field,
+            "must be an absolute http:// or https:// URL",
+        ));
+    };
+    let authority = authority_and_path
+        .split_once(['/', '?', '#'])
+        .map_or(authority_and_path, |(authority, _)| authority);
+
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(Error::validation(field, "must use http:// or https://"));
+    }
+    if authority.is_empty() || authority.starts_with('/') || url.host_str().is_none() {
         return Err(Error::validation(field, "must include a host"));
     }
-    if value.chars().any(char::is_whitespace) {
-        return Err(Error::validation(field, "must not contain whitespace"));
+    if authority.contains('@') || !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::validation(field, "must not include credentials"));
     }
+
     Ok(())
 }
 
