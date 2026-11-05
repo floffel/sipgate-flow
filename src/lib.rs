@@ -12,9 +12,10 @@
 //!   announcement, recording, hold, mute, transfer). See
 //!   <https://api.sipgate.com/v2/doc>.
 //!
-//! Every shape in this crate was taken from public documentation; `docs/
-//! contracts.md` cites the source per shape and names the few that could not be
-//! verified. Parsing is tolerant in both directions the wire can drift
+//! Every shape in this crate was taken from public documentation;
+//! [docs/contracts.md](https://github.com/floffel/sipgate-flow/blob/main/docs/contracts.md)
+//! cites the source per shape and names the few that could not be verified.
+//! Parsing is tolerant in both directions the wire can drift
 //! (unknown fields, unknown event types, unknown enum values, camelCase **and**
 //! `snake_case`), while everything sent is validated first.
 //!

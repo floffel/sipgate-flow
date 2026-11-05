@@ -29,6 +29,10 @@ with the pre-1.0 reading described in the README section *Versioning*.
   buffered body limit is pinned at exactly `max` / `max + 1`, and the
   verification order is pinned so a wrong secret is refused before content-type
   and size checks.
+* The provenance pointer to `docs/contracts.md` is now a real link in the
+  rendered docs: the module-level "see the exact source of every shape" claims
+  in `flow`, `rest` and the crate root linked the file as an inert code span,
+  which is unclickable on docs.rs. They now point at the file by repository URL.
 * Retry pacing now has a hard `MIN_RETRY_DELAY` floor. `with_base_delay`,
   `with_max_delay`, local backoff and `Retry-After` values can no longer produce
   a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer

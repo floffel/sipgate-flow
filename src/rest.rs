@@ -5,8 +5,9 @@
 //! from [`crate::flow`] events. Every path, method, body field and status code
 //! here comes from the public Swagger document at
 //! <https://api.sipgate.com/v2/swagger.json> (rendered at
-//! <https://api.sipgate.com/v2/doc>); `docs/contracts.md` maps each method to
-//! its operation.
+//! <https://api.sipgate.com/v2/doc>);
+//! [docs/contracts.md](https://github.com/floffel/sipgate-flow/blob/main/docs/contracts.md)
+//! maps each method to its operation.
 //!
 //! Authentication is a bearer token: an `OAuth2` access token
 //! ([`crate::OAuth2Client`]) or a Personal Access Token
