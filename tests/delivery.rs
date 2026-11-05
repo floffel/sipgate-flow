@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use common::{no_content, response, static_auth, MockTransport, RecordingSleeper};
 use sipgate_flow::rest::Sms;
-use sipgate_flow::{classify, Error, Method, RestClient, RetryOutcome, RetryPolicy, StaticToken};
+use sipgate_flow::{
+    base64, classify, Error, Method, RestClient, RetryOutcome, RetryPolicy, StaticToken,
+};
 
 type TestClient = RestClient<MockTransport, StaticToken, RecordingSleeper>;
 
@@ -198,6 +200,7 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
         ),
         Error::EmptyBody,
         Error::validation("text", "must not be empty"),
+        base64::decode("AB==").expect_err("invalid canonical tail"),
         Error::EmptyCredentials,
         Error::EmptySecret,
         Error::MissingSecret,

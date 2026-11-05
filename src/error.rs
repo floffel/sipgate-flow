@@ -16,12 +16,37 @@
 
 use std::time::Duration;
 
+use base64::DecodeError;
 use thiserror::Error;
 
 use crate::transport::Method;
 
 /// Longest remote-controlled string kept in an error.
 const SAFE_TEXT_BYTES: usize = 512;
+
+/// The category of a base64 decoding failure.
+///
+/// This keeps the decoder's typed cause available without rendering the
+/// offending byte or offset the way [`base64::DecodeError`] does.
+///
+/// ```
+/// use sipgate_flow::Base64Error;
+///
+/// let kind = Base64Error::InvalidLength;
+/// assert!(matches!(kind, Base64Error::InvalidLength));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Base64Error {
+    /// The input contained a byte outside the standard alphabet.
+    InvalidByte,
+    /// The input length cannot form a canonical base64 suffix.
+    InvalidLength,
+    /// Padding was missing, misplaced, or non-canonical.
+    InvalidPadding,
+    /// The final symbol had non-zero trailing bits.
+    InvalidLastSymbol,
+}
 
 /// Bounds and sanitises remote-controlled text before it reaches a log sink.
 fn safe_text(value: &str) -> String {
@@ -78,6 +103,33 @@ pub enum Error {
         field: &'static str,
         /// What is wrong and which range is accepted.
         message: String,
+    },
+
+    /// A base64 payload could not be decoded.
+    ///
+    /// The top-level message stays input-free. The original decoder error is
+    /// kept as the source so callers can inspect the typed failure class.
+    ///
+    /// ```
+    /// use sipgate_flow::{base64, Base64Error, Error};
+    ///
+    /// let err = base64::decode("AB==").unwrap_err();
+    /// assert!(matches!(
+    ///     err,
+    ///     Error::Base64 { kind: Base64Error::InvalidLastSymbol, .. }
+    /// ));
+    /// assert!(std::error::Error::source(&err).is_some());
+    /// ```
+    #[non_exhaustive]
+    #[error("invalid base64: {message}")]
+    Base64 {
+        /// The decoder failure class, without offsets or bytes.
+        kind: Base64Error,
+        /// What is wrong, without echoing the input.
+        message: String,
+        /// The underlying base64 decoder error.
+        #[source]
+        source: DecodeError,
     },
 
     /// The request URL could not be built safely, so no request was sent and

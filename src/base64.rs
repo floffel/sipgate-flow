@@ -8,7 +8,7 @@
 //! four-character groups, misplaced or missing padding, and non-zero trailing
 //! bits in the last symbol (`"AB=="` is *not* valid canonical base64).
 //!
-//! What remains here is the error mapping into [`Error::Validation`] and the
+//! What remains here is the error mapping into [`Error::Base64`] and the
 //! `String`-shaped surface the action builders want.
 //!
 //! ```
@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::engine::Engine as _;
 use base64::DecodeError;
 
-use crate::error::{Error, Result};
+use crate::error::{Base64Error, Error, Result};
 
 /// The largest decoded payload accepted by [`decode`], in bytes.
 ///
@@ -107,15 +107,19 @@ pub fn encode(bytes: &[u8]) -> String {
 ///
 /// # Errors
 ///
-/// [`Error::Validation`] with `field = "base64"` and a reason naming the
-/// defect. Inputs longer than the encoded length of [`MAX_DECODED_BYTES`] are
-/// rejected before decoding, so a hostile string cannot make the call allocate
-/// proportionally more memory than [`MAX_DECODED_BYTES`].
+/// [`Error::Base64`] with an input-free reason and the typed decoder cause.
+/// Inputs longer than the encoded length of [`MAX_DECODED_BYTES`] are rejected
+/// as [`Error::Validation`] before decoding, so a hostile string cannot make
+/// the call allocate proportionally more memory than [`MAX_DECODED_BYTES`].
 pub fn decode(input: &str) -> Result<Vec<u8>> {
     check_encoded_len(input.len())?;
     STANDARD
         .decode(input.as_bytes())
-        .map_err(|err| Error::validation("base64", reason(&err)))
+        .map_err(|source| Error::Base64 {
+            kind: kind(&source),
+            message: reason(&source).to_string(),
+            source,
+        })
 }
 
 /// Whether `input` is well-formed, canonical standard base64.
@@ -196,39 +200,64 @@ const fn reason(err: &DecodeError) -> &'static str {
     }
 }
 
+/// The input-free category for a decoder error.
+const fn kind(err: &DecodeError) -> Base64Error {
+    match err {
+        DecodeError::InvalidByte(..) => Base64Error::InvalidByte,
+        DecodeError::InvalidLength(_) => Base64Error::InvalidLength,
+        DecodeError::InvalidLastSymbol { .. } => Base64Error::InvalidLastSymbol,
+        DecodeError::InvalidPadding => Base64Error::InvalidPadding,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        check_encoded_len, decode, encode, encoded_len, is_valid, reason, MAX_ENCODED_LEN,
+        check_encoded_len, decode, encode, encoded_len, is_valid, kind, reason, MAX_ENCODED_LEN,
         VALIDATION_CHUNK_ENCODED_BYTES,
     };
-    use crate::Error;
+    use crate::{Base64Error, Error};
     use base64::DecodeError;
     use proptest::prelude::*;
 
     #[test]
     fn every_decoder_error_maps_to_a_distinct_reason() {
-        let reasons = [
-            reason(&DecodeError::InvalidByte(0, b'!')),
-            reason(&DecodeError::InvalidLength(1)),
-            reason(&DecodeError::InvalidLastSymbol {
+        let errors = [
+            DecodeError::InvalidByte(0, b'!'),
+            DecodeError::InvalidLength(1),
+            DecodeError::InvalidLastSymbol {
                 offset: 1,
                 symbol: b'B',
                 symbol_value: 1,
-            }),
-            reason(&DecodeError::InvalidPadding),
+            },
+            DecodeError::InvalidPadding,
         ];
+        let kinds = [
+            Base64Error::InvalidByte,
+            Base64Error::InvalidLength,
+            Base64Error::InvalidLastSymbol,
+            Base64Error::InvalidPadding,
+        ];
+        let reasons = errors.each_ref().map(reason);
         let mut unique = reasons.to_vec();
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), reasons.len(), "reasons must be distinct");
-        for reason in reasons {
+        for (error, reason) in errors.iter().zip(reasons) {
             assert_ne!(reason, "", "a reason must never be empty");
             assert!(
                 !reason.contains('!'),
                 "no reason echoes the offending input"
             );
+            assert!(kinds.contains(&kind(error)));
         }
+
+        let mapped = errors.each_ref().map(kind);
+        let mut unique = mapped.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), mapped.len(), "kinds must be distinct");
+        assert_eq!(mapped, kinds);
     }
 
     #[test]
