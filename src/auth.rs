@@ -821,6 +821,13 @@ struct Cached {
 struct CacheState {
     cached: Option<Cached>,
     generation: u64,
+    /// Generation of the single in-flight cache-miss fetch, if any.
+    ///
+    /// Only the plain `TokenSource::access_token` path contends on this; a
+    /// `force_refresh` reserves a bare generation instead, because the caller
+    /// explicitly asked for a new token and must not be deduplicated.
+    fetch_generation: Option<u64>,
+    fetch_waiters: Vec<Waker>,
     refresh_generation: Option<u64>,
     refresh_waiters: Vec<Waker>,
 }
@@ -830,6 +837,8 @@ impl CacheState {
         Self {
             cached: None,
             generation: 0,
+            fetch_generation: None,
+            fetch_waiters: Vec::new(),
             refresh_generation: None,
             refresh_waiters: Vec::new(),
         }
@@ -847,6 +856,12 @@ enum RefreshAttempt {
     Waiting,
 }
 
+enum FetchAttempt {
+    Ready(Token),
+    Fetch(u64),
+    Waiting,
+}
+
 fn same_token(left: &Token, right: &Token) -> bool {
     bool::from(
         left.access_token
@@ -858,13 +873,22 @@ fn same_token(left: &Token, right: &Token) -> bool {
 /// Fetches and caches a client-credentials token.
 ///
 /// Safe to share across tasks: the cache is a [`Mutex`], there is no global
-/// state, and concurrent misses each fetch their own token (the issuer grants
-/// several; a single-flight lock would serialise every call for no benefit).
+/// state, and the cache-miss path is **single-flight**. The first task to miss
+/// the cache performs the token request; every other task that misses while
+/// that request is in flight waits for it and then reads the stored result, so
+/// `N` concurrent misses produce exactly one request instead of `N`. No lock is
+/// held across the `.await`: the owning task releases the mutex before calling
+/// the transport and only re-acquires it in `OAuth2Client::store`, where it
+/// wakes the waiters.
+///
 /// Each fetch reserves a cache generation, so an `invalidate` call or a fetch
 /// started later supersedes an in-flight response instead of letting the older
 /// response overwrite newer cache state. A 401 takes the stricter
 /// [`TokenSource::refresh_after`] path: only the rejected token is replaced, and
-/// concurrent rejections of that same token wait for one fetch.
+/// concurrent rejections of that same token wait for one fetch. A
+/// `force_refresh` deliberately bypasses the single-flight gate, because the
+/// caller has just seen the cached credential rejected and needs a genuinely
+/// new one.
 ///
 /// ```
 /// use sipgate_flow::{ClientCredentials, OAuth2Client, TokenSource};
@@ -1138,12 +1162,79 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
             .map(|cached| cached.token.clone()))
     }
 
-    fn begin_fetch(&self) -> u64 {
+    /// Reserves the single-flight cache-miss fetch, or reports that another
+    /// task already owns it.
+    ///
+    /// The caller that gets [`FetchAttempt::Fetch`] owns the generation and
+    /// must run [`OAuth2Client::store`] or [`OAuth2Client::finish_fetch`] with
+    /// it; callers that get [`FetchAttempt::Waiting`] await
+    /// [`OAuth2Client::wait_for_fetch`] and then re-read the cache.
+    ///
+    /// The cache lookup and the reservation happen under one lock, so a task
+    /// that observed a miss cannot then start a second request after the
+    /// winning task has already stored its token.
+    fn begin_fetch(&self) -> Result<FetchAttempt> {
+        let now = self.clock.now()?;
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = guard
+            .cached
+            .as_ref()
+            .filter(|cached| now < cached.usable_until)
+        {
+            return Ok(FetchAttempt::Ready(cached.token.clone()));
+        }
+        if guard.fetch_generation.is_some() {
+            return Ok(FetchAttempt::Waiting);
+        }
+        let generation = guard.next_generation();
+        guard.fetch_generation = Some(generation);
+        Ok(FetchAttempt::Fetch(generation))
+    }
+
+    /// Reserves a generation for an explicit `force_refresh`.
+    ///
+    /// A forced refresh deliberately bypasses the single-flight gate: the
+    /// caller has already been told the cached token was rejected, so
+    /// deduplicating it against an unrelated in-flight fetch would hand back a
+    /// token the issuer may reject again. The reserved generation still
+    /// supersedes any older in-flight fetch, so a slower response cannot
+    /// clobber the newer one.
+    fn begin_forced_fetch(&self) -> u64 {
         let mut guard = self
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.next_generation()
+    }
+
+    /// Waits until the in-flight cache-miss fetch finishes, then returns.
+    ///
+    /// Only the fetch's completion is signalled; the caller re-reads the cache
+    /// (or starts a fresh fetch) after this returns, so a failed fetch does not
+    /// strand a waiter.
+    async fn wait_for_fetch(&self) {
+        std::future::poll_fn(|cx| {
+            let mut guard = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if guard.fetch_generation.is_none() {
+                return Poll::Ready(());
+            }
+            let waker = cx.waker();
+            if !guard
+                .fetch_waiters
+                .iter()
+                .any(|waiting| waiting.will_wake(waker))
+            {
+                guard.fetch_waiters.push(waker.clone());
+            }
+            Poll::Pending
+        })
+        .await;
     }
 
     fn begin_refresh(&self, stale: &Token) -> Result<RefreshAttempt> {
@@ -1197,7 +1288,28 @@ impl<T: Transport, C: Clock> OAuth2Client<T, C> {
                 waiter.wake();
             }
         }
+        if guard.fetch_generation == Some(generation) {
+            guard.fetch_generation = None;
+            for waiter in guard.fetch_waiters.drain(..) {
+                waiter.wake();
+            }
+        }
         Ok(())
+    }
+
+    /// Releases the single-flight fetch after a failure and wakes its waiters,
+    /// which then re-read the cache or elect a new fetcher.
+    fn finish_fetch(&self, generation: u64) {
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.fetch_generation == Some(generation) {
+            guard.fetch_generation = None;
+            for waiter in guard.fetch_waiters.drain(..) {
+                waiter.wake();
+            }
+        }
     }
 
     fn finish_refresh(&self, generation: u64) {
@@ -1252,15 +1364,38 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
     }
 
     async fn access_token(&self, force_refresh: bool) -> Result<Token> {
-        if !force_refresh {
-            if let Some(token) = self.cached()? {
-                return Ok(token);
+        // A forced refresh already knows the cache was rejected, so it takes a
+        // private generation and must neither join nor be joined by the
+        // single-flight path.
+        if force_refresh {
+            let generation = self.begin_forced_fetch();
+            let token = self.fetch().await?;
+            self.store(token.clone(), generation)?;
+            return Ok(token);
+        }
+        // The cache read and the fetch reservation are one critical section, so
+        // a task that saw a miss cannot slip in a second request after the
+        // winner stored its token.
+        loop {
+            match self.begin_fetch()? {
+                FetchAttempt::Ready(token) => return Ok(token),
+                FetchAttempt::Fetch(generation) => {
+                    let token = match self.fetch().await {
+                        Ok(token) => token,
+                        Err(error) => {
+                            self.finish_fetch(generation);
+                            return Err(error);
+                        }
+                    };
+                    if let Err(error) = self.store(token.clone(), generation) {
+                        self.finish_fetch(generation);
+                        return Err(error);
+                    }
+                    return Ok(token);
+                }
+                FetchAttempt::Waiting => self.wait_for_fetch().await,
             }
         }
-        let generation = self.begin_fetch();
-        let token = self.fetch().await?;
-        self.store(token.clone(), generation)?;
-        Ok(token)
     }
 
     async fn refresh_after(&self, stale: &Token) -> Result<Token> {
@@ -1312,6 +1447,12 @@ impl<T: Transport, C: Clock> TokenSource for OAuth2Client<T, C> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.cached = None;
         guard.next_generation();
+        if guard.fetch_generation.is_some() {
+            guard.fetch_generation = None;
+            for waiter in guard.fetch_waiters.drain(..) {
+                waiter.wake();
+            }
+        }
         if guard.refresh_generation.is_some() {
             guard.refresh_generation = None;
             for waiter in guard.refresh_waiters.drain(..) {
