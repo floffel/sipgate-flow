@@ -2718,3 +2718,527 @@ async fn phoneline_response_shape_mismatch_is_a_typed_json_error() {
         .expect_err("wrong shape");
     assert!(matches!(error, Error::Json { .. }));
 }
+
+// --- BEGIN REST v2 contacts resource tests (#165) ---
+
+mod contacts {
+    use super::*;
+    use sipgate_flow::rest::{
+        ContactAddressRequest, ContactCsvImport, ContactCsvQuery, ContactDeleteRequest,
+        ContactDeleteResult, ContactEmailRequest, ContactGoogleImport, ContactImportResult,
+        ContactNumberRequest, ContactPage, ContactQuery, ContactRequest, ContactRequestScope,
+        ContactScopeQuery, ContactUpsertResult, ContactVCardsQuery, ContactVCardsRequest,
+        ContactWebsiteRequest, InternalContact, StructuredVCard, StructuredVCardItem,
+        StructuredVCardMeta, StructuredVCardUpsertData, MAX_CONTACT_PAGE_LIMIT,
+    };
+
+    #[tokio::test]
+    async fn contacts_list_sends_no_query_by_default() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "items": [{"id": "c1", "name": "Ada"}],
+            "totalCount": 1
+        })));
+        let page = client
+            .contact_page(&ContactQuery::new())
+            .await
+            .expect("page");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.total_count, Some(1));
+        let call = transport.only_call();
+        assert_eq!(call.method.as_str(), "GET");
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts");
+        assert_eq!(call.body, Body::Empty);
+    }
+
+    #[tokio::test]
+    async fn contacts_list_renders_every_documented_paging_parameter() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({"items": []})));
+        let query = ContactQuery::new()
+            .with_limit(100)
+            .expect("limit")
+            .with_offset(20)
+            .expect("offset")
+            .with_last_id("c9")
+            .expect("last id")
+            .with_scopes([ContactScopeQuery::Private, ContactScopeQuery::Shared])
+            .with_phonenumbers(["+4915112345678"])
+            .expect("number");
+        client.contact_page(&query).await.expect("page");
+        let call = transport.only_call();
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts?phonenumbers=%2B4915112345678&limit=100&offset=20&lastId=c9&scopes=PRIVATE&scopes=SHARED");
+    }
+
+    #[test]
+    fn contacts_page_limit_boundaries() {
+        assert!(ContactQuery::new().with_limit(1).is_ok());
+        assert!(ContactQuery::new()
+            .with_limit(MAX_CONTACT_PAGE_LIMIT)
+            .is_ok());
+        assert!(ContactQuery::new().with_limit(0).is_err());
+        assert!(ContactQuery::new()
+            .with_limit(MAX_CONTACT_PAGE_LIMIT + 1)
+            .is_err());
+        assert_eq!(MAX_CONTACT_PAGE_LIMIT, 5000);
+    }
+
+    #[test]
+    fn contacts_offset_boundaries() {
+        assert!(ContactQuery::new().with_offset(0).is_ok());
+        assert!(ContactQuery::new().with_offset(i64::from(i32::MAX)).is_ok());
+        assert!(ContactQuery::new().with_offset(-1).is_err());
+        assert!(ContactQuery::new()
+            .with_offset(i64::from(i32::MAX) + 1)
+            .is_err());
+    }
+
+    #[test]
+    fn contacts_last_id_is_validated_before_the_wire() {
+        assert!(ContactQuery::new().with_last_id("c1").is_ok());
+        assert!(ContactQuery::new().with_last_id("").is_err());
+        assert!(ContactQuery::new().with_last_id("a/b").is_err());
+    }
+
+    #[test]
+    fn contacts_scope_query_round_trips_and_keeps_unknowns() {
+        assert_eq!(
+            ContactScopeQuery::from_wire("private"),
+            ContactScopeQuery::Private
+        );
+        assert_eq!(
+            ContactScopeQuery::from_wire("Shared"),
+            ContactScopeQuery::Shared
+        );
+        assert_eq!(
+            ContactScopeQuery::from_wire("INTERNAL"),
+            ContactScopeQuery::Internal
+        );
+        assert_eq!(
+            ContactScopeQuery::from_wire("FUTURE"),
+            ContactScopeQuery::Other("FUTURE".into())
+        );
+    }
+
+    #[test]
+    fn contact_request_scope_models_the_combined_value() {
+        assert_eq!(ContactRequestScope::Private.as_str(), "PRIVATE");
+        assert_eq!(
+            ContactRequestScope::from_wire("private,shared"),
+            ContactRequestScope::PrivateShared
+        );
+        assert_eq!(
+            ContactRequestScope::PrivateShared.as_str(),
+            "PRIVATE,SHARED"
+        );
+        assert_eq!(
+            ContactRequestScope::from_wire("future"),
+            ContactRequestScope::Other("future".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_contact_posts_the_body_and_accepts_a_201() {
+        let (transport, _, client) = harness();
+        transport.push_response(response(201, &[("Content-Type", "application/json")], b""));
+        let request = ContactRequest::new()
+            .with_name("Ada Lovelace")
+            .expect("name")
+            .with_given("Ada")
+            .expect("given")
+            .with_family("Lovelace")
+            .expect("family")
+            .with_scope(ContactRequestScope::Shared)
+            .with_emails([ContactEmailRequest::new("ada@example.com").expect("email")])
+            .with_numbers([ContactNumberRequest::new("+4915112345678").expect("number")])
+            .with_websites([ContactWebsiteRequest::new("example.com").expect("website")])
+            .with_addresses([ContactAddressRequest::new()
+                .with_street_address("1 A St")
+                .expect("street")]);
+        client.create_contact(&request).await.expect("created");
+        let call = transport.only_call();
+        assert_eq!(call.method.as_str(), "POST");
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts");
+        let body = json_body(&call.body);
+        assert_eq!(body["name"], "Ada Lovelace");
+        assert_eq!(body["scope"], "SHARED");
+        assert_eq!(body["emails"][0]["email"], "ada@example.com");
+        assert_eq!(body["numbers"][0]["number"], "+4915112345678");
+        assert_eq!(body["addresses"][0]["streetAddress"], "1 A St");
+    }
+
+    #[tokio::test]
+    async fn update_contact_puts_the_body_and_accepts_a_204() {
+        let (transport, _, client) = harness();
+        transport.push_response(no_content());
+        let request = ContactRequest::new().with_name("Ada").expect("name");
+        client
+            .update_contact("c1", &request)
+            .await
+            .expect("updated");
+        let call = transport.only_call();
+        assert_eq!(call.method.as_str(), "PUT");
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts/c1");
+        assert_eq!(json_body(&call.body)["name"], "Ada");
+    }
+
+    #[tokio::test]
+    async fn delete_one_contact_reads_the_delete_count() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({"deleteCount": 1})));
+        let result: ContactDeleteResult = client.delete_contact("c1").await.expect("deleted");
+        assert_eq!(result.delete_count, 1);
+        let call = transport.only_call();
+        assert_eq!(call.method.as_str(), "DELETE");
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts/c1");
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_posts_ids_and_scopes() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({"deleteCount": 2})));
+        let request = ContactDeleteRequest::new()
+            .with_contact_ids(["c1", "c2"])
+            .expect("ids")
+            .with_scopes([ContactScopeQuery::Shared])
+            .with_source("api");
+        let result = client.delete_contacts(&request).await.expect("deleted");
+        assert_eq!(result.delete_count, 2);
+        let call = transport.only_call();
+        assert_eq!(call.method.as_str(), "DELETE");
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts");
+        let body = json_body(&call.body);
+        assert_eq!(body["contactIds"], serde_json::json!(["c1", "c2"]));
+        assert_eq!(body["scope"], serde_json::json!(["SHARED"]));
+        assert_eq!(body["source"], "api");
+    }
+
+    #[tokio::test]
+    async fn csv_export_returns_text() {
+        let (transport, _, client) = harness();
+        transport.push_response(response(
+            200,
+            &[("Content-Type", "text/csv")],
+            b"firstname,lastname\nAda,Lovelace\n",
+        ));
+        let query = ContactCsvQuery::new([ContactScopeQuery::Private]);
+        let csv = client.export_contacts_csv(&query).await.expect("csv");
+        assert!(csv.starts_with("firstname,lastname"));
+        let call = transport.only_call();
+        assert_eq!(
+            call.url,
+            "https://api.sipgate.com/v2/contacts/csv?scope=PRIVATE"
+        );
+    }
+
+    #[tokio::test]
+    async fn csv_import_posts_base64_content() {
+        let (transport, _, client) = harness();
+        transport.push_response(no_content());
+        let import = ContactCsvImport::new("Zmlyc3Q=").expect("import");
+        client.import_contacts_csv(&import).await.expect("imported");
+        let call = transport.only_call();
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts/import/csv");
+        assert_eq!(json_body(&call.body)["base64Content"], "Zmlyc3Q=");
+    }
+
+    #[tokio::test]
+    async fn google_import_posts_the_token_and_reads_total_count() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({"totalCount": 4})));
+        let import = ContactGoogleImport::new("oauth")
+            .expect("token")
+            .with_scope(ContactRequestScope::Private);
+        let result: ContactImportResult = client
+            .import_contacts_google(&import)
+            .await
+            .expect("imported");
+        assert_eq!(result.total_count, 4);
+        let call = transport.only_call();
+        assert_eq!(
+            call.url,
+            "https://api.sipgate.com/v2/contacts/import/google"
+        );
+        let body = json_body(&call.body);
+        assert_eq!(body["token"], "oauth");
+        assert_eq!(body["scope"], "PRIVATE");
+    }
+
+    #[tokio::test]
+    async fn internal_contacts_are_typed_reads() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "items": [{
+                "contactId": "internal-1",
+                "id": "0a50",
+                "name": "Ada Lovelace",
+                "mobile": ["+4915112345678"],
+                "futureField": true
+            }]
+        })));
+        let contacts: Vec<InternalContact> = client.internal_contacts().await.expect("internal");
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].name, "Ada Lovelace");
+        let call = transport.only_call();
+        assert_eq!(call.url, "https://api.sipgate.com/v2/contacts/internal");
+    }
+
+    #[tokio::test]
+    async fn vcard_get_renders_the_query_and_parses_the_page() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "contacts": [{"meta": {"UUID": "u1"}, "items": {"FN": [{"value": "Ada"}]}}],
+            "overallMatches": 1
+        })));
+        let query = ContactVCardsQuery::new([ContactScopeQuery::Shared])
+            .with_limit(50)
+            .expect("limit")
+            .with_labels(["friend"])
+            .expect("labels")
+            .with_contact_ids(["c1"])
+            .expect("ids")
+            .with_wanted_fields(["name"])
+            .expect("fields")
+            .with_filter("Ada")
+            .expect("filter");
+        let page = client.contact_vcards(&query).await.expect("vcards");
+        assert_eq!(page.contacts.len(), 1);
+        assert_eq!(page.overall_matches, Some(1));
+        let call = transport.only_call();
+        assert!(call
+            .url
+            .starts_with("https://api.sipgate.com/v2/contacts/vcard?"));
+        assert!(call.url.contains("scope=SHARED"));
+        assert!(call.url.contains("limit=50"));
+        assert!(call.url.contains("filter=Ada"));
+    }
+
+    #[tokio::test]
+    async fn vcard_put_posts_entries_and_reads_results() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({
+            "result": [{"contactId": "c1", "valid_from": "2020-01-01"}]
+        })));
+        let request = ContactVCardsRequest::new()
+            .with_data([StructuredVCardUpsertData::new().with_contact_id("c1")]);
+        let result = client
+            .put_contact_vcards(ContactScopeQuery::Private, &request)
+            .await
+            .expect("stored");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].contact_id, "c1");
+        assert_eq!(result[0].valid_from, "2020-01-01");
+        let call = transport.only_call();
+        assert_eq!(call.method.as_str(), "PUT");
+        assert_eq!(
+            call.url,
+            "https://api.sipgate.com/v2/contacts/vcard?scope=PRIVATE"
+        );
+        assert_eq!(json_body(&call.body)["data"][0]["contactId"], "c1");
+    }
+
+    #[test]
+    fn contacts_models_decode_camel_and_snake_case_and_keep_unknowns() {
+        let page: ContactPage = serde_json::from_value(serde_json::json!({
+            "items": [{
+                "id": "c1",
+                "name": "Ada",
+                "scope": "PRIVATE",
+                "addresses": [{"address_id": "a1", "address1": "1 A St", "numbers_url": "/u"}],
+                "emails": [{"email": "a@b.c"}],
+                "numbers": [{"id": "n1", "number": "+49", "type": "MOBILE"}],
+                "websites": [{"url": "example.com"}],
+                "organization": [["Acme", "Eng"]],
+                "futureField": true
+            }],
+            "total_count": 1
+        }))
+        .expect("page");
+        assert_eq!(page.total_count, Some(1));
+        assert_eq!(page.items[0].addresses[0].address_id, "a1");
+        assert_eq!(
+            page.items[0].numbers[0]
+                .kind
+                .as_ref()
+                .map(sipgate_flow::rest::ContactNumberKind::as_str),
+            Some("mobile")
+        );
+
+        let item: StructuredVCardItem = serde_json::from_value(serde_json::json!({
+            "poBox": "1",
+            "postCode": "40219",
+            "xlocalNumber": "+49",
+            "futureField": true
+        }))
+        .expect("item");
+        assert_eq!(item.po_box, "1");
+        assert_eq!(item.post_code, "40219");
+        assert_eq!(item.x_local_number, "+49");
+
+        let card: StructuredVCard = serde_json::from_value(serde_json::json!({
+            "meta": {"uuid": "u1", "validFrom": "2020-01-01"},
+            "items": {}
+        }))
+        .expect("card");
+        assert_eq!(card.meta.uuid, "u1");
+        assert_eq!(card.meta.valid_from, "2020-01-01");
+    }
+
+    #[test]
+    fn contact_upsert_result_reads_valid_from() {
+        let result: ContactUpsertResult = serde_json::from_value(serde_json::json!({
+            "contactId": "c1",
+            "valid_from": "2020-01-01"
+        }))
+        .expect("result");
+        assert_eq!(result.contact_id, "c1");
+        assert_eq!(result.valid_from, "2020-01-01");
+    }
+
+    #[test]
+    fn structured_vcard_meta_defaults_when_absent() {
+        let card: StructuredVCard = serde_json::from_value(serde_json::json!({})).expect("card");
+        assert_eq!(card, StructuredVCard::default());
+        assert_eq!(StructuredVCardMeta::default().uuid, "");
+    }
+
+    #[test]
+    fn contact_id_fields_are_validated_before_the_wire() {
+        assert!(ContactDeleteRequest::new().with_contact_ids(["c1"]).is_ok());
+        assert!(ContactDeleteRequest::new().with_contact_ids([""]).is_err());
+        assert!(ContactDeleteRequest::new()
+            .with_contact_ids(["a/b"])
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn contact_ids_are_validated_before_the_wire() {
+        let (transport, _, client) = harness();
+        for bad in ["", ".", "..", "a/b", "a?b", "a b"] {
+            let error = client.delete_contact(bad).await.expect_err(bad);
+            assert!(
+                matches!(
+                    error,
+                    Error::Validation {
+                        field: "contact_id",
+                        ..
+                    }
+                ),
+                "{bad:?} produced {error:?}"
+            );
+        }
+        assert_eq!(transport.call_count(), 0);
+    }
+
+    #[test]
+    fn contact_csv_import_rejects_empty_and_non_base64() {
+        assert!(ContactCsvImport::new("Zmlyc3Q=").is_ok());
+        assert!(ContactCsvImport::new("").is_err());
+        assert!(ContactCsvImport::new("not base64!").is_err());
+    }
+
+    #[test]
+    fn contact_google_import_rejects_empty_token() {
+        assert!(ContactGoogleImport::new("token").is_ok());
+        assert!(ContactGoogleImport::new("").is_err());
+    }
+
+    #[test]
+    fn contact_request_fields_reject_oversized_values() {
+        let just_inside = "a".repeat(1024 * 1024);
+        let just_outside = "a".repeat(1024 * 1024 + 1);
+        assert!(ContactRequest::new().with_name(just_inside).is_ok());
+        assert!(ContactRequest::new().with_name(just_outside).is_err());
+        assert!(ContactRequest::new().with_name("").is_err());
+    }
+
+    #[test]
+    fn contact_number_request_validates_e164() {
+        assert!(ContactNumberRequest::new("+4915112345678").is_ok());
+        assert!(ContactNumberRequest::new("123").is_err());
+        assert!(ContactNumberRequest::new("+0123456789").is_err());
+    }
+
+    #[test]
+    fn contact_email_request_rejects_empty() {
+        assert!(ContactEmailRequest::new("a@b.c").is_ok());
+        assert!(ContactEmailRequest::new("").is_err());
+    }
+
+    #[test]
+    fn contacts_accessors_and_remaining_builders_are_exercised() {
+        // Accessors.
+        assert_eq!(
+            ContactCsvImport::new("Zm9v").expect("import").content(),
+            "Zm9v"
+        );
+        let import = ContactGoogleImport::new("t").expect("token");
+        assert_eq!(import.to_json()["token"], "t");
+        assert_eq!(
+            ContactCsvQuery::new([ContactScopeQuery::Private])
+                .scopes()
+                .len(),
+            1
+        );
+        assert_eq!(ContactVCardsRequest::new().data(), []);
+        assert_eq!(ContactScopeQuery::Internal.as_str(), "INTERNAL");
+        assert_eq!(ContactRequestScope::Internal.as_str(), "INTERNAL");
+        assert_eq!(ContactRequestScope::Other("x".into()).as_str(), "x");
+
+        // ContactRequest optional setters.
+        assert_eq!(ContactRequest::new().with_id("c1").to_json()["id"], "c1");
+        assert_eq!(
+            ContactRequest::new()
+                .with_note("hi")
+                .expect("note")
+                .to_json()["note"],
+            "hi"
+        );
+        assert!(ContactRequest::new().with_picture("Zm9v").is_ok());
+        assert!(ContactRequest::new().with_picture("nope!").is_err());
+
+        // vCard query offset/lastId builders.
+        let query = ContactVCardsQuery::new([ContactScopeQuery::Private])
+            .with_offset(5)
+            .expect("offset")
+            .with_last_id("c1")
+            .expect("last id");
+        let path = query.path();
+        assert!(path.contains("offset=5"), "{path}");
+        assert!(path.contains("lastId=c1"), "{path}");
+
+        // Address request optional setters.
+        let address = ContactAddressRequest::new()
+            .with_street_address("1 A St")
+            .expect("street")
+            .with_extended_address("Flat A")
+            .expect("extended")
+            .with_city("Berlin")
+            .expect("city")
+            .with_po_box("1")
+            .expect("po box")
+            .with_postal_code("10115")
+            .expect("postal")
+            .with_region("BE")
+            .expect("region")
+            .with_country("DE")
+            .expect("country")
+            .with_types(["home"]);
+        let body = address.to_json();
+        assert_eq!(body["country"], "DE");
+        assert_eq!(body["extendedAddress"], "Flat A");
+
+        // Organization rows.
+        let request =
+            ContactRequest::new().with_organization([["Acme".to_string(), "Eng".to_string()]]);
+        assert_eq!(request.to_json()["organization"][0][1], "Eng");
+    }
+
+    #[test]
+    fn contact_vcard_limit_boundaries_match_the_list_limit() {
+        let query = ContactVCardsQuery::new([ContactScopeQuery::Private]);
+        assert!(query.clone().with_limit(MAX_CONTACT_PAGE_LIMIT).is_ok());
+        assert!(query.clone().with_limit(0).is_err());
+        assert!(query.with_limit(MAX_CONTACT_PAGE_LIMIT + 1).is_err());
+    }
+}
