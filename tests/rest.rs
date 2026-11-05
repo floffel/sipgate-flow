@@ -425,14 +425,7 @@ async fn a_4xx_that_is_not_401_is_terminal() {
     transport.push_response(response(404, &[], b"{\"error\":\"call not found\"}"));
 
     let error = client.hangup("c1").await.expect_err("404");
-    assert!(matches!(
-        error,
-        Error::Api {
-            status: 404,
-            retryable: false,
-            ..
-        }
-    ));
+    assert!(matches!(error, Error::Api { status: 404, .. }));
     assert!(!error.is_retryable());
     assert_eq!(transport.call_count(), 1);
     assert_eq!(sleeper.delays().len(), 0);

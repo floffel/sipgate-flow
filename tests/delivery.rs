@@ -213,18 +213,10 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
         Error::transport_before_write("connect: dns failure"),
         Error::transport("transport failure with unknown write phase"),
         Error::transport_terminal("unsupported scheme"),
-        Error::Api {
-            status: 429,
-            body: "slow down".to_string(),
-            retry_after: Some(Duration::from_secs(1)),
-            retryable: true,
-        },
-        Error::Api {
-            status: 400,
-            body: "bad request".to_string(),
-            retry_after: None,
-            retryable: false,
-        },
+        Error::api(Method::Post, 429, "slow down", Some(Duration::from_secs(1))),
+        Error::api(Method::Post, 400, "bad request", None),
+        Error::api(Method::Post, 502, "bad gateway after POST", None),
+        Error::api(Method::Get, 503, "maintenance", None),
         Error::ambiguous(None, "timeout after the write"),
         Error::ambiguous(Some(500), "5xx after a POST"),
     ];
@@ -243,6 +235,30 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
     let after_write = Error::ambiguous(None, "timeout after the write");
     assert!(!after_write.is_retryable());
     assert!(after_write.is_ambiguous());
+}
+
+#[test]
+fn api_errors_derive_retryability_and_ambiguity_from_method_and_status() {
+    let post_5xx = Error::api(Method::Post, 500, "upstream died", None);
+    assert!(post_5xx.is_ambiguous(), "{post_5xx:?}");
+    assert!(!post_5xx.is_retryable(), "{post_5xx:?}");
+
+    let get_5xx = Error::api(Method::Get, 500, "upstream died", None);
+    assert!(get_5xx.is_retryable(), "{get_5xx:?}");
+    assert!(!get_5xx.is_ambiguous(), "{get_5xx:?}");
+
+    let delete_5xx = Error::api(Method::Delete, 599, "upstream died", None);
+    assert!(delete_5xx.is_retryable(), "{delete_5xx:?}");
+    assert!(!delete_5xx.is_ambiguous(), "{delete_5xx:?}");
+
+    let rate_limited = Error::api(Method::Post, 429, "slow down", Some(Duration::from_secs(3)));
+    assert!(rate_limited.is_retryable(), "{rate_limited:?}");
+    assert!(!rate_limited.is_ambiguous(), "{rate_limited:?}");
+    assert_eq!(rate_limited.retry_after(), Some(Duration::from_secs(3)));
+
+    let terminal = Error::api(Method::Post, 400, "bad request", None);
+    assert!(!terminal.is_retryable(), "{terminal:?}");
+    assert!(!terminal.is_ambiguous(), "{terminal:?}");
 }
 
 #[tokio::test]

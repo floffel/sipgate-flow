@@ -18,6 +18,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::transport::Method;
+
 /// Everything that can go wrong while parsing an event, verifying a webhook or
 /// calling an API.
 #[derive(Debug, Error)]
@@ -114,6 +116,13 @@ pub enum Error {
     },
 
     /// The API answered with a non-2xx status.
+    ///
+    /// Build this variant with [`Error::api`]. The variant is
+    /// `#[non_exhaustive]` because its fields are public enum-variant fields,
+    /// which Rust does not allow to be private; outside this crate it prevents
+    /// literal construction and therefore prevents forging `retryable` or
+    /// `ambiguous` into an unsafe combination.
+    #[non_exhaustive]
     #[error("api error {status}: {body}")]
     Api {
         /// HTTP status.
@@ -124,6 +133,9 @@ pub enum Error {
         retry_after: Option<Duration>,
         /// `true` for 429, and for 5xx on an idempotent method only.
         retryable: bool,
+        /// `true` for 5xx on a non-idempotent method: the request may already
+        /// have been applied even though the response was an error.
+        ambiguous: bool,
     },
 
     /// The outbound call request reached sipgate and the call may already be
@@ -186,6 +198,44 @@ impl Error {
         Self::Validation {
             field,
             message: message.into(),
+        }
+    }
+
+    /// Builds an API error from the request method, status, body and optional
+    /// `Retry-After` hint.
+    ///
+    /// This is the safe constructor for [`Error::Api`]: `retryable` is
+    /// `status == 429` or a 5xx on an idempotent method, while `ambiguous` is a
+    /// 5xx on a non-idempotent method.
+    ///
+    /// ```
+    /// use sipgate_flow::{Error, Method};
+    ///
+    /// let err = Error::api(Method::Post, 502, "bad gateway", None);
+    /// assert!(err.is_ambiguous());
+    /// assert!(!err.is_retryable(), "retrying could send the SMS twice");
+    /// assert_eq!(err.status(), Some(502));
+    ///
+    /// let err = Error::api(Method::Get, 503, "maintenance", None);
+    /// assert!(err.is_retryable());
+    /// assert!(!err.is_ambiguous());
+    /// ```
+    #[must_use]
+    pub fn api(
+        method: Method,
+        status: u16,
+        body: impl Into<String>,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        let server_error = (500..600).contains(&status);
+        let retryable = status == 429 || (server_error && method.is_idempotent());
+        let ambiguous = server_error && !method.is_idempotent();
+        Self::Api {
+            status,
+            body: body.into(),
+            retry_after,
+            retryable,
+            ambiguous,
         }
     }
 
@@ -302,7 +352,12 @@ impl Error {
     pub fn is_ambiguous(&self) -> bool {
         matches!(
             self,
-            Self::Ambiguous { .. } | Self::CallStartedUnknown { .. }
+            Self::Ambiguous { .. }
+                | Self::CallStartedUnknown { .. }
+                | Self::Api {
+                    ambiguous: true,
+                    ..
+                }
         )
     }
 
@@ -310,14 +365,9 @@ impl Error {
     ///
     /// ```
     /// use std::time::Duration;
-    /// use sipgate_flow::Error;
+    /// use sipgate_flow::{Error, Method};
     ///
-    /// let err = Error::Api {
-    ///     status: 429,
-    ///     body: String::new(),
-    ///     retry_after: Some(Duration::from_secs(7)),
-    ///     retryable: true,
-    /// };
+    /// let err = Error::api(Method::Get, 429, String::new(), Some(Duration::from_secs(7)));
     /// assert_eq!(err.retry_after().unwrap().as_secs(), 7);
     /// ```
     #[must_use]

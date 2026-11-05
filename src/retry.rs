@@ -409,12 +409,9 @@ pub(crate) fn api_error(
     });
     let truncated = truncate_body(body);
     match classify(method, status) {
-        RetryOutcome::Retry => Error::Api {
-            status,
-            body: truncated,
-            retry_after,
-            retryable: true,
-        },
+        RetryOutcome::Retry | RetryOutcome::Terminal => {
+            Error::api(method, status, truncated, retry_after)
+        }
         RetryOutcome::Ambiguous => Error::ambiguous(
             Some(status),
             format!(
@@ -422,11 +419,5 @@ pub(crate) fn api_error(
                 method.as_str()
             ),
         ),
-        RetryOutcome::Terminal => Error::Api {
-            status,
-            body: truncated,
-            retry_after,
-            retryable: false,
-        },
     }
 }
