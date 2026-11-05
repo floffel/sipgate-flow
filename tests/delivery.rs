@@ -200,14 +200,9 @@ fn transport_retryability_agrees_with_ambiguity_over_every_error_case() {
         Error::EmptySecret,
         Error::MissingSecret,
         Error::SecretMismatch,
-        Error::UnsupportedContentType {
-            content_type: "text/plain".to_string(),
-        },
+        Error::unsupported_content_type("text/plain"),
         Error::BodyTooLarge { size: 2, limit: 1 },
-        Error::AuthRejected {
-            status: 401,
-            body: "denied".to_string(),
-        },
+        Error::auth_rejected(401, "denied"),
         Error::TokenResponse("missing access token".to_string()),
         Error::Unauthorized,
         Error::transport_before_write("connect: dns failure"),

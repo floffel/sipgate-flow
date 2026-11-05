@@ -9,6 +9,7 @@
 use proptest::prelude::*;
 use serde_json::json;
 use sipgate_flow::transport::{Method, Request, RequestBody, Security};
+use sipgate_flow::Error;
 
 /// A value that must never appear in any rendering.
 const SECRET: &str = "s3cr3t-B7-cr3dential";
@@ -222,6 +223,52 @@ fn a_request_with_a_basic_credential_hides_the_password_at_the_request_level() {
     assert!(!rendered.contains(SECRET), "{rendered}");
     assert!(rendered.contains("api.sipgate.com"), "{rendered}");
     assert!(rendered.contains("method: Get"), "{rendered}");
+}
+
+#[test]
+fn remote_error_text_cannot_forge_log_lines() {
+    let hostile = "text/plain\r\nINFO forged\x1b[31m";
+    for error in [
+        Error::unsupported_content_type(hostile),
+        Error::auth_rejected(401, hostile),
+        Error::api(Method::Post, 400, hostile, None),
+    ] {
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(
+                !rendered.contains('\r') && !rendered.contains('\n') && !rendered.contains('\x1b'),
+                "control characters survived: {rendered:?}"
+            );
+            assert!(rendered.contains('\u{FFFD}'), "{rendered:?}");
+            assert!(
+                !rendered.lines().any(|line| line.starts_with("INFO forged")),
+                "the injected text became its own log line: {rendered:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn remote_error_text_is_truncated_to_at_most_512_bytes() {
+    let body = "x".repeat(700);
+    let error = Error::api(Method::Get, 500, body, None);
+    let rendered = error.to_string();
+    assert!(
+        rendered.len() <= 512 + "api error 500: ".len(),
+        "body was not bounded: {}",
+        rendered.len()
+    );
+    assert_eq!(rendered.matches('x').count(), 512);
+}
+
+#[test]
+fn remote_error_text_is_truncated_on_a_utf8_boundary() {
+    // Each `ä` is two bytes. Cutting at byte 512 would otherwise split one.
+    let body = "ä".repeat(400);
+    let error = Error::auth_rejected(401, body);
+    let rendered = error.to_string();
+    assert!(rendered.contains('ä'), "{rendered}");
+    assert!(!rendered.contains('\u{FFFD}'), "{rendered}");
+    assert_eq!(rendered.matches('ä').count(), 256);
 }
 
 proptest! {

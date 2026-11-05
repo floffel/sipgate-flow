@@ -20,6 +20,26 @@ use thiserror::Error;
 
 use crate::transport::Method;
 
+/// Longest remote-controlled string kept in an error.
+const SAFE_TEXT_BYTES: usize = 512;
+
+/// Bounds and sanitises remote-controlled text before it reaches a log sink.
+fn safe_text(value: &str) -> String {
+    let mut sanitised = String::with_capacity(value.len().min(SAFE_TEXT_BYTES));
+    for character in value.chars() {
+        let character = if character.is_control() {
+            '\u{FFFD}'
+        } else {
+            character
+        };
+        if sanitised.len() + character.len_utf8() > SAFE_TEXT_BYTES {
+            break;
+        }
+        sanitised.push(character);
+    }
+    sanitised
+}
+
 /// Everything that can go wrong while parsing an event, verifying a webhook or
 /// calling an API.
 #[derive(Debug, Error)]
@@ -69,6 +89,9 @@ pub enum Error {
     /// The request body was not JSON. sipgate flow always sends
     /// `application/json`; `application/x-www-form-urlencoded` belongs to the
     /// separate Push API.
+    ///
+    /// Build this variant with [`Error::unsupported_content_type`].
+    #[non_exhaustive]
     #[error("unsupported content type `{content_type}`")]
     UnsupportedContentType {
         /// The value the request carried.
@@ -86,11 +109,15 @@ pub enum Error {
     },
 
     /// The token endpoint rejected the client credentials.
+    ///
+    /// Build this variant with [`Error::auth_rejected`].
+    #[non_exhaustive]
     #[error("token endpoint rejected the client credentials (http {status}): {body}")]
     AuthRejected {
         /// HTTP status of the token response.
         status: u16,
-        /// Response body, truncated to 512 characters.
+        /// Response body, truncated to at most 512 bytes, with control
+        /// characters replaced by `U+FFFD`.
         body: String,
     },
 
@@ -127,7 +154,8 @@ pub enum Error {
     Api {
         /// HTTP status.
         status: u16,
-        /// Response body, truncated to 512 characters.
+        /// Response body, truncated to at most 512 bytes, with control
+        /// characters replaced by `U+FFFD`.
         body: String,
         /// Parsed `Retry-After` header, when the server sent one.
         retry_after: Option<Duration>,
@@ -159,7 +187,8 @@ pub enum Error {
     CallStartedUnknown {
         /// HTTP status returned for the accepted call request.
         status: u16,
-        /// Response body, truncated to 512 characters.
+        /// Response body, truncated to at most 512 bytes, with control
+        /// characters replaced by `U+FFFD`.
         body: String,
     },
 
@@ -201,6 +230,44 @@ impl Error {
         }
     }
 
+    /// Builds an unsupported content type error with sanitised header text.
+    ///
+    /// The value is truncated to at most 512 bytes at a UTF-8 boundary, and
+    /// control characters are replaced by `U+FFFD`, so a hostile
+    /// `Content-Type` header cannot forge log lines.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::unsupported_content_type("text/plain");
+    /// assert!(matches!(err, Error::UnsupportedContentType { .. }));
+    /// ```
+    #[must_use]
+    pub fn unsupported_content_type(content_type: impl Into<String>) -> Self {
+        Self::UnsupportedContentType {
+            content_type: safe_text(&content_type.into()),
+        }
+    }
+
+    /// Builds an authentication rejection with a sanitised response body.
+    ///
+    /// The body is truncated to at most 512 bytes at a UTF-8 boundary, and
+    /// control characters are replaced by `U+FFFD`.
+    ///
+    /// ```
+    /// use sipgate_flow::Error;
+    ///
+    /// let err = Error::auth_rejected(401, "denied");
+    /// assert_eq!(err.status(), Some(401));
+    /// ```
+    #[must_use]
+    pub fn auth_rejected(status: u16, body: impl Into<String>) -> Self {
+        Self::AuthRejected {
+            status,
+            body: safe_text(&body.into()),
+        }
+    }
+
     /// Builds an API error from the request method, status, body and optional
     /// `Retry-After` hint.
     ///
@@ -232,10 +299,28 @@ impl Error {
         let ambiguous = server_error && !method.is_idempotent();
         Self::Api {
             status,
-            body: body.into(),
+            body: safe_text(&body.into()),
             retry_after,
             retryable,
             ambiguous,
+        }
+    }
+
+    /// Builds a sanitised API error that is retryable and not ambiguous.
+    ///
+    /// This constructor is reserved for side-effect-free API calls such as the
+    /// `OAuth2` token request, where a repeated request cannot duplicate work.
+    pub(crate) fn api_retryable(
+        status: u16,
+        body: impl Into<String>,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self::Api {
+            status,
+            body: safe_text(&body.into()),
+            retry_after,
+            retryable: true,
+            ambiguous: false,
         }
     }
 
