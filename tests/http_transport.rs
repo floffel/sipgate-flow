@@ -62,6 +62,29 @@ impl TestServer {
         format!("{}{path}", self.base)
     }
 
+    /// Starts a server that answers the first connection with raw bytes, so a
+    /// test can send a header value that is not valid UTF-8.
+    fn start_raw(response: Vec<u8>, delay: Duration) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let addr: SocketAddr = listener.local_addr().expect("local addr");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        let handle = std::thread::spawn(move || {
+            let Some(mut stream) = accept_request(&listener, true) else {
+                return;
+            };
+            read_request(&mut stream, &sink);
+            std::thread::sleep(delay);
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+        });
+        Self {
+            base: format!("http://{addr}"),
+            received,
+            handle: Some(handle),
+        }
+    }
+
     /// The bytes the peer saw, after the connection closed.
     fn received(&mut self) -> String {
         if let Some(handle) = self.handle.take() {
@@ -553,4 +576,91 @@ async fn the_transport_is_shareable_across_tasks() {
     for handle in handles {
         assert!(handle.await.expect("task"));
     }
+}
+
+/// Two distinct values for one header name both survive, in wire order.
+#[test]
+fn repeated_headers_are_kept_and_not_collapsed() {
+    let response = Response::new(
+        200,
+        [
+            ("Set-Cookie".to_string(), "a=1".to_string()),
+            ("x-trace".to_string(), "first".to_string()),
+            ("Set-Cookie".to_string(), "b=2".to_string()),
+        ],
+        Vec::new(),
+    );
+
+    // First value stays reachable through the single-value accessor.
+    assert_eq!(response.header("set-cookie"), Some("a=1"));
+    // Every value, under any casing, survives.
+    assert_eq!(response.header_all("SET-COOKIE"), ["a=1", "b=2"]);
+    assert_eq!(response.header_all("X-Trace"), ["first"]);
+    // `headers()` lists each pair, not one per name.
+    assert_eq!(
+        response.headers(),
+        [
+            ("set-cookie", "a=1"),
+            ("x-trace", "first"),
+            ("set-cookie", "b=2")
+        ]
+    );
+}
+
+/// A header value that is not valid UTF-8 is not rewritten to an empty string.
+#[test]
+fn an_invalid_utf8_header_value_is_absent_not_empty() {
+    let response =
+        Response::with_raw_headers(200, [("X-Bin".to_string(), vec![0xff, 0xfe])], Vec::new());
+
+    // The dropped value must never masquerade as a present-but-empty header.
+    assert_eq!(response.header("x-bin"), None);
+    // The raw bytes are still available to a caller that wants them.
+    assert_eq!(
+        response.header_bytes("x-bin"),
+        Some([0xff, 0xfe].as_slice())
+    );
+    // ...and do not leak into the UTF-8-only views as empty strings.
+    assert_eq!(response.headers(), Vec::new());
+}
+
+/// A single clean header still reads back exactly, case-insensitively.
+#[test]
+fn a_single_clean_header_still_reads_back() {
+    let response = Response::new(
+        429,
+        [("Retry-After".to_string(), "3".to_string())],
+        Vec::new(),
+    );
+    assert_eq!(response.header("retry-after"), Some("3"));
+    assert_eq!(response.header("Retry-After"), Some("3"));
+    assert_eq!(response.header_all("RETRY-AFTER"), ["3"]);
+    assert_eq!(response.headers(), [("retry-after", "3")]);
+}
+
+/// End to end through `ReqwestTransport`: a real socket sends a repeated header
+/// and a non-UTF-8 value, and both survive the flattening step that previously
+/// dropped them.
+#[tokio::test]
+async fn the_reqwest_transport_keeps_repeats_and_raw_bytes() {
+    let mut wire = Vec::new();
+    wire.extend_from_slice(b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-Bin: ");
+    wire.extend_from_slice(&[0xff, 0xfe]); // not valid UTF-8
+    wire.extend_from_slice(b"\r\nContent-Length: 2\r\n\r\nok");
+
+    let mut server = TestServer::start_raw(wire, Duration::ZERO);
+    let url = server.url("/v2/calls");
+    let request = Request::empty(Method::Get, &url, Security::Bearer("t"));
+    let response = ReqwestTransport::new()
+        .execute(request)
+        .await
+        .expect("response");
+
+    assert_eq!(response.header_all("set-cookie"), ["a=1", "b=2"]);
+    assert_eq!(response.header("x-bin"), None);
+    assert_eq!(
+        response.header_bytes("x-bin"),
+        Some([0xff, 0xfe].as_slice())
+    );
+    let _ = server.received();
 }
