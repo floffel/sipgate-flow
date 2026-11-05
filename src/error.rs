@@ -19,6 +19,7 @@ use std::time::Duration;
 use base64::DecodeError;
 use thiserror::Error;
 
+use crate::retry::{classify, RetryOutcome};
 use crate::transport::Method;
 
 /// Longest remote-controlled string kept in an error.
@@ -334,10 +335,13 @@ pub enum Error {
         /// Parsed `Retry-After` header, when the server sent one, clamped to
         /// [`MAX_RETRY_AFTER`].
         retry_after: Option<Duration>,
-        /// `true` for 429, and for 5xx on an idempotent method only.
+        /// `true` for 408, 425, 429, and for retryable 5xx on an idempotent
+        /// method only. In particular, permanent 501 and 505 answers are not
+        /// retryable.
         retryable: bool,
-        /// `true` for 5xx on a non-idempotent method: the request may already
-        /// have been applied even though the response was an error.
+        /// `true` for retryable 5xx on a non-idempotent method: the request may
+        /// already have been applied even though the response was an error.
+        /// Permanent 501 and 505 answers are terminal instead.
         ambiguous: bool,
     },
 
@@ -722,12 +726,12 @@ impl Error {
     /// Builds an API error from the request method, status, body and optional
     /// `Retry-After` hint.
     ///
-    /// This is the safe constructor for [`Error::Api`]: `retryable` is
-    /// `status == 429` or a 5xx on an idempotent method, while `ambiguous` is a
-    /// 5xx on a non-idempotent method. The `status` must be in `100..=599`; an
-    /// invalid value returns [`Error::Validation`] instead of producing an
-    /// [`Error::Api`] with garbage. The `Retry-After` hint is clamped to
-    /// [`MAX_RETRY_AFTER`].
+    /// This is the safe constructor for [`Error::Api`]: `retryable` is true for
+    /// `408`, `425`, `429`, and retryable 5xx answers on an idempotent method,
+    /// while `ambiguous` is true for other 5xx answers on a non-idempotent
+    /// method. The `status` must be in `100..=599`; an invalid value returns
+    /// [`Error::Validation`] instead of producing an [`Error::Api`] with
+    /// garbage. The `Retry-After` hint is clamped to [`MAX_RETRY_AFTER`].
     ///
     /// ```
     /// use sipgate_flow::{Error, Method};
@@ -754,9 +758,9 @@ impl Error {
         if !is_http_status(status) {
             return Self::validation("status", "must be in 100..=599");
         }
-        let server_error = (500..600).contains(&status);
-        let retryable = status == 429 || (server_error && method.is_idempotent());
-        let ambiguous = server_error && !method.is_idempotent();
+        let outcome = classify(method, status);
+        let retryable = outcome == RetryOutcome::Retry;
+        let ambiguous = outcome == RetryOutcome::Ambiguous;
         Self::Api {
             status,
             body: safe_text(&body.into()),
@@ -1062,9 +1066,9 @@ impl Error {
     /// Whether another attempt could succeed.
     ///
     /// Only transport failures that provably happened before the request was
-    /// written and 429/5xx answers on idempotent methods are retryable;
-    /// validation, parsing, authorization errors and every
-    /// [`Error::Ambiguous`] outcome are not.
+    /// written, 408/425/429 answers, and retryable 5xx answers on idempotent
+    /// methods are retryable; validation, parsing, authorization errors and
+    /// every [`Error::Ambiguous`] outcome are not.
     ///
     /// ```
     /// use sipgate_flow::Error;

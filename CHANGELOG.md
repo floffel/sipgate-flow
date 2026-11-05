@@ -29,6 +29,11 @@ with the pre-1.0 reading described in the README section *Versioning*.
   order: `header` returns `None` for a non-UTF-8 value instead of an empty
   string, and `header_all` / `header_bytes` / `headers_bytes` expose every
   value. `Response::new` and `header` stay source-compatible.
+* Status classification now separates permanent 5xx answers from ambiguous
+  ones: `501` and `505` are terminal instead of being reported as possibly
+  applied after a `POST`, while `408` and `425` are retryable because they mean
+  nothing was processed. The refined table is pinned in the property and
+  delivery tests.
 * The flagship crate example no longer teaches failure-to-default. It used
   `event.session_id().unwrap_or_default()`, silently substituting an empty
   session id and returning `200` as if the action were valid. The example now

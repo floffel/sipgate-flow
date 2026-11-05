@@ -445,8 +445,8 @@ pub fn retry_after_from_with_clock<'a, C: Clock>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RetryOutcome {
-    /// Nothing happened yet (429), or the method is idempotent so repeating it
-    /// cannot change the outcome: retry after the backoff.
+    /// Nothing happened yet (`408`, `425`, `429`), or the method is idempotent
+    /// so repeating it cannot change the outcome: retry after the backoff.
     Retry,
     /// The request may have been executed and the method is not idempotent.
     /// Never retried automatically — the caller reconciles it.
@@ -457,27 +457,34 @@ pub enum RetryOutcome {
 
 /// Classifies `status` for a request with `method`.
 ///
-/// `429` is emitted before the server processes anything, so it is safe to
-/// repeat for every method. A `5xx` means the server read the request: on
-/// `GET`/`PUT`/`DELETE` repeating it is harmless, on `POST` it is a possible
-/// duplicate.
+/// `408`, `425` and `429` are emitted before the server processes anything, so
+/// they are safe to repeat for every method. `501` and `505` are permanent
+/// answers that do not depend on the request having been applied at all.
+/// Other `5xx` responses mean the server may have read the request: on
+/// `GET`/`PUT`/`DELETE` repeating them is harmless, on `POST` they are a
+/// possible duplicate.
 ///
 /// ```
 /// use sipgate_flow::{classify, Method, RetryOutcome};
 ///
 /// assert_eq!(classify(Method::Post, 429), RetryOutcome::Retry);
+/// assert_eq!(classify(Method::Post, 408), RetryOutcome::Retry);
 /// assert_eq!(classify(Method::Post, 503), RetryOutcome::Ambiguous);
+/// assert_eq!(classify(Method::Post, 501), RetryOutcome::Terminal);
 /// assert_eq!(classify(Method::Get, 503), RetryOutcome::Retry);
+/// assert_eq!(classify(Method::Get, 505), RetryOutcome::Terminal);
 /// assert_eq!(classify(Method::Delete, 500), RetryOutcome::Retry);
 /// assert_eq!(classify(Method::Post, 400), RetryOutcome::Terminal);
 /// assert_eq!(classify(Method::Get, 401), RetryOutcome::Terminal);
 /// ```
 #[must_use]
 pub fn classify(method: Method, status: u16) -> RetryOutcome {
+    let not_processed = matches!(status, 408 | 425 | 429);
+    let permanent_server_error = matches!(status, 501 | 505);
     let server_error = (500..600).contains(&status);
-    if status == 429 || (server_error && method.is_idempotent()) {
+    if not_processed || (server_error && !permanent_server_error && method.is_idempotent()) {
         RetryOutcome::Retry
-    } else if server_error {
+    } else if server_error && !permanent_server_error {
         RetryOutcome::Ambiguous
     } else {
         RetryOutcome::Terminal
@@ -527,5 +534,32 @@ pub(crate) fn api_error(
             body,
             headers.iter().copied(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify, RetryOutcome};
+    use crate::transport::Method;
+
+    #[test]
+    fn classify_pins_the_refined_status_table() {
+        assert_eq!(classify(Method::Post, 400), RetryOutcome::Terminal);
+        assert_eq!(classify(Method::Post, 402), RetryOutcome::Terminal);
+        assert_eq!(classify(Method::Post, 408), RetryOutcome::Retry);
+        assert_eq!(classify(Method::Post, 425), RetryOutcome::Retry);
+        assert_eq!(classify(Method::Post, 429), RetryOutcome::Retry);
+        assert_eq!(classify(Method::Post, 500), RetryOutcome::Ambiguous);
+        assert_eq!(classify(Method::Post, 501), RetryOutcome::Terminal);
+        assert_eq!(classify(Method::Post, 505), RetryOutcome::Terminal);
+
+        assert_eq!(classify(Method::Get, 400), RetryOutcome::Terminal);
+        assert_eq!(classify(Method::Get, 402), RetryOutcome::Terminal);
+        assert_eq!(classify(Method::Get, 408), RetryOutcome::Retry);
+        assert_eq!(classify(Method::Get, 425), RetryOutcome::Retry);
+        assert_eq!(classify(Method::Get, 429), RetryOutcome::Retry);
+        assert_eq!(classify(Method::Get, 500), RetryOutcome::Retry);
+        assert_eq!(classify(Method::Get, 501), RetryOutcome::Terminal);
+        assert_eq!(classify(Method::Get, 505), RetryOutcome::Terminal);
     }
 }

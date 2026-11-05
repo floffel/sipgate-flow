@@ -4,7 +4,7 @@
 //! sipgate documents no idempotency key, so the only thing that separates an
 //! at-least-once request from a duplicated SMS is the classification here: a
 //! `POST` that may have been executed is never repeated, while reads and
-//! state-setters (`GET`, `PUT`, `DELETE`) and every `429` are.
+//! state-setters (`GET`, `PUT`, `DELETE`) and `408`/`425`/`429` are.
 
 mod common;
 
@@ -174,7 +174,7 @@ async fn ambiguous_response_never_keeps_credential_headers() {
 }
 
 #[tokio::test]
-async fn every_5xx_after_a_post_is_ambiguous() {
+async fn retryable_5xx_after_a_post_is_ambiguous_but_permanent_ones_are_terminal() {
     for status in [500_u16, 502, 503, 504, 599] {
         let (transport, sleeper, client) = harness();
         transport.push_response(response(status, &[], b"boom"));
@@ -185,6 +185,32 @@ async fn every_5xx_after_a_post_is_ambiguous() {
         assert_eq!(error.status(), Some(status));
         assert_eq!(transport.call_count(), 1, "{status} was retried");
         assert_eq!(sleeper.delays(), Vec::<Duration>::new(), "{status}");
+    }
+
+    for status in [501_u16, 505] {
+        let (transport, sleeper, client) = harness();
+        transport.push_response(response(status, &[], b"not supported"));
+        transport.push_response(no_content());
+
+        let error = send_sms(&client).await.expect_err("permanent 5xx");
+        assert!(!error.is_ambiguous(), "{status}: {error:?}");
+        assert!(!error.is_retryable(), "{status}: {error:?}");
+        assert_eq!(error.status(), Some(status));
+        assert_eq!(transport.call_count(), 1, "{status} was retried");
+        assert_eq!(sleeper.delays(), Vec::<Duration>::new(), "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_408_or_425_after_a_post_is_retried_because_nothing_was_processed() {
+    for status in [408_u16, 425] {
+        let (transport, sleeper, client) = harness();
+        transport.push_response(response(status, &[], b"retry"));
+        transport.push_response(no_content());
+
+        send_sms(&client).await.expect("second attempt wins");
+        assert_eq!(transport.call_count(), 2, "{status} was not retried");
+        assert_eq!(sleeper.delays().len(), 1, "{status}");
     }
 }
 
@@ -260,9 +286,12 @@ fn the_classification_matrix_is_pinned() {
         (Method::Post, 599, RetryOutcome::Ambiguous),
         (Method::Post, 400, RetryOutcome::Terminal),
         (Method::Post, 200, RetryOutcome::Terminal),
-        (Method::Get, 501, RetryOutcome::Retry),
+        (Method::Get, 408, RetryOutcome::Retry),
+        (Method::Get, 425, RetryOutcome::Retry),
+        (Method::Get, 501, RetryOutcome::Terminal),
         (Method::Put, 502, RetryOutcome::Retry),
         (Method::Delete, 503, RetryOutcome::Retry),
+        (Method::Get, 505, RetryOutcome::Terminal),
         (Method::Get, 429, RetryOutcome::Retry),
         (Method::Delete, 404, RetryOutcome::Terminal),
         (Method::Put, 401, RetryOutcome::Terminal),
@@ -276,13 +305,14 @@ fn the_classification_matrix_is_pinned() {
         );
     }
 
-    // No non-idempotent request is ever classified as retryable after a 5xx.
+    // Permanent 5xx answers are terminal; the rest follow the idempotency rule.
     for status in 500..=599 {
         for method in [Method::Get, Method::Put, Method::Delete, Method::Post] {
+            let permanent = matches!(status, 501 | 505);
             let retry = classify(method, status) == RetryOutcome::Retry;
             assert_eq!(
                 retry,
-                method.is_idempotent(),
+                !permanent && method.is_idempotent(),
                 "{} {status}",
                 method.as_str()
             );
@@ -356,9 +386,35 @@ fn api_errors_derive_retryability_and_ambiguity_from_method_and_status() {
     assert!(post_5xx.is_ambiguous(), "{post_5xx:?}");
     assert!(!post_5xx.is_retryable(), "{post_5xx:?}");
 
+    let post_not_implemented = Error::api(Method::Post, 501, "not implemented", None);
+    assert!(
+        !post_not_implemented.is_ambiguous(),
+        "{post_not_implemented:?}"
+    );
+    assert!(
+        !post_not_implemented.is_retryable(),
+        "{post_not_implemented:?}"
+    );
+
+    let post_http_version = Error::api(Method::Post, 505, "http version", None);
+    assert!(!post_http_version.is_ambiguous(), "{post_http_version:?}");
+    assert!(!post_http_version.is_retryable(), "{post_http_version:?}");
+
+    for status in [408_u16, 425] {
+        let post = Error::api(Method::Post, status, "not processed", None);
+        assert!(post.is_retryable(), "{status}: {post:?}");
+        assert!(!post.is_ambiguous(), "{status}: {post:?}");
+    }
+
     let get_5xx = Error::api(Method::Get, 500, "upstream died", None);
     assert!(get_5xx.is_retryable(), "{get_5xx:?}");
     assert!(!get_5xx.is_ambiguous(), "{get_5xx:?}");
+
+    for status in [501_u16, 505] {
+        let get = Error::api(Method::Get, status, "permanent", None);
+        assert!(!get.is_retryable(), "{status}: {get:?}");
+        assert!(!get.is_ambiguous(), "{status}: {get:?}");
+    }
 
     let delete_5xx = Error::api(Method::Delete, 599, "upstream died", None);
     assert!(delete_5xx.is_retryable(), "{delete_5xx:?}");

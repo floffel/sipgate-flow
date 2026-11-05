@@ -321,10 +321,14 @@ proptest! {
     fn no_non_idempotent_request_is_retried_after_a_server_error(status in 100_u16..1000) {
         let outcome = classify(Method::Post, status);
         let repeatable = outcome == RetryOutcome::Retry;
-        // The only repeatable non-idempotent answer is the one the server emits
-        // before it processes anything, and never a 5xx.
-        prop_assert_eq!(repeatable, status == 429);
-        prop_assert_eq!(outcome == RetryOutcome::Ambiguous, (500..600).contains(&status));
+        // The repeatable non-idempotent answers are the ones the server emits
+        // before it processes anything. Permanent 5xx answers are terminal;
+        // the remaining 5xx answers are the ambiguous class.
+        let not_processed = matches!(status, 408 | 425 | 429);
+        let permanent_server_error = matches!(status, 501 | 505);
+        let ambiguous = (500..600).contains(&status) && !permanent_server_error;
+        prop_assert_eq!(repeatable, not_processed);
+        prop_assert_eq!(outcome == RetryOutcome::Ambiguous, ambiguous);
     }
 
     #[test]
@@ -332,9 +336,13 @@ proptest! {
         let get = classify(Method::Get, status);
         prop_assert_eq!(get, classify(Method::Put, status));
         prop_assert_eq!(get, classify(Method::Delete, status));
-        // Retry and Ambiguous are mutually exclusive, and only 429/5xx reach them.
+        // Retry and Ambiguous are mutually exclusive. Retryable answers are
+        // 408/425/429 plus non-permanent 5xx; permanent 5xx, notably 501/505,
+        // stay terminal.
         prop_assert!(!(get == RetryOutcome::Retry && get == RetryOutcome::Ambiguous));
-        prop_assert_eq!(get == RetryOutcome::Terminal, !(status == 429 || (500..600).contains(&status)));
+        let retryable = matches!(status, 408 | 425 | 429)
+            || ((500..600).contains(&status) && !matches!(status, 501 | 505));
+        prop_assert_eq!(get == RetryOutcome::Terminal, !retryable);
     }
 
     #[test]
