@@ -13,9 +13,10 @@ use common::{FakeClock, MockTransport};
 use sipgate_flow::auth::DEFAULT_TOKEN_URL;
 use sipgate_flow::rest::{ChannelCall, RecordingSession};
 use sipgate_flow::{
-    wav, Action, Audio, BargeInConfig, BargeInStrategy, ClientCredentials, ConfigureTranscription,
-    Direction, Error, Event, EventPayload, FnSleeper, MixAudio, NoSleep, OAuth2Client, RestClient,
-    RetryPolicy, SendSms, Severity, Sleeper, SmsFailureReason, Speak, StaticToken, Token, Transfer,
+    parse_retry_after, retry_after_from, retry_after_from_with_clock, wav, Action, Audio,
+    BargeInConfig, BargeInStrategy, ClientCredentials, ConfigureTranscription, Direction, Error,
+    Event, EventPayload, FnSleeper, MixAudio, NoSleep, OAuth2Client, RestClient, RetryPolicy,
+    SendSms, Severity, Sleeper, SmsFailureReason, Speak, StaticToken, Token, Transfer,
     TransferFailedReason, Tts, Vad, MIN_RETRY_DELAY,
 };
 
@@ -275,6 +276,80 @@ fn zero_max_attempts_still_has_no_retry_after_the_first_failure() {
         "the builder keeps the caller's value"
     );
     assert_eq!(policy.delay(1, None), None);
+}
+
+#[test]
+fn retry_after_delta_seconds_cover_the_numeric_boundaries() {
+    assert_eq!(parse_retry_after("0"), Some(Duration::ZERO));
+    assert_eq!(
+        parse_retry_after(&u64::MAX.to_string()),
+        Some(Duration::from_secs(u64::MAX))
+    );
+    let over_u64 = "18446744073709551616";
+    assert_eq!(
+        parse_retry_after(over_u64),
+        Some(Duration::MAX),
+        "an absurd numeric hint is still present and must not become absent"
+    );
+}
+
+#[test]
+fn retry_after_http_dates_are_relative_to_the_clock() {
+    let clock = FakeClock::new(Duration::from_secs(1_700_000_000));
+    let headers = |name: &str| {
+        name.eq_ignore_ascii_case("Retry-After")
+            .then_some("Tue, 14 Nov 2023 22:15:20 GMT")
+    };
+    assert_eq!(
+        retry_after_from_with_clock(headers, &clock),
+        Some(Duration::from_secs(120))
+    );
+
+    // The clock moved past the date: the hint saturates at zero and the
+    // policy's floor still keeps the retry off the wire back-to-back.
+    clock.advance(Duration::from_secs(121));
+    assert_eq!(
+        retry_after_from_with_clock(headers, &clock),
+        Some(Duration::ZERO)
+    );
+    assert_eq!(
+        RetryPolicy::new(2).delay(1, Some(Duration::ZERO)),
+        Some(MIN_RETRY_DELAY)
+    );
+}
+
+#[test]
+fn retry_after_fails_closed_only_when_the_header_is_present() {
+    assert_eq!(retry_after_from(|_| None), None, "absent stays absent");
+    assert_eq!(
+        retry_after_from(|name| (name == "retry-after").then_some("not a date")),
+        Some(Duration::MAX),
+        "present but unusable is paced at the caller's ceiling"
+    );
+    assert_eq!(
+        retry_after_from(|name| name.eq_ignore_ascii_case("Retry-After").then_some("7")),
+        Some(Duration::from_secs(7)),
+        "the header name lookup is case-insensitive"
+    );
+
+    let policy = RetryPolicy::default().with_max_delay(Duration::from_secs(3));
+    assert_eq!(
+        policy.delay(1, retry_after_from(|_| Some("garbage"))),
+        Some(Duration::from_secs(3)),
+        "a malformed present hint clamps to the policy ceiling"
+    );
+
+    let error = Error::api(
+        sipgate_flow::Method::Get,
+        429,
+        "slow down",
+        retry_after_from(|_| Some("garbage")),
+    );
+    assert_eq!(
+        error.retry_after(),
+        Some(sipgate_flow::MAX_RETRY_AFTER),
+        "the error constructor clamps the malformed present hint too"
+    );
 }
 
 #[test]

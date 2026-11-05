@@ -18,6 +18,11 @@ with the pre-1.0 reading described in the README section *Versioning*.
   id) instead of only the branch that never needed the fallback. Action builders
   already reject an empty session id with `Error::Validation { field:
   "session_id", .. }`, which a regression test now pins.
+* `Retry-After` now accepts both documented forms. HTTP-date values are
+  converted against the crate `Clock` and saturate at zero when the date has
+  passed; delta-seconds above `u64` and present-but-unparseable values fail
+  closed to the caller's ceiling instead of silently falling back to the
+  shortest backoff step.
 * Retry pacing now has a hard `MIN_RETRY_DELAY` floor. `with_base_delay`,
   `with_max_delay`, local backoff and `Retry-After` values can no longer produce
   a zero wait, so a misconfigured policy or a zero hint cannot hammer a peer
