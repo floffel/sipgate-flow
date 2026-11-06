@@ -237,6 +237,19 @@ in any `Debug` output.
   (`DELETE /v3/webhooks/{configId}`) multi-target configs with typed
   `AiWebhookConfig` values, and add/remove custom `X-` headers through the
   `/headers` sub-resource with redacted `AiWebhookHeader` values.
+* **The v3 account-administration write surface**: `FlowClient` exposes one
+  typed `V3AdminOperation` for each documented account, device, routing, fax,
+  faxline, voicemail, user, group, contract, trunk and label operation in the
+  v3 Swagger, plus the OpenAPI faxline POST and member writes. Request builders
+  validate path ids, E.164 numbers, text, PINs and batch sizes before the wire;
+  `V3AdminResponse` preserves the heterogeneous success bodies, and a retryable
+  failed `POST` is reported as ambiguous rather than repeated.
+* **The v3 TTS synthesis surface**: `FlowClient` lists stored announcements
+  (`GET /v3/tts`), synthesizes a new one (`POST /v3/tts`) and streams base64
+  audio (`POST /v3/tts/stream`) through validated `SynthesizeRequest`,
+  `SynthesizeStreamRequest` and `SynthesizedAudio` types. The undocumented
+  `type` token is carried by `SynthesizeType` with an `Other(String)` escape
+  hatch instead of inventing semantics for it.
 * **Twenty-one REST v2 operations** covering SMS, fax (send + resend), outbound
   calls (classic and Neo PBX), voicemail playback, IVR/voicemail recording,
   call listing, hangup, DTMF, announcements, recording, hold, mute, transfer,

@@ -17,7 +17,16 @@ with the pre-1.0 reading described in the README section *Versioning*.
   caller-owned handling of duplicate Flow deliveries; no delivery-id or
   fingerprint API is guessed. The two minimal-configuration CI steps remain
   the maintainer's follow-up because workflows are outside this change.
-
+* The **remaining v3 account-administration write surface** (#180): typed
+  `V3AdminOperation` coverage for the documented account cancellation,
+  event-lifetime, device/SIM, routing, fax, faxline, voicemail, user, group,
+  contract, trunk and label operations from the v3 Swagger, plus the OpenAPI
+  faxline create and member writes. `FlowClient::execute_v3_admin` validates all
+  path ids, E.164 numbers, text, PINs and batches before the wire, preserves
+  heterogeneous success bodies in `V3AdminResponse`, and keeps non-idempotent
+  `POST` uncertainty in `Error::Ambiguous`. The TTS request `type` field is now
+  `SynthesizeType`, validated and carried by `Other(String)` for values this
+  crate does not model; sipgate assigns it no documented semantics.
 * The **current v3 AI webhook configuration surface** (#168): `FlowClient` now
   models `GET`/`POST /v3/webhooks`, `PUT`/`DELETE /v3/webhooks/{configId}` and
   the header sub-resource `POST /v3/webhooks/{configId}/headers` and

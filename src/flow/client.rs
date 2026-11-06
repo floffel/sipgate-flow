@@ -2650,6 +2650,80 @@ fn validate_tts_text(field: &'static str, value: &str, max_chars: usize) -> Resu
     Ok(())
 }
 
+/// The `type` token of `POST /v3/tts`.
+///
+/// The v3 schema declares this as an unconstrained string and gives it no
+/// documented meaning, so `Announcement` is only the spelling this crate has
+/// seen in examples; it does not claim a wire-side effect. Unknown values stay
+/// in [`Self::Other`] and are sent unchanged after token validation.
+///
+/// ```
+/// use sipgate_flow::SynthesizeType;
+///
+/// assert_eq!(SynthesizeType::parse("ANNOUNCEMENT")?, SynthesizeType::Announcement);
+/// assert_eq!(SynthesizeType::parse("future_kind")?, SynthesizeType::Other("future_kind".into()));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SynthesizeType {
+    /// The spelling used by the documented announcement examples.
+    Announcement,
+    /// A value this crate does not model, kept verbatim.
+    Other(String),
+}
+
+impl SynthesizeType {
+    /// Parses and validates an announcement type.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeType;
+    ///
+    /// assert_eq!(SynthesizeType::parse("announcement")?.as_str(), "ANNOUNCEMENT");
+    /// assert!(SynthesizeType::parse("").is_err());
+    /// assert!(SynthesizeType::parse("has space").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty, longer than 64 bytes, or
+    /// contains anything except ASCII letters, digits and underscores.
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate::non_empty("type", &value, MAX_TTS_VOICE_ID_BYTES)?;
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(Error::validation(
+                "type",
+                "must contain only ASCII letters, digits and underscores",
+            ));
+        }
+        if value.eq_ignore_ascii_case("ANNOUNCEMENT") {
+            Ok(Self::Announcement)
+        } else {
+            Ok(Self::Other(value))
+        }
+    }
+
+    /// The canonical wire spelling.
+    ///
+    /// ```
+    /// use sipgate_flow::SynthesizeType;
+    /// assert_eq!(SynthesizeType::Announcement.as_str(), "ANNOUNCEMENT");
+    /// assert_eq!(SynthesizeType::Other("future".into()).as_str(), "future");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Announcement => "ANNOUNCEMENT",
+            Self::Other(value) => value,
+        }
+    }
+}
+
 impl<T: Transport, A: TokenSource> FlowClient<T, A> {
     /// Lists the account's stored TTS announcements for one queue:
     /// `GET /v3/tts?acdId=…`.
@@ -2892,7 +2966,7 @@ pub struct SynthesizeRequest {
     content: String,
     title: Option<String>,
     acd_id: Option<String>,
-    kind: Option<String>,
+    kind: Option<SynthesizeType>,
 }
 
 impl std::fmt::Debug for SynthesizeRequest {
@@ -2998,9 +3072,7 @@ impl SynthesizeRequest {
     ///
     /// [`Error::Validation`] when the token is empty or longer than 64 bytes.
     pub fn with_kind(mut self, kind: impl Into<String>) -> Result<Self> {
-        let kind = kind.into();
-        validate::non_empty("type", &kind, MAX_TTS_VOICE_ID_BYTES)?;
-        self.kind = Some(kind);
+        self.kind = Some(SynthesizeType::parse(kind)?);
         Ok(self)
     }
 
@@ -3061,7 +3133,25 @@ impl SynthesizeRequest {
     /// ```
     #[must_use]
     pub fn kind(&self) -> Option<&str> {
-        self.kind.as_deref()
+        self.kind.as_ref().map(SynthesizeType::as_str)
+    }
+
+    /// The typed announcement `type`, when one was set.
+    ///
+    /// sipgate documents the field as a free string and assigns it no
+    /// semantics; this crate carries it losslessly and validates the wire
+    /// token before sending.
+    ///
+    /// ```
+    /// use sipgate_flow::{SynthesizeRequest, SynthesizeType};
+    ///
+    /// let request = SynthesizeRequest::new("RACHEL", "hi")?.with_kind("ANNOUNCEMENT")?;
+    /// assert_eq!(request.synthesis_type(), Some(&SynthesizeType::Announcement));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn synthesis_type(&self) -> Option<&SynthesizeType> {
+        self.kind.as_ref()
     }
 
     /// Renders the request body under the documented `camelCase` names.
@@ -3088,7 +3178,7 @@ impl SynthesizeRequest {
             object.insert("acdId".into(), json!(acd_id));
         }
         if let Some(kind) = &self.kind {
-            object.insert("type".into(), json!(kind));
+            object.insert("type".into(), json!(kind.as_str()));
         }
         Value::Object(object)
     }
@@ -4322,5 +4412,1975 @@ impl CurrentVoice {
     #[must_use]
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+}
+
+// ===========================================================================
+// v3 account administration (#180)
+// ===========================================================================
+
+/// Longest free-text value accepted by a v3 administration operation.
+///
+/// The Swagger schemas leave most aliases, names and tags unbounded. This
+/// keeps an accidental multi-megabyte payload out of the client without
+/// imposing a narrower semantic limit than sipgate publishes.
+pub const MAX_V3_ADMIN_TEXT_BYTES: usize = 4096;
+
+/// Largest batch accepted for a routings, opt-in or member operation.
+///
+/// The v3 schemas do not publish a batch ceiling. This mirrors the crate-wide
+/// bounded-request policy and is checked before any list is serialized.
+pub const MAX_V3_ADMIN_BATCH_ITEMS: usize = 1000;
+
+/// Which line a v3 event-lifetime setting applies to.
+///
+/// ```
+/// use sipgate_flow::V3EventLifetime;
+///
+/// assert_eq!(V3EventLifetime::ThirtyDays.as_str(), "THIRTY_DAYS");
+/// assert_eq!(V3EventLifetime::parse("future")?.as_str(), "future");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum V3EventLifetime {
+    /// No event retention.
+    None,
+    /// Retain events for thirty days.
+    ThirtyDays,
+    /// Retain events without a configured expiry.
+    Unlimited,
+    /// A value from a newer upstream document, kept verbatim.
+    Other(String),
+}
+
+impl V3EventLifetime {
+    /// Parses the documented value, carrying an unknown token verbatim.
+    ///
+    /// ```
+    /// use sipgate_flow::V3EventLifetime;
+    ///
+    /// assert_eq!(V3EventLifetime::parse("NONE")?, V3EventLifetime::None);
+    /// assert!(V3EventLifetime::parse("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is empty, over
+    /// [`MAX_ACCOUNT_SETTING_TOKEN_BYTES`], or not an ASCII wire token.
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_wire_token("event_lifetime", &value)?;
+        Ok(match value.as_str() {
+            "NONE" => Self::None,
+            "THIRTY_DAYS" => Self::ThirtyDays,
+            "UNLIMITED" => Self::Unlimited,
+            _ => Self::Other(value),
+        })
+    }
+
+    /// The canonical wire spelling.
+    ///
+    /// ```
+    /// use sipgate_flow::V3EventLifetime;
+    /// assert_eq!(V3EventLifetime::Unlimited.as_str(), "UNLIMITED");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::None => "NONE",
+            Self::ThirtyDays => "THIRTY_DAYS",
+            Self::Unlimited => "UNLIMITED",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+/// One typed operation from the v3 account-administration surface.
+///
+/// The variants map one-for-one to the documented Swagger operations in
+/// <https://api.sipgate.com/v3/swagger.json>. IDs, phone lists and text are
+/// validated by [`FlowClient::execute_v3_admin`] before the request is built.
+/// The enum is `#[non_exhaustive]`; unknown future operations are not silently
+/// sent through a generic verb/path escape hatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum V3AdminOperation {
+    /// `GET /v3/account/cancellation`.
+    AccountCancellation,
+    /// `POST /v3/account/cancellation`.
+    CreateAccountCancellation {
+        /// Account holder, when the schema is used.
+        holder: Option<String>,
+        /// Refund account IBAN, when supplied.
+        iban: Option<String>,
+    },
+    /// `DELETE /v3/account/cancellation`.
+    RevokeAccountCancellation,
+    /// `GET /v3/account/event-lifetime`.
+    EventLifetime,
+    /// `PUT /v3/account/event-lifetime`.
+    SetEventLifetime(V3EventLifetime),
+    /// `POST /v3/devices/mobile`.
+    CreateMobileDevice {
+        /// Display alias.
+        alias: String,
+        /// Owning user id.
+        owner: Option<String>,
+    },
+    /// `POST /v3/devices/register`.
+    CreateRegisterDevice {
+        /// Display alias.
+        alias: String,
+        /// Owning user id.
+        owner: Option<String>,
+    },
+    /// `PUT /v3/devices/{deviceId}/alias`.
+    SetDeviceAlias {
+        /// Device id.
+        device_id: String,
+        /// Value.
+        value: String,
+    },
+    /// `PUT /v3/devices/{deviceId}/fancyCodec`.
+    SetFancyCodec {
+        /// Device id.
+        device_id: String,
+        /// Enabled.
+        enabled: bool,
+    },
+    /// `PUT /v3/devices/{deviceId}/pending-sim`.
+    SetPendingSim {
+        /// Device id.
+        device_id: String,
+        /// Intended use.
+        intended_use: V3SimIntendedUse,
+        /// Alias.
+        alias: Option<String>,
+        /// Iccid.
+        iccid: Option<String>,
+        /// Mobile extension.
+        mobile_extension: Option<String>,
+    },
+    /// `POST /v3/devices/{deviceId}/sim`.
+    ActivateSim {
+        /// Device id.
+        device_id: String,
+        /// Request.
+        request: V3ActivateSimRequest,
+    },
+    /// `PUT /v3/devices/{deviceId}/sim/{simId}`.
+    UpdateSim {
+        /// Device id.
+        device_id: String,
+        /// Sim id.
+        sim_id: String,
+        /// Request.
+        request: V3ActivateSimRequest,
+    },
+    /// `PUT /v3/devices/{deviceId}/sim/{simId}/intendedUse`.
+    SetSimIntendedUse {
+        /// Device id.
+        device_id: String,
+        /// Sim id.
+        sim_id: String,
+        /// Intended use.
+        intended_use: V3SimIntendedUse,
+    },
+    /// `PUT /v3/devices/{deviceId}/smsSim`.
+    SetSmsSim {
+        /// Device id.
+        device_id: String,
+        /// Extension.
+        extension: String,
+    },
+    /// `POST /v3/devices/{deviceId}/contracts`.
+    CreateDeviceContract {
+        /// Device id.
+        device_id: String,
+        /// Product id.
+        product_id: String,
+        /// Accepted tac id.
+        accepted_tac_id: Option<String>,
+    },
+    /// `POST /v3/devices/{deviceId}/contracts/{contractId}/cancellation`.
+    CancelDeviceContract {
+        /// Device id.
+        device_id: String,
+        /// Contract id.
+        contract_id: String,
+        /// Cancellation date.
+        cancellation_date: Option<String>,
+    },
+    /// `DELETE /v3/devices/{deviceId}/contracts/{contractId}/cancellation`.
+    RevokeDeviceContractCancellation {
+        /// Device id.
+        device_id: String,
+        /// Contract id.
+        contract_id: String,
+    },
+    /// `PUT /v3/phone-numbers/mobile/opt-in`.
+    ReleaseMobileNumbers {
+        /// E164 numbers.
+        e164_numbers: Vec<String>,
+    },
+    /// `PUT /v3/routings`.
+    CreateRouting {
+        /// E164 numbers.
+        e164_numbers: Vec<String>,
+        /// Extension.
+        extension: String,
+    },
+    /// `DELETE /v3/routings`.
+    DeleteRouting {
+        /// E164 numbers.
+        e164_numbers: Vec<String>,
+    },
+    /// `PUT /v3/routings/channel`.
+    CreateChannelRouting {
+        /// E164 numbers.
+        e164_numbers: Vec<String>,
+        /// Channel id.
+        channel_id: String,
+    },
+    /// `POST /v3/fax`.
+    CreateFax {
+        /// Alias.
+        alias: Option<String>,
+        /// Owner id.
+        owner_id: Option<String>,
+    },
+    /// `DELETE /v3/fax/{faxId}`.
+    DeleteFax {
+        /// Fax id.
+        fax_id: String,
+    },
+    /// `PUT /v3/fax/{faxId}/alias`.
+    SetFaxAlias {
+        /// Fax id.
+        fax_id: String,
+        /// Alias.
+        alias: String,
+    },
+    /// `PUT /v3/fax/{faxId}/callerId`.
+    SetFaxCallerId {
+        /// Fax id.
+        fax_id: String,
+        /// Anonymous.
+        anonymous: Option<bool>,
+        /// Caller id.
+        caller_id: Option<String>,
+    },
+    /// `PUT /v3/fax/{faxId}/tagline`.
+    SetFaxTagline {
+        /// Fax id.
+        fax_id: String,
+        /// Tagline.
+        tagline: String,
+    },
+    /// `POST /v3/faxlines`.
+    CreateFaxline(V3CreateFaxlineRequest),
+    /// `PUT /v3/faxlines/{faxId}/members`.
+    AddFaxlineMembers {
+        /// Fax id.
+        fax_id: String,
+        /// Member ids.
+        member_ids: Vec<String>,
+    },
+    /// `DELETE /v3/faxlines/{faxId}/members`.
+    RemoveFaxlineMembers {
+        /// Fax id.
+        fax_id: String,
+        /// Member ids.
+        member_ids: Vec<String>,
+    },
+    /// `PUT /v3/voicemails/{voicemailId}/activeGreeting`.
+    SetVoicemailActiveGreeting {
+        /// Voicemail id.
+        voicemail_id: String,
+        /// Greeting id.
+        greeting_id: String,
+    },
+    /// `PUT /v3/voicemails/{voicemailId}/alias`.
+    RenameVoicemail {
+        /// Voicemail id.
+        voicemail_id: String,
+        /// Alias.
+        alias: String,
+    },
+    /// `PUT /v3/voicemails/{voicemailId}/authorizedNumbers`.
+    SetVoicemailAuthorizedNumbers {
+        /// Voicemail id.
+        voicemail_id: String,
+        /// User id.
+        user_id: Option<String>,
+        /// Authorized numbers.
+        authorized_numbers: Vec<String>,
+    },
+    /// `DELETE /v3/voicemails/{voicemailId}/pin`.
+    DeleteVoicemailPin {
+        /// Voicemail id.
+        voicemail_id: String,
+        /// User id.
+        user_id: Option<String>,
+    },
+    /// `PUT /v3/voicemails/{voicemailId}/pin`.
+    SetVoicemailPin {
+        /// Voicemail id.
+        voicemail_id: String,
+        /// Pin.
+        pin: String,
+        /// User id.
+        user_id: Option<String>,
+    },
+    /// `PUT /v3/voicemails/{voicemailId}/transcription`.
+    SetVoicemailTranscription {
+        /// Voicemail id.
+        voicemail_id: String,
+        /// Enabled.
+        enabled: bool,
+    },
+    /// `PUT /v3/users/{userId}/name`.
+    SetUserName {
+        /// User id.
+        user_id: String,
+        /// First name.
+        first_name: String,
+        /// Last name.
+        last_name: String,
+    },
+    /// `POST /v3/groups`.
+    CreateGroup {
+        /// Alias.
+        alias: String,
+    },
+    /// `DELETE /v3/groups/{groupId}`.
+    DeleteGroup {
+        /// Group id.
+        group_id: String,
+    },
+    /// `PUT /v3/groups/{groupId}/alias`.
+    SetGroupAlias {
+        /// Group id.
+        group_id: String,
+        /// Value.
+        value: String,
+    },
+    /// `POST /v3/groups/{groupId}/callqueue`.
+    CreateGroupCallQueue {
+        /// Group id.
+        group_id: String,
+    },
+    /// `DELETE /v3/groups/{groupId}/callqueue`.
+    DeleteGroupCallQueue {
+        /// Group id.
+        group_id: String,
+    },
+    /// `PUT /v3/groups/{groupId}/callqueue/activeAudioFile`.
+    SetGroupCallQueueAudio {
+        /// Group id.
+        group_id: String,
+        /// Audio file id.
+        audio_file_id: String,
+    },
+    /// `POST /v3/groups/{groupId}/contracts/statistics`.
+    CreateGroupStatisticsContract {
+        /// Group id.
+        group_id: String,
+        /// Tac accepted.
+        tac_accepted: Option<bool>,
+    },
+    /// `POST /v3/groups/{groupId}/greeting`.
+    CreateGroupGreeting {
+        /// Group id.
+        group_id: String,
+    },
+    /// `DELETE /v3/groups/{groupId}/greeting`.
+    DeleteGroupGreeting {
+        /// Group id.
+        group_id: String,
+    },
+    /// `PUT /v3/groups/{groupId}/greeting/activeAudioFile`.
+    SetGroupGreetingAudio {
+        /// Group id.
+        group_id: String,
+        /// Audio file id.
+        audio_file_id: String,
+    },
+    /// `PUT /v3/groups/{groupId}/members`.
+    SetGroupMembers {
+        /// Group id.
+        group_id: String,
+        /// Member ids.
+        member_ids: Vec<String>,
+    },
+    /// `POST /v3/contracts`.
+    BookContract {
+        /// Product id.
+        product_id: i32,
+        /// Tac id.
+        tac_id: Option<i32>,
+    },
+    /// `POST /v3/contracts/{contractId}/cancellation`.
+    CancelContract {
+        /// Contract id.
+        contract_id: String,
+        /// Cancellation date.
+        cancellation_date: Option<String>,
+    },
+    /// `DELETE /v3/contracts/{contractId}/cancellation`.
+    RevokeContractCancellation {
+        /// Contract id.
+        contract_id: String,
+    },
+    /// `POST /v3/trunks/bookMinutes`.
+    BookTrunkMinutes {
+        /// Product id.
+        product_id: String,
+        /// Trunk sip id.
+        trunk_sip_id: String,
+    },
+    /// `POST /v3/trunks/contracts`.
+    BookTrunkContract {
+        /// Product id.
+        product_id: Option<i32>,
+        /// Alias.
+        alias: Option<String>,
+        /// Address id.
+        address_id: Option<i32>,
+    },
+    /// `PUT /v3/trunks/contracts`.
+    ChangeTrunkContract {
+        /// Product id.
+        product_id: Option<i32>,
+        /// Replaces customer product id.
+        replaces_customer_product_id: Option<i32>,
+    },
+    /// `POST /v3/trunks/contracts/cancellation`.
+    CancelTrunkContract {
+        /// Customer product id.
+        customer_product_id: i32,
+    },
+    /// `DELETE /v3/trunks/contracts/cancellation`.
+    RevokeTrunkContractCancellation {
+        /// Customer product id.
+        customer_product_id: i32,
+    },
+    /// `POST /v3/trunks/contracts/extension`.
+    CreateTrunkExtension {
+        /// Customer product id.
+        customer_product_id: Option<i64>,
+        /// Alias.
+        alias: Option<String>,
+        /// Emergency address id.
+        emergency_address_id: Option<i32>,
+    },
+    /// `DELETE /v3/trunks/{trunkId}`.
+    DeleteTrunk {
+        /// Trunk id.
+        trunk_id: String,
+    },
+    /// `PUT /v3/trunks/{trunkId}/alias`.
+    SetTrunkAlias {
+        /// Trunk id.
+        trunk_id: String,
+        /// Value.
+        value: String,
+    },
+    /// `POST /v3/trunks/{trunkId}/credentialsPassword`.
+    GenerateSipPassword {
+        /// Trunk id.
+        trunk_id: String,
+    },
+    /// `PUT /v3/trunks/{trunkId}/emergencyAddressId`.
+    SetTrunkEmergencyAddress {
+        /// Trunk id.
+        trunk_id: String,
+        /// Address id.
+        address_id: i32,
+    },
+    /// `PUT /v3/trunks/{trunkId}/fallbackCallerId`.
+    SetTrunkFallbackCallerId {
+        /// Trunk id.
+        trunk_id: String,
+        /// Caller.
+        caller: String,
+    },
+    /// `POST /v3/labels`.
+    CreateLabel {
+        /// Name.
+        name: String,
+    },
+    /// `PUT /v3/labels/{labelId}`.
+    RenameLabel {
+        /// Label id.
+        label_id: i32,
+        /// Name.
+        name: String,
+    },
+    /// `DELETE /v3/labels/{labelId}`.
+    DeleteLabel {
+        /// Label id.
+        label_id: i32,
+    },
+}
+/// The `ActivateSimRequest` body used by the two SIM write operations.
+///
+/// ```
+/// use sipgate_flow::{V3ActivateSimRequest, V3SimIntendedUse};
+///
+/// let body = V3ActivateSimRequest::new(V3SimIntendedUse::Voice, "i0")?;
+/// assert_eq!(body.to_json()["intendedUse"], "VOICE");
+/// assert_eq!(body.to_json()["simId"], "i0");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct V3ActivateSimRequest {
+    intended_use: V3SimIntendedUse,
+    sim_id: Option<String>,
+    alias: Option<String>,
+}
+
+impl V3ActivateSimRequest {
+    /// Builds a request from the required intended use and SIM id.
+    ///
+    /// ```
+    /// use sipgate_flow::{V3ActivateSimRequest, V3SimIntendedUse};
+    ///
+    /// assert!(V3ActivateSimRequest::new(V3SimIntendedUse::Data, "i0").is_ok());
+    /// assert!(V3ActivateSimRequest::new(V3SimIntendedUse::Data, "").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `sim_id` is empty or outside the path-safe
+    /// identifier alphabet.
+    pub fn new(intended_use: V3SimIntendedUse, sim_id: impl Into<String>) -> Result<Self> {
+        let sim_id = sim_id.into();
+        validate::path_segment("sim_id", &sim_id)?;
+        Ok(Self {
+            intended_use,
+            sim_id: Some(sim_id),
+            alias: None,
+        })
+    }
+
+    /// Sets the SIM alias.
+    ///
+    /// ```
+    /// use sipgate_flow::{V3ActivateSimRequest, V3SimIntendedUse};
+    ///
+    /// let request = V3ActivateSimRequest::new(V3SimIntendedUse::Voice, "i0")?.with_alias("Main SIM")?;
+    /// assert_eq!(request.to_json()["alias"], "Main SIM");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the alias is empty or over
+    /// [`MAX_V3_ADMIN_TEXT_BYTES`].
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        validate_v3_text("alias", &alias)?;
+        self.alias = Some(alias);
+        Ok(self)
+    }
+
+    /// The documented request body.
+    ///
+    /// ```
+    /// use sipgate_flow::{V3ActivateSimRequest, V3SimIntendedUse};
+    ///
+    /// assert_eq!(
+    ///     V3ActivateSimRequest::new(V3SimIntendedUse::Voice, "i0")?.to_json(),
+    ///     serde_json::json!({"intendedUse": "VOICE", "simId": "i0"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        body.insert("intendedUse".into(), json!(self.intended_use.as_str()));
+        if let Some(sim_id) = &self.sim_id {
+            body.insert("simId".into(), json!(sim_id));
+        }
+        if let Some(alias) = &self.alias {
+            body.insert("alias".into(), json!(alias));
+        }
+        Value::Object(body)
+    }
+}
+
+/// SIM intended use accepted by the v3 device endpoints.
+///
+/// ```
+/// use sipgate_flow::V3SimIntendedUse;
+///
+/// assert_eq!(V3SimIntendedUse::parse("voice")?.as_str(), "VOICE");
+/// assert_eq!(V3SimIntendedUse::parse("FUTURE")?.as_str(), "FUTURE");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum V3SimIntendedUse {
+    /// Voice use.
+    Voice,
+    /// Data use.
+    Data,
+    /// A newer value, kept verbatim.
+    Other(String),
+}
+
+impl V3SimIntendedUse {
+    /// Parses a SIM intended-use value.
+    ///
+    /// ```
+    /// use sipgate_flow::V3SimIntendedUse;
+    /// assert_eq!(V3SimIntendedUse::parse("DATA")?, V3SimIntendedUse::Data);
+    /// assert!(V3SimIntendedUse::parse("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the token is empty or malformed.
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_wire_token("intended_use", &value)?;
+        let upper = value.to_ascii_uppercase();
+        Ok(match upper.as_str() {
+            "VOICE" => Self::Voice,
+            "DATA" => Self::Data,
+            _ => Self::Other(value),
+        })
+    }
+
+    /// The canonical wire spelling.
+    ///
+    /// ```
+    /// use sipgate_flow::V3SimIntendedUse;
+    /// assert_eq!(V3SimIntendedUse::Data.as_str(), "DATA");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Voice => "VOICE",
+            Self::Data => "DATA",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+/// The `CreateFaxlineRequest` body.
+///
+/// ```
+/// use sipgate_flow::V3CreateFaxlineRequest;
+///
+/// let request = V3CreateFaxlineRequest::new("Support fax")?.with_owner_ids(["w0"])?;
+/// assert_eq!(request.to_json()["alias"], "Support fax");
+/// assert_eq!(request.to_json()["ownerIds"][0], "w0");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct V3CreateFaxlineRequest {
+    alias: String,
+    owner_ids: Vec<String>,
+}
+
+impl V3CreateFaxlineRequest {
+    /// Builds a faxline request from its required alias.
+    ///
+    /// ```
+    /// use sipgate_flow::V3CreateFaxlineRequest;
+    /// assert!(V3CreateFaxlineRequest::new("Support fax").is_ok());
+    /// assert!(V3CreateFaxlineRequest::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the alias is empty or over
+    /// [`MAX_V3_ADMIN_TEXT_BYTES`].
+    pub fn new(alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        validate_v3_text("alias", &alias)?;
+        Ok(Self {
+            alias,
+            owner_ids: Vec::new(),
+        })
+    }
+
+    /// Sets the owning user ids.
+    ///
+    /// ```
+    /// use sipgate_flow::V3CreateFaxlineRequest;
+    ///
+    /// let request = V3CreateFaxlineRequest::new("Support fax")?.with_owner_ids(["w0"])?;
+    /// assert_eq!(request.to_json()["ownerIds"], serde_json::json!(["w0"]));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the list exceeds
+    /// [`MAX_V3_ADMIN_BATCH_ITEMS`] or contains a malformed path id.
+    pub fn with_owner_ids<I, S>(mut self, owner_ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.owner_ids = validate_v3_ids("owner_ids", owner_ids)?;
+        Ok(self)
+    }
+
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::V3CreateFaxlineRequest;
+    /// assert_eq!(
+    ///     V3CreateFaxlineRequest::new("Support fax")?.to_json(),
+    ///     serde_json::json!({"alias": "Support fax"})
+    /// );
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        body.insert("alias".into(), json!(self.alias));
+        if !self.owner_ids.is_empty() {
+            body.insert("ownerIds".into(), json!(self.owner_ids));
+        }
+        Value::Object(body)
+    }
+}
+
+/// A successful v3 administration response.
+///
+/// JSON bodies are preserved exactly; `204` and other empty success bodies
+/// become `null`. Unknown response fields therefore stay available through
+/// [`Self::body`] without a second DTO per operation.
+///
+/// ```
+/// use sipgate_flow::V3AdminResponse;
+///
+/// let response = V3AdminResponse::from_parts(200, br#"{"contractId":"c1","future":true}"#)?;
+/// assert_eq!(response.status(), 200);
+/// assert_eq!(response.body()["future"], true);
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct V3AdminResponse {
+    status: u16,
+    body: Value,
+}
+
+impl V3AdminResponse {
+    /// Builds a response from status and bytes, accepting an empty body.
+    ///
+    /// ```
+    /// use sipgate_flow::V3AdminResponse;
+    ///
+    /// assert_eq!(V3AdminResponse::from_parts(204, b"")?.body(), &serde_json::Value::Null);
+    /// assert!(V3AdminResponse::from_parts(200, b"not json").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Json`] when the body is non-empty and not valid JSON.
+    pub fn from_parts(status: u16, body: &[u8]) -> Result<Self> {
+        let body = if body.iter().all(u8::is_ascii_whitespace) {
+            Value::Null
+        } else {
+            serde_json::from_slice(body).map_err(Error::json_parse)?
+        };
+        Ok(Self { status, body })
+    }
+
+    /// The HTTP status.
+    ///
+    /// ```
+    /// use sipgate_flow::V3AdminResponse;
+    /// assert_eq!(V3AdminResponse::from_parts(201, b"{}")?.status(), 201);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// The decoded response body, or `null` for an empty success.
+    ///
+    /// ```
+    /// use sipgate_flow::V3AdminResponse;
+    /// assert_eq!(V3AdminResponse::from_parts(200, br#"{"x":1}"#)?.body()["x"], 1);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn body(&self) -> &Value {
+        &self.body
+    }
+}
+
+impl<T: Transport, A: TokenSource> FlowClient<T, A> {
+    /// Executes one typed v3 account-administration operation.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, V3AdminOperation};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let response = client.execute_v3_admin(&V3AdminOperation::EventLifetime).await?;
+    /// println!("{:?}", response.body());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when any identifier, text, phone or batch value is
+    /// malformed, plus the generic transport, auth, JSON and API errors. The
+    /// caller's method decides retry safety: a retryable `POST` failure is
+    /// [`Error::Ambiguous`], exactly as elsewhere in the crate.
+    pub async fn execute_v3_admin(&self, operation: &V3AdminOperation) -> Result<V3AdminResponse> {
+        let (method, path, body) = operation.request_parts()?;
+        let response = exchange::authorized(
+            &self.transport,
+            &self.auth,
+            exchange::Target {
+                base_url: &self.base_url,
+                allow_http_base_url: self.allow_http_base_url,
+                path: &path,
+            },
+            exchange::Pacing {
+                timeout: self.timeout,
+                retry: &RetryPolicy::none(),
+                sleeper: &NoSleep,
+            },
+            method,
+            body.as_ref(),
+        )
+        .await?;
+        if response.is_success() {
+            return V3AdminResponse::from_parts(response.status(), response.body());
+        }
+        Err(crate::retry::api_error(
+            method,
+            response.status(),
+            &response.headers(),
+            &response.text(),
+        ))
+    }
+
+    /// Reads the account cancellation status.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let status = client.v3_account_cancellation().await?;
+    /// println!("{:?}", status.body());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth, JSON and API errors.
+    pub async fn v3_account_cancellation(&self) -> Result<V3AdminResponse> {
+        self.execute_v3_admin(&V3AdminOperation::AccountCancellation)
+            .await
+    }
+
+    /// Marks the account for cancellation and refund.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, V3AdminOperation};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.execute_v3_admin(&V3AdminOperation::CreateAccountCancellation {
+    ///     holder: Some("Example GmbH".into()),
+    ///     iban: Some("DE75512108001245126199".into()),
+    /// }).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth, JSON and API errors. `POST` may have
+    /// applied the cancellation if a retryable failure has no usable response.
+    pub async fn request_v3_account_cancellation(
+        &self,
+        holder: Option<String>,
+        iban: Option<String>,
+    ) -> Result<V3AdminResponse> {
+        self.execute_v3_admin(&V3AdminOperation::CreateAccountCancellation { holder, iban })
+            .await
+    }
+
+    /// Revokes an account cancellation.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.revoke_v3_account_cancellation().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth, JSON and API errors. `DELETE` is idempotent.
+    pub async fn revoke_v3_account_cancellation(&self) -> Result<V3AdminResponse> {
+        self.execute_v3_admin(&V3AdminOperation::RevokeAccountCancellation)
+            .await
+    }
+
+    /// Reads the account event-lifetime setting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{:?}", client.v3_event_lifetime().await?.body());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth, JSON and API errors.
+    pub async fn v3_event_lifetime(&self) -> Result<V3AdminResponse> {
+        self.execute_v3_admin(&V3AdminOperation::EventLifetime)
+            .await
+    }
+
+    /// Replaces the account event-lifetime setting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, V3EventLifetime};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_v3_event_lifetime(V3EventLifetime::ThirtyDays).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth, JSON and API errors. `PUT` is idempotent.
+    pub async fn set_v3_event_lifetime(
+        &self,
+        lifetime: V3EventLifetime,
+    ) -> Result<V3AdminResponse> {
+        self.execute_v3_admin(&V3AdminOperation::SetEventLifetime(lifetime))
+            .await
+    }
+
+    /// Creates a routing to an extension.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.create_v3_routing(["+49211123456"], "g3").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty/oversized batch, a non-E.164 number
+    /// or a malformed extension, plus the generic request errors. `PUT` is
+    /// idempotent.
+    pub async fn create_v3_routing<I, S>(
+        &self,
+        e164_numbers: I,
+        extension: impl Into<String>,
+    ) -> Result<V3AdminResponse>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.execute_v3_admin(&V3AdminOperation::CreateRouting {
+            e164_numbers: e164_numbers.into_iter().map(Into::into).collect(),
+            extension: extension.into(),
+        })
+        .await
+    }
+
+    /// Creates a fax line.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{FlowClient, ReqwestTransport, StaticToken, V3CreateFaxlineRequest};
+    ///
+    /// let client = FlowClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.create_v3_faxline(&V3CreateFaxlineRequest::new("Support fax")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The generic transport, auth, JSON and API errors. `POST` is ambiguous if
+    /// a retryable failure has no usable response.
+    pub async fn create_v3_faxline(
+        &self,
+        request: &V3CreateFaxlineRequest,
+    ) -> Result<V3AdminResponse> {
+        self.execute_v3_admin(&V3AdminOperation::CreateFaxline(request.clone()))
+            .await
+    }
+}
+
+impl V3AdminOperation {
+    /// The HTTP method this operation uses.
+    ///
+    /// ```
+    /// use sipgate_flow::{Method, V3AdminOperation};
+    /// assert_eq!(V3AdminOperation::DeleteTrunk { trunk_id: "t0".into() }.method(), Method::Delete);
+    /// ```
+    #[must_use]
+    pub fn method(&self) -> Method {
+        match self {
+            Self::AccountCancellation | Self::EventLifetime => Method::Get,
+            Self::CreateAccountCancellation { .. }
+            | Self::CreateMobileDevice { .. }
+            | Self::CreateRegisterDevice { .. }
+            | Self::ActivateSim { .. }
+            | Self::CreateDeviceContract { .. }
+            | Self::CreateFax { .. }
+            | Self::CreateFaxline(_)
+            | Self::CreateGroup { .. }
+            | Self::CreateGroupCallQueue { .. }
+            | Self::CreateGroupGreeting { .. }
+            | Self::CreateGroupStatisticsContract { .. }
+            | Self::BookContract { .. }
+            | Self::CancelContract { .. }
+            | Self::CancelDeviceContract { .. }
+            | Self::BookTrunkMinutes { .. }
+            | Self::BookTrunkContract { .. }
+            | Self::CancelTrunkContract { .. }
+            | Self::CreateTrunkExtension { .. }
+            | Self::GenerateSipPassword { .. }
+            | Self::CreateLabel { .. } => Method::Post,
+            Self::RevokeAccountCancellation
+            | Self::DeleteFax { .. }
+            | Self::RemoveFaxlineMembers { .. }
+            | Self::DeleteVoicemailPin { .. }
+            | Self::DeleteGroup { .. }
+            | Self::DeleteGroupCallQueue { .. }
+            | Self::DeleteGroupGreeting { .. }
+            | Self::RevokeContractCancellation { .. }
+            | Self::RevokeDeviceContractCancellation { .. }
+            | Self::RevokeTrunkContractCancellation { .. }
+            | Self::DeleteTrunk { .. }
+            | Self::DeleteLabel { .. }
+            | Self::DeleteRouting { .. } => Method::Delete,
+            Self::SetEventLifetime(_)
+            | Self::SetDeviceAlias { .. }
+            | Self::SetFancyCodec { .. }
+            | Self::SetPendingSim { .. }
+            | Self::UpdateSim { .. }
+            | Self::SetSimIntendedUse { .. }
+            | Self::SetSmsSim { .. }
+            | Self::ReleaseMobileNumbers { .. }
+            | Self::CreateRouting { .. }
+            | Self::CreateChannelRouting { .. }
+            | Self::SetFaxAlias { .. }
+            | Self::SetFaxCallerId { .. }
+            | Self::SetFaxTagline { .. }
+            | Self::AddFaxlineMembers { .. }
+            | Self::SetVoicemailActiveGreeting { .. }
+            | Self::RenameVoicemail { .. }
+            | Self::SetVoicemailAuthorizedNumbers { .. }
+            | Self::SetVoicemailPin { .. }
+            | Self::SetVoicemailTranscription { .. }
+            | Self::SetUserName { .. }
+            | Self::SetGroupAlias { .. }
+            | Self::SetGroupCallQueueAudio { .. }
+            | Self::SetGroupGreetingAudio { .. }
+            | Self::SetGroupMembers { .. }
+            | Self::ChangeTrunkContract { .. }
+            | Self::SetTrunkAlias { .. }
+            | Self::SetTrunkEmergencyAddress { .. }
+            | Self::SetTrunkFallbackCallerId { .. }
+            | Self::RenameLabel { .. } => Method::Put,
+        }
+    }
+
+    /// Validates the operation and returns its method, path and JSON body.
+    ///
+    /// ```
+    /// use sipgate_flow::{Method, V3AdminOperation};
+    ///
+    /// let (method, path, body) = V3AdminOperation::SetUserName {
+    ///     user_id: "w1".into(),
+    ///     first_name: "Grace".into(),
+    ///     last_name: "Hopper".into(),
+    /// }.request_parts()?;
+    /// assert_eq!(method, Method::Put);
+    /// assert_eq!(path, "/v3/users/w1/name");
+    /// assert_eq!(body.expect("body")["firstName"], "Grace");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for any malformed identifier, phone number, text
+    /// or batch value.
+    pub fn request_parts(&self) -> Result<(Method, String, Option<Value>)> {
+        let method = self.method();
+        let (path, body) = if let Some(parts) = self.account_parts()? {
+            parts
+        } else if let Some(parts) = self.device_parts()? {
+            parts
+        } else if let Some(parts) = self.sim_parts()? {
+            parts
+        } else if let Some(parts) = self.device_contract_parts()? {
+            parts
+        } else if let Some(parts) = self.routing_parts()? {
+            parts
+        } else if let Some(parts) = self.fax_parts()? {
+            parts
+        } else if let Some(parts) = self.faxline_parts()? {
+            parts
+        } else if let Some(parts) = self.voicemail_parts()? {
+            parts
+        } else if let Some(parts) = self.voicemail_security_parts()? {
+            parts
+        } else if let Some(parts) = self.user_parts()? {
+            parts
+        } else if let Some(parts) = self.group_core_parts()? {
+            parts
+        } else if let Some(parts) = self.group_media_parts()? {
+            parts
+        } else if let Some(parts) = self.contract_parts()? {
+            parts
+        } else if let Some(parts) = self.trunk_contract_parts()? {
+            parts
+        } else if let Some(parts) = self.trunk_contract_admin_parts()? {
+            parts
+        } else if let Some(parts) = self.trunk_parts()? {
+            parts
+        } else if let Some(parts) = self.label_parts()? {
+            parts
+        } else {
+            return Err(Error::validation(
+                "operation",
+                "unsupported v3 administration operation",
+            ));
+        };
+        Ok((method, path, body))
+    }
+
+    fn account_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::AccountCancellation | Self::RevokeAccountCancellation => {
+                ("/v3/account/cancellation".to_string(), None)
+            }
+            Self::CreateAccountCancellation { holder, iban } => {
+                let mut body = Map::new();
+                insert_optional_text(&mut body, "holder", holder.as_deref(), false)?;
+                insert_optional_text(&mut body, "iban", iban.as_deref(), false)?;
+                (
+                    "/v3/account/cancellation".to_string(),
+                    Some(Value::Object(body)),
+                )
+            }
+            Self::EventLifetime => ("/v3/account/event-lifetime".to_string(), None),
+            Self::SetEventLifetime(lifetime) => (
+                "/v3/account/event-lifetime".to_string(),
+                Some(json!({ "eventLifetime": lifetime.as_str() })),
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn device_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CreateMobileDevice { alias, owner }
+            | Self::CreateRegisterDevice { alias, owner } => {
+                validate_v3_text("alias", alias)?;
+                let path = if matches!(self, Self::CreateMobileDevice { .. }) {
+                    "/v3/devices/mobile"
+                } else {
+                    "/v3/devices/register"
+                };
+                let mut body = Map::new();
+                body.insert("alias".into(), json!(alias));
+                insert_optional_id(&mut body, "owner", owner.as_deref())?;
+                (path.to_string(), Some(Value::Object(body)))
+            }
+            Self::SetDeviceAlias { device_id, value } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_v3_text("value", value)?;
+                (
+                    format!("/v3/devices/{device_id}/alias"),
+                    Some(json!({ "value": value })),
+                )
+            }
+            Self::SetFancyCodec { device_id, enabled } => {
+                validate_v3_path_id("device_id", device_id)?;
+                (
+                    format!("/v3/devices/{device_id}/fancyCodec"),
+                    Some(json!({ "enabled": enabled })),
+                )
+            }
+            Self::SetPendingSim {
+                device_id,
+                intended_use,
+                alias,
+                iccid,
+                mobile_extension,
+            } => {
+                validate_v3_path_id("device_id", device_id)?;
+                let mut body = Map::new();
+                body.insert("intendedUse".into(), json!(intended_use.as_str()));
+                insert_optional_text(&mut body, "alias", alias.as_deref(), false)?;
+                insert_optional_text(&mut body, "iccid", iccid.as_deref(), false)?;
+                insert_optional_id(&mut body, "mobileExtension", mobile_extension.as_deref())?;
+                (
+                    format!("/v3/devices/{device_id}/pending-sim"),
+                    Some(Value::Object(body)),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn sim_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::ActivateSim { device_id, request } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_activate_sim(request)?;
+                (
+                    format!("/v3/devices/{device_id}/sim"),
+                    Some(request.to_json()),
+                )
+            }
+            Self::UpdateSim {
+                device_id,
+                sim_id,
+                request,
+            } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_v3_path_id("sim_id", sim_id)?;
+                validate_activate_sim(request)?;
+                (
+                    format!("/v3/devices/{device_id}/sim/{sim_id}"),
+                    Some(request.to_json()),
+                )
+            }
+            Self::SetSimIntendedUse {
+                device_id,
+                sim_id,
+                intended_use,
+            } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_v3_path_id("sim_id", sim_id)?;
+                (
+                    format!("/v3/devices/{device_id}/sim/{sim_id}/intendedUse"),
+                    Some(json!({ "value": intended_use.as_str() })),
+                )
+            }
+            Self::SetSmsSim {
+                device_id,
+                extension,
+            } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_v3_path_id("extension", extension)?;
+                (
+                    format!("/v3/devices/{device_id}/smsSim"),
+                    Some(json!({ "simExtension": extension })),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn device_contract_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CreateDeviceContract {
+                device_id,
+                product_id,
+                accepted_tac_id,
+            } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_v3_text("product_id", product_id)?;
+                let mut body = Map::new();
+                body.insert("productId".into(), json!(product_id));
+                insert_optional_text(
+                    &mut body,
+                    "acceptedTacId",
+                    accepted_tac_id.as_deref(),
+                    false,
+                )?;
+                (
+                    format!("/v3/devices/{device_id}/contracts"),
+                    Some(Value::Object(body)),
+                )
+            }
+            Self::CancelDeviceContract {
+                device_id,
+                contract_id,
+                cancellation_date,
+            } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_v3_path_id("contract_id", contract_id)?;
+                (
+                    format!("/v3/devices/{device_id}/contracts/{contract_id}/cancellation"),
+                    cancellation_date_body(cancellation_date.as_deref())?,
+                )
+            }
+            Self::RevokeDeviceContractCancellation {
+                device_id,
+                contract_id,
+            } => {
+                validate_v3_path_id("device_id", device_id)?;
+                validate_v3_path_id("contract_id", contract_id)?;
+                (
+                    format!("/v3/devices/{device_id}/contracts/{contract_id}/cancellation"),
+                    None,
+                )
+            }
+            Self::ReleaseMobileNumbers { e164_numbers } => (
+                "/v3/phone-numbers/mobile/opt-in".to_string(),
+                Some(json!({ "e164Numbers": validate_e164_list(e164_numbers)? })),
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn routing_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CreateRouting {
+                e164_numbers,
+                extension,
+            } => {
+                validate_v3_path_id("extension", extension)?;
+                (
+                    "/v3/routings".to_string(),
+                    Some(json!({
+                        "e164Numbers": validate_e164_list(e164_numbers)?,
+                        "extension": extension,
+                    })),
+                )
+            }
+            Self::DeleteRouting { e164_numbers } => (
+                "/v3/routings".to_string(),
+                Some(json!({ "e164Numbers": validate_e164_list(e164_numbers)? })),
+            ),
+            Self::CreateChannelRouting {
+                e164_numbers,
+                channel_id,
+            } => {
+                validate_v3_path_id("channel_id", channel_id)?;
+                (
+                    "/v3/routings/channel".to_string(),
+                    Some(json!({
+                        "e164Numbers": validate_e164_list(e164_numbers)?,
+                        "channelId": channel_id,
+                    })),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn fax_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CreateFax { alias, owner_id } => {
+                let mut body = Map::new();
+                insert_optional_text(&mut body, "alias", alias.as_deref(), false)?;
+                insert_optional_id(&mut body, "ownerId", owner_id.as_deref())?;
+                ("/v3/fax".to_string(), Some(Value::Object(body)))
+            }
+            Self::DeleteFax { fax_id } => (format!("/v3/fax/{}", path_id(fax_id, "fax_id")?), None),
+            Self::SetFaxAlias { fax_id, alias } => {
+                validate_v3_path_id("fax_id", fax_id)?;
+                validate_v3_text("alias", alias)?;
+                (
+                    format!("/v3/fax/{fax_id}/alias"),
+                    Some(json!({ "alias": alias })),
+                )
+            }
+            Self::SetFaxCallerId {
+                fax_id,
+                anonymous,
+                caller_id,
+            } => {
+                validate_v3_path_id("fax_id", fax_id)?;
+                let mut body = Map::new();
+                if let Some(anonymous) = anonymous {
+                    body.insert("anonymous".into(), json!(anonymous));
+                }
+                insert_optional_text(&mut body, "callerId", caller_id.as_deref(), false)?;
+                (
+                    format!("/v3/fax/{fax_id}/callerId"),
+                    Some(Value::Object(body)),
+                )
+            }
+            Self::SetFaxTagline { fax_id, tagline } => {
+                validate_v3_path_id("fax_id", fax_id)?;
+                validate_v3_text("tagline", tagline)?;
+                (
+                    format!("/v3/fax/{fax_id}/tagline"),
+                    Some(json!({ "tagline": tagline })),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn faxline_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CreateFaxline(request) => ("/v3/faxlines".to_string(), Some(request.to_json())),
+            Self::AddFaxlineMembers { fax_id, member_ids }
+            | Self::RemoveFaxlineMembers { fax_id, member_ids } => {
+                validate_v3_path_id("fax_id", fax_id)?;
+                let members = validate_v3_ids("member_ids", member_ids.iter().cloned())?;
+                (
+                    format!("/v3/faxlines/{fax_id}/members"),
+                    Some(json!({ "memberIds": members })),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn voicemail_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::SetVoicemailActiveGreeting {
+                voicemail_id,
+                greeting_id,
+            } => {
+                validate_v3_path_id("voicemail_id", voicemail_id)?;
+                validate_v3_text("greeting_id", greeting_id)?;
+                (
+                    format!("/v3/voicemails/{voicemail_id}/activeGreeting"),
+                    Some(json!({ "greetingId": greeting_id })),
+                )
+            }
+            Self::RenameVoicemail {
+                voicemail_id,
+                alias,
+            } => {
+                validate_v3_path_id("voicemail_id", voicemail_id)?;
+                validate_v3_text("alias", alias)?;
+                (
+                    format!("/v3/voicemails/{voicemail_id}/alias"),
+                    Some(json!({ "alias": alias })),
+                )
+            }
+            Self::SetVoicemailAuthorizedNumbers {
+                voicemail_id,
+                user_id,
+                authorized_numbers,
+            } => {
+                validate_v3_path_id("voicemail_id", voicemail_id)?;
+                let numbers = validate_digits_list(authorized_numbers)?;
+                let mut body = Map::new();
+                body.insert("authorizedNumbers".into(), json!(numbers));
+                insert_optional_id(&mut body, "userId", user_id.as_deref())?;
+                (
+                    format!("/v3/voicemails/{voicemail_id}/authorizedNumbers"),
+                    Some(Value::Object(body)),
+                )
+            }
+            Self::SetVoicemailTranscription {
+                voicemail_id,
+                enabled,
+            } => {
+                validate_v3_path_id("voicemail_id", voicemail_id)?;
+                (
+                    format!("/v3/voicemails/{voicemail_id}/transcription"),
+                    Some(json!({ "enabled": enabled })),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn voicemail_security_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::DeleteVoicemailPin {
+                voicemail_id,
+                user_id,
+            } => {
+                validate_v3_path_id("voicemail_id", voicemail_id)?;
+                let mut body = Map::new();
+                insert_optional_id(&mut body, "userId", user_id.as_deref())?;
+                (
+                    format!("/v3/voicemails/{voicemail_id}/pin"),
+                    Some(Value::Object(body)),
+                )
+            }
+            Self::SetVoicemailPin {
+                voicemail_id,
+                pin,
+                user_id,
+            } => {
+                validate_v3_path_id("voicemail_id", voicemail_id)?;
+                validate_v3_pin(pin)?;
+                let mut body = Map::new();
+                body.insert("pin".into(), json!(pin));
+                insert_optional_id(&mut body, "userId", user_id.as_deref())?;
+                (
+                    format!("/v3/voicemails/{voicemail_id}/pin"),
+                    Some(Value::Object(body)),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn user_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        match self {
+            Self::SetUserName {
+                user_id,
+                first_name,
+                last_name,
+            } => {
+                validate_v3_path_id("user_id", user_id)?;
+                validate_v3_text("first_name", first_name)?;
+                validate_v3_text("last_name", last_name)?;
+                Ok(Some((
+                    format!("/v3/users/{user_id}/name"),
+                    Some(json!({ "firstName": first_name, "lastName": last_name })),
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn group_core_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CreateGroup { alias } => {
+                validate_v3_text("alias", alias)?;
+                ("/v3/groups".to_string(), Some(json!({ "alias": alias })))
+            }
+            Self::DeleteGroup { group_id } => (
+                format!("/v3/groups/{}", path_id(group_id, "group_id")?),
+                None,
+            ),
+            Self::SetGroupAlias { group_id, value } => {
+                validate_v3_path_id("group_id", group_id)?;
+                validate_v3_text("value", value)?;
+                (
+                    format!("/v3/groups/{group_id}/alias"),
+                    Some(json!({ "value": value })),
+                )
+            }
+            Self::CreateGroupCallQueue { group_id } | Self::DeleteGroupCallQueue { group_id } => (
+                format!("/v3/groups/{}/callqueue", path_id(group_id, "group_id")?),
+                None,
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn group_media_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::SetGroupCallQueueAudio {
+                group_id,
+                audio_file_id,
+            } => {
+                validate_v3_path_id("group_id", group_id)?;
+                validate_v3_text("audio_file_id", audio_file_id)?;
+                (
+                    format!("/v3/groups/{group_id}/callqueue/activeAudioFile"),
+                    Some(json!({ "audioFileId": audio_file_id })),
+                )
+            }
+            Self::CreateGroupStatisticsContract {
+                group_id,
+                tac_accepted,
+            } => {
+                validate_v3_path_id("group_id", group_id)?;
+                let body = tac_accepted
+                    .map_or_else(|| json!({}), |accepted| json!({ "tacAccepted": accepted }));
+                (
+                    format!("/v3/groups/{group_id}/contracts/statistics"),
+                    Some(body),
+                )
+            }
+            Self::CreateGroupGreeting { group_id } | Self::DeleteGroupGreeting { group_id } => (
+                format!("/v3/groups/{}/greeting", path_id(group_id, "group_id")?),
+                None,
+            ),
+            Self::SetGroupGreetingAudio {
+                group_id,
+                audio_file_id,
+            } => {
+                validate_v3_path_id("group_id", group_id)?;
+                validate_v3_text("audio_file_id", audio_file_id)?;
+                (
+                    format!("/v3/groups/{group_id}/greeting/activeAudioFile"),
+                    Some(json!({ "audioFileId": audio_file_id })),
+                )
+            }
+            Self::SetGroupMembers {
+                group_id,
+                member_ids,
+            } => {
+                validate_v3_path_id("group_id", group_id)?;
+                let members = validate_v3_ids("member_ids", member_ids.iter().cloned())?;
+                (
+                    format!("/v3/groups/{group_id}/members"),
+                    Some(json!({ "memberIds": members })),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn contract_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::BookContract { product_id, tac_id } => {
+                let mut body = Map::new();
+                body.insert("productId".into(), json!(product_id));
+                if let Some(tac_id) = tac_id {
+                    body.insert("tacId".into(), json!(tac_id));
+                }
+                ("/v3/contracts".to_string(), Some(Value::Object(body)))
+            }
+            Self::CancelContract {
+                contract_id,
+                cancellation_date,
+            } => (
+                format!(
+                    "/v3/contracts/{}/cancellation",
+                    path_id(contract_id, "contract_id")?
+                ),
+                cancellation_date_body(cancellation_date.as_deref())?,
+            ),
+            Self::RevokeContractCancellation { contract_id } => (
+                format!(
+                    "/v3/contracts/{}/cancellation",
+                    path_id(contract_id, "contract_id")?
+                ),
+                None,
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn trunk_contract_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::BookTrunkMinutes {
+                product_id,
+                trunk_sip_id,
+            } => {
+                validate_v3_text("product_id", product_id)?;
+                validate_v3_text("trunk_sip_id", trunk_sip_id)?;
+                (
+                    "/v3/trunks/bookMinutes".to_string(),
+                    Some(json!({ "productId": product_id, "trunkSipId": trunk_sip_id })),
+                )
+            }
+            Self::BookTrunkContract {
+                product_id,
+                alias,
+                address_id,
+            } => {
+                let mut body = Map::new();
+                if let Some(product_id) = product_id {
+                    body.insert("productId".into(), json!(product_id));
+                }
+                insert_optional_text(&mut body, "alias", alias.as_deref(), false)?;
+                if let Some(address_id) = address_id {
+                    body.insert("addressId".into(), json!(address_id));
+                }
+                (
+                    "/v3/trunks/contracts".to_string(),
+                    Some(Value::Object(body)),
+                )
+            }
+            Self::ChangeTrunkContract {
+                product_id,
+                replaces_customer_product_id,
+            } => {
+                let mut body = Map::new();
+                if let Some(product_id) = product_id {
+                    body.insert("productId".into(), json!(product_id));
+                }
+                if let Some(id) = replaces_customer_product_id {
+                    body.insert("replacesCustomerProductId".into(), json!(id));
+                }
+                (
+                    "/v3/trunks/contracts".to_string(),
+                    Some(Value::Object(body)),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn trunk_contract_admin_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CancelTrunkContract {
+                customer_product_id,
+            }
+            | Self::RevokeTrunkContractCancellation {
+                customer_product_id,
+            } => (
+                "/v3/trunks/contracts/cancellation".to_string(),
+                Some(json!({ "customerProductId": customer_product_id })),
+            ),
+            Self::CreateTrunkExtension {
+                customer_product_id,
+                alias,
+                emergency_address_id,
+            } => {
+                let mut body = Map::new();
+                if let Some(id) = customer_product_id {
+                    body.insert("customerProductId".into(), json!(id));
+                }
+                insert_optional_text(&mut body, "alias", alias.as_deref(), false)?;
+                if let Some(id) = emergency_address_id {
+                    body.insert("emergencyAddressId".into(), json!(id));
+                }
+                (
+                    "/v3/trunks/contracts/extension".to_string(),
+                    Some(Value::Object(body)),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn trunk_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::DeleteTrunk { trunk_id } => (
+                format!("/v3/trunks/{}", path_id(trunk_id, "trunk_id")?),
+                None,
+            ),
+            Self::SetTrunkAlias { trunk_id, value } => {
+                validate_v3_path_id("trunk_id", trunk_id)?;
+                validate_v3_text("value", value)?;
+                (
+                    format!("/v3/trunks/{trunk_id}/alias"),
+                    Some(json!({ "value": value })),
+                )
+            }
+            Self::GenerateSipPassword { trunk_id } => (
+                format!(
+                    "/v3/trunks/{}/credentialsPassword",
+                    path_id(trunk_id, "trunk_id")?
+                ),
+                None,
+            ),
+            Self::SetTrunkEmergencyAddress {
+                trunk_id,
+                address_id,
+            } => {
+                validate_v3_path_id("trunk_id", trunk_id)?;
+                (
+                    format!("/v3/trunks/{trunk_id}/emergencyAddressId"),
+                    Some(json!({ "addressId": address_id })),
+                )
+            }
+            Self::SetTrunkFallbackCallerId { trunk_id, caller } => {
+                validate_v3_path_id("trunk_id", trunk_id)?;
+                validate_v3_e164("caller", caller)?;
+                (
+                    format!("/v3/trunks/{trunk_id}/fallbackCallerId"),
+                    Some(json!({ "callerE164Number": caller })),
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+
+    fn label_parts(&self) -> Result<Option<(String, Option<Value>)>> {
+        let parts = match self {
+            Self::CreateLabel { name } => {
+                validate_v3_text("name", name)?;
+                ("/v3/labels".to_string(), Some(json!({ "name": name })))
+            }
+            Self::RenameLabel { label_id, name } => {
+                validate_v3_label_id(*label_id)?;
+                validate_v3_text("name", name)?;
+                (
+                    format!("/v3/labels/{label_id}"),
+                    Some(json!({ "name": name })),
+                )
+            }
+            Self::DeleteLabel { label_id } => {
+                validate_v3_label_id(*label_id)?;
+                (format!("/v3/labels/{label_id}"), None)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(parts))
+    }
+}
+
+fn validate_v3_text(field: &'static str, value: &str) -> Result<()> {
+    validate::non_empty(field, value, MAX_V3_ADMIN_TEXT_BYTES)
+}
+
+fn validate_v3_path_id(field: &'static str, value: &str) -> Result<()> {
+    validate::path_segment(field, value)
+}
+
+fn path_id(value: &str, field: &'static str) -> Result<String> {
+    validate_v3_path_id(field, value)?;
+    Ok(value.to_string())
+}
+
+fn validate_v3_label_id(value: i32) -> Result<()> {
+    if value <= 0 {
+        return Err(Error::validation("label_id", "must be a positive int32"));
+    }
+    Ok(())
+}
+
+fn validate_v3_batch_len<T>(items: &[T]) -> Result<()> {
+    if items.is_empty() {
+        return Err(Error::validation("items", "must not be empty"));
+    }
+    if items.len() > MAX_V3_ADMIN_BATCH_ITEMS {
+        return Err(Error::validation(
+            "items",
+            format!("must contain at most {MAX_V3_ADMIN_BATCH_ITEMS} entries"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_v3_ids<I, S>(field: &'static str, values: I) -> Result<Vec<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let values = values.into_iter().map(Into::into).collect::<Vec<_>>();
+    validate_v3_batch_len(&values)?;
+    for value in &values {
+        validate::path_segment(field, value)?;
+    }
+    Ok(values)
+}
+
+fn validate_v3_e164(field: &'static str, value: &str) -> Result<()> {
+    if !value.starts_with('+') {
+        return Err(Error::validation(field, "must be E.164 with a leading +"));
+    }
+    validate::phone(field, value).map(|_| ())
+}
+
+fn validate_e164_list(values: &[String]) -> Result<Vec<String>> {
+    validate_v3_batch_len(values)?;
+    for value in values {
+        validate_v3_e164("e164_numbers", value)?;
+    }
+    Ok(values.to_vec())
+}
+
+fn validate_digits_list(values: &[String]) -> Result<Vec<String>> {
+    validate_v3_batch_len(values)?;
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        validate::non_empty("authorized_numbers", value, validate::MAX_SESSION_ID)?;
+        if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Error::validation(
+                "authorized_numbers",
+                "must contain only digits",
+            ));
+        }
+        out.push(value.clone());
+    }
+    Ok(out)
+}
+
+fn validate_v3_pin(pin: &str) -> Result<()> {
+    validate::non_empty("pin", pin, 64)?;
+    if !pin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::validation("pin", "must contain only digits"));
+    }
+    Ok(())
+}
+
+fn validate_activate_sim(request: &V3ActivateSimRequest) -> Result<()> {
+    if let Some(sim_id) = &request.sim_id {
+        validate_v3_path_id("sim_id", sim_id)?;
+    }
+    if let Some(alias) = &request.alias {
+        validate_v3_text("alias", alias)?;
+    }
+    Ok(())
+}
+
+fn insert_optional_text(
+    body: &mut Map<String, Value>,
+    name: &'static str,
+    value: Option<&str>,
+    require_non_empty: bool,
+) -> Result<()> {
+    if let Some(value) = value {
+        if require_non_empty || !value.is_empty() {
+            validate_v3_text(name, value)?;
+        }
+        body.insert(name.into(), json!(value));
+    }
+    Ok(())
+}
+
+fn insert_optional_id(
+    body: &mut Map<String, Value>,
+    name: &'static str,
+    value: Option<&str>,
+) -> Result<()> {
+    if let Some(value) = value {
+        validate_v3_path_id(name, value)?;
+        body.insert(name.into(), json!(value));
+    }
+    Ok(())
+}
+
+fn cancellation_date_body(date: Option<&str>) -> Result<Option<Value>> {
+    if let Some(date) = date {
+        validate_v3_text("cancellation_date", date)?;
+        Ok(Some(json!({ "cancellationDate": date })))
+    } else {
+        Ok(None)
     }
 }
