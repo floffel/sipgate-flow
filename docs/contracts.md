@@ -278,6 +278,92 @@ URL and the same bearer credential as §4.
   and `AiWebhookHeader` enforces the documented `X-` prefix, rejects `#`/CR/LF
   and redacts the value in `Debug`.
 
+### 4.2 In-product v3 account administration writes — verified
+
+Source: <https://api.sipgate.com/v3/swagger.json> (Swagger 2.0). The faxline
+creation and member writes are also present in
+<https://api.sipgate.com/v3/openapi.json> under `createFaxExtension`,
+`addFaxMembers` and `removeFaxMembers`. All operations below are represented by
+[`V3AdminOperation`] and executed through `FlowClient::execute_v3_admin`; the
+few read/status and convenience operations named in the last column have direct
+methods as well.
+
+| Method | Path | `operationId` | Request type | Implemented as |
+| --- | --- | --- | --- | --- |
+| GET | `/account/cancellation` | `getAccountCancellation` | — | `v3_account_cancellation` |
+| POST | `/account/cancellation` | `createAccountCancellation` | `AccountCancellationRequest` | `request_v3_account_cancellation` |
+| DELETE | `/account/cancellation` | `deleteAccountCancellation` | — | `revoke_v3_account_cancellation` |
+| GET | `/account/event-lifetime` | `getEventLifetime` | — | `v3_event_lifetime` |
+| PUT | `/account/event-lifetime` | `setEventLifetime` | `EventLifetimeRequest` | `set_v3_event_lifetime` |
+| POST | `/devices/mobile` | `createMobileDevice` | `CreateMobileDeviceRequest` | `CreateMobileDevice` |
+| POST | `/devices/register` | `createRegisterDevice` | `CreateRegisterDeviceRequest` | `CreateRegisterDevice` |
+| PUT | `/devices/{deviceId}/alias` | `changeDeviceAlias` | `SetDeviceAliasRequest` | `SetDeviceAlias` |
+| PUT | `/devices/{deviceId}/fancyCodec` | `changeFancyCodec` | `SetFancyCodecRequest` | `SetFancyCodec` |
+| PUT | `/devices/{deviceId}/pending-sim` | `setPendingSim` | `SetPendingSimRequest` | `SetPendingSim` |
+| POST | `/devices/{deviceId}/sim` | `activateSim` | `ActivateSimRequest` | `ActivateSim` |
+| PUT | `/devices/{deviceId}/sim/{id}` | `updateSim` | `ActivateSimRequest` | `UpdateSim` |
+| PUT | `/devices/{deviceId}/sim/{simId}/intendedUse` | `setIntendedUse` | `SetIntendedUseRequest` | `SetSimIntendedUse` |
+| PUT | `/devices/{deviceId}/smsSim` | `setSmsSim` | `SetSmsReceivingSimRequest` | `SetSmsSim` |
+| POST | `/devices/{deviceId}/contracts` | `createContract_1` | `CreateDeviceContractRequest` | `CreateDeviceContract` |
+| POST | `/devices/{deviceId}/contracts/{contractId}/cancellation` | `cancelContract_1` | `CancelDeviceContractRequest` | `CancelDeviceContract` |
+| DELETE | `/devices/{deviceId}/contracts/{contractId}/cancellation` | `rollbackCancellation_1` | — | `RevokeDeviceContractCancellation` |
+| PUT | `/phone-numbers/mobile/opt-in` | `releaseMobileNumbersForExport` | `ReleaseMobileNumbersForExportRequest` | `ReleaseMobileNumbers` |
+| PUT | `/routings` | `createNumberRouting` | `CreateRoutingRequest` | `CreateRouting` / `create_v3_routing` |
+| DELETE | `/routings` | `deleteNumberRouting` | `DeleteRoutingRequest` | `DeleteRouting` |
+| PUT | `/routings/channel` | `createNumberChannelRouting` | `CreateChannelRoutingRequest` | `CreateChannelRouting` |
+| POST | `/fax` | `createFax` | `CreateFaxRequest` | `CreateFax` |
+| DELETE | `/fax/{faxId}` | `deleteFax` | — | `DeleteFax` |
+| PUT | `/fax/{faxId}/alias` | `setAlias` | `SetAliasRequest` | `SetFaxAlias` |
+| PUT | `/fax/{faxId}/callerId` | `setCallerId` | `SetCallerIdRequest` | `SetFaxCallerId` |
+| PUT | `/fax/{faxId}/tagline` | `setTagline` | `SetTaglineRequest` | `SetFaxTagline` |
+| POST | `/faxlines` | `createFaxExtension` | `CreateFaxlineRequest` | `CreateFaxline` / `create_v3_faxline` |
+| PUT | `/faxlines/{faxId}/members` | `addFaxMembers` | `AddMembersRequest` | `AddFaxlineMembers` |
+| DELETE | `/faxlines/{faxId}/members` | `removeFaxMembers` | `RemoveMembersRequest` | `RemoveFaxlineMembers` |
+| PUT | `/voicemails/{voicemailId}/activeGreeting` | `setActiveGreeting` | `SetActiveGreetingRequest` | `SetVoicemailActiveGreeting` |
+| PUT | `/voicemails/{voicemailId}/alias` | `renameVoicemail` | `RenameVoicemailRequest` | `RenameVoicemail` |
+| PUT | `/voicemails/{voicemailId}/authorizedNumbers` | `changeAuthorizedNumbersForVoicemail` | `SetAuthorizedNumbersForVoicemailRequest` | `SetVoicemailAuthorizedNumbers` |
+| DELETE | `/voicemails/{voicemailId}/pin` | `deleteVoicemailPin` | `DeleteVoicemailPinRequest` | `DeleteVoicemailPin` |
+| PUT | `/voicemails/{voicemailId}/pin` | `changeVoicemailPin` | `SetVoicemailPinRequest` | `SetVoicemailPin` |
+| PUT | `/voicemails/{voicemailId}/transcription` | `setTranscription` | `SetTranscriptionRequest` | `SetVoicemailTranscription` |
+| PUT | `/users/{userId}/name` | `changeUserName` | `SetUserNameRequest` | `SetUserName` |
+| POST | `/groups` | `createGroup` | `CreateGroupRequest` | `CreateGroup` |
+| DELETE | `/groups/{groupId}` | `deleteGroup` | — | `DeleteGroup` |
+| PUT | `/groups/{groupId}/alias` | `changeGroupAlias` | `SetGroupAliasRequest` | `SetGroupAlias` |
+| POST | `/groups/{groupId}/callqueue` | `createCallQueue` | — | `CreateGroupCallQueue` |
+| DELETE | `/groups/{groupId}/callqueue` | `deleteCallThrough` | — | `DeleteGroupCallQueue` |
+| PUT | `/groups/{groupId}/callqueue/activeAudioFile` | `setActiveCallQueueAudioFile` | `SetActiveAudioFileRequest` | `SetGroupCallQueueAudio` |
+| POST | `/groups/{groupId}/contracts/statistics` | `createContract_2` | `CreateContractRequest` | `CreateGroupStatisticsContract` |
+| POST | `/groups/{groupId}/greeting` | `createGreeting` | — | `CreateGroupGreeting` |
+| DELETE | `/groups/{groupId}/greeting` | `deleteGreeting` | — | `DeleteGroupGreeting` |
+| PUT | `/groups/{groupId}/greeting/activeAudioFile` | `setActiveGreetingAudioFile` | `SetActiveAudioFileRequest` | `SetGroupGreetingAudio` |
+| PUT | `/groups/{groupId}/members` | `changeGroupMembers` | `SetGroupMembersRequest` | `SetGroupMembers` |
+| POST | `/contracts` | `createContract` | `BookContractRequest` | `BookContract` |
+| POST | `/contracts/{contractId}/cancellation` | `cancelContract` | `CancelContractRequest` | `CancelContract` |
+| DELETE | `/contracts/{contractId}/cancellation` | `rollbackCancellation` | — | `RevokeContractCancellation` |
+| POST | `/trunks/bookMinutes` | `bookMinutes` | `BookTrunkingMinutesRequest` | `BookTrunkMinutes` |
+| POST | `/trunks/contracts` | `bookTrunkContract_1` | `BookTrunkContractRequest` | `BookTrunkContract` |
+| PUT | `/trunks/contracts` | `bookTrunkContract` | `ChangeTrunkContractRequest` | `ChangeTrunkContract` |
+| POST | `/trunks/contracts/cancellation` | `cancelContract_2` | `CancelTrunkContractRequest` | `CancelTrunkContract` |
+| DELETE | `/trunks/contracts/cancellation` | `revokeCancellation` | `RevokeCancellationRequest` | `RevokeTrunkContractCancellation` |
+| POST | `/trunks/contracts/extension` | `createTrunkExtension` | `CreateTrunkExtensionRequest` | `CreateTrunkExtension` |
+| DELETE | `/trunks/{trunkId}` | `deleteTrunk` | — | `DeleteTrunk` |
+| PUT | `/trunks/{trunkId}/alias` | `changeTrunkAlias` | `SetTrunkAliasRequest` | `SetTrunkAlias` |
+| POST | `/trunks/{trunkId}/credentialsPassword` | `generateNewSipPassword` | — | `GenerateSipPassword` |
+| PUT | `/trunks/{trunkId}/emergencyAddressId` | `setEmergencyAddressId` | `SetTrunkEmergencyAddressRequest` | `SetTrunkEmergencyAddress` |
+| PUT | `/trunks/{trunkId}/fallbackCallerId` | `setFallbackCallerId` | `SetTrunkFallbackCallerIdRequest` | `SetTrunkFallbackCallerId` |
+| POST | `/labels` | `addLabel` | `LabelCreateRequest` | `CreateLabel` |
+| PUT | `/labels/{labelId}` | `changeLabel` | `LabelChangeRequest` | `RenameLabel` |
+| DELETE | `/labels/{labelId}` | `deleteLabel` | — | `DeleteLabel` |
+
+The request builders preserve the Swagger's camelCase names and required fields,
+validate path ids, E.164 values, text, PINs and batch sizes before the wire, and
+use `V3AdminResponse` for the heterogeneous success bodies. `DELETE /routings`
+and `DELETE /voicemails/{voicemailId}/pin` carry the documented body even though
+the verb is `DELETE`. `SynthesizeRequest.type` is a free string in the OpenAPI
+schema with no documented meaning; `SynthesizeType` therefore validates and
+carries the token, with `Other(String)` for unknown values, and assigns it no
+semantics.
+
 ## 5. REST API v2 — verified against the public Swagger
 
 Source: <https://api.sipgate.com/v2/swagger.json> (`host` `api.sipgate.com`,

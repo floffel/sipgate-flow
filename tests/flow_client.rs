@@ -1582,3 +1582,777 @@ fn tts_request_builders_expose_every_getter_and_debug_impl() {
     assert_eq!(voice.name(), Some("Rachel"));
     assert_ne!(format!("{voice:?}"), String::new());
 }
+
+// ---------------------------------------------------------------------------
+// v3 account administration (#180)
+// ---------------------------------------------------------------------------
+
+use sipgate_flow::{
+    SynthesizeType, V3ActivateSimRequest, V3AdminOperation, V3AdminResponse,
+    V3CreateFaxlineRequest, V3EventLifetime, V3SimIntendedUse, MAX_V3_ADMIN_BATCH_ITEMS,
+    MAX_V3_ADMIN_TEXT_BYTES,
+};
+
+fn assert_v3_admin_cases(cases: Vec<(V3AdminOperation, &str, &str)>) {
+    for (operation, method, path) in cases {
+        assert_eq!(operation.method().as_str(), method, "{operation:?}");
+        let (actual_method, actual_path, _) = operation.request_parts().expect("valid operation");
+        assert_eq!(actual_method.as_str(), method, "{operation:?}");
+        assert_eq!(actual_path, path, "{operation:?}");
+    }
+}
+
+#[test]
+fn v3_admin_account_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::AccountCancellation,
+            "GET",
+            "/v3/account/cancellation",
+        ),
+        (
+            V3AdminOperation::RevokeAccountCancellation,
+            "DELETE",
+            "/v3/account/cancellation",
+        ),
+        (
+            V3AdminOperation::EventLifetime,
+            "GET",
+            "/v3/account/event-lifetime",
+        ),
+        (
+            V3AdminOperation::SetEventLifetime(V3EventLifetime::Unlimited),
+            "PUT",
+            "/v3/account/event-lifetime",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_device_and_sim_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::CreateMobileDevice {
+                alias: "Mobile".into(),
+                owner: Some("w0".into()),
+            },
+            "POST",
+            "/v3/devices/mobile",
+        ),
+        (
+            V3AdminOperation::CreateRegisterDevice {
+                alias: "Desk".into(),
+                owner: Some("w0".into()),
+            },
+            "POST",
+            "/v3/devices/register",
+        ),
+        (
+            V3AdminOperation::SetDeviceAlias {
+                device_id: "y0".into(),
+                value: "Desk".into(),
+            },
+            "PUT",
+            "/v3/devices/y0/alias",
+        ),
+        (
+            V3AdminOperation::SetFancyCodec {
+                device_id: "y0".into(),
+                enabled: true,
+            },
+            "PUT",
+            "/v3/devices/y0/fancyCodec",
+        ),
+        (
+            V3AdminOperation::SetPendingSim {
+                device_id: "y0".into(),
+                intended_use: V3SimIntendedUse::Voice,
+                alias: None,
+                iccid: None,
+                mobile_extension: None,
+            },
+            "PUT",
+            "/v3/devices/y0/pending-sim",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_sim_contract_and_routing_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::ActivateSim {
+                device_id: "y0".into(),
+                request: V3ActivateSimRequest::new(V3SimIntendedUse::Data, "i0").expect("valid"),
+            },
+            "POST",
+            "/v3/devices/y0/sim",
+        ),
+        (
+            V3AdminOperation::UpdateSim {
+                device_id: "y0".into(),
+                sim_id: "i0".into(),
+                request: V3ActivateSimRequest::new(V3SimIntendedUse::Data, "i0").expect("valid"),
+            },
+            "PUT",
+            "/v3/devices/y0/sim/i0",
+        ),
+        (
+            V3AdminOperation::SetSimIntendedUse {
+                device_id: "y0".into(),
+                sim_id: "i0".into(),
+                intended_use: V3SimIntendedUse::Data,
+            },
+            "PUT",
+            "/v3/devices/y0/sim/i0/intendedUse",
+        ),
+        (
+            V3AdminOperation::SetSmsSim {
+                device_id: "y0".into(),
+                extension: "y1".into(),
+            },
+            "PUT",
+            "/v3/devices/y0/smsSim",
+        ),
+        (
+            V3AdminOperation::CreateDeviceContract {
+                device_id: "y0".into(),
+                product_id: "444".into(),
+                accepted_tac_id: None,
+            },
+            "POST",
+            "/v3/devices/y0/contracts",
+        ),
+        (
+            V3AdminOperation::CancelDeviceContract {
+                device_id: "y0".into(),
+                contract_id: "12345".into(),
+                cancellation_date: None,
+            },
+            "POST",
+            "/v3/devices/y0/contracts/12345/cancellation",
+        ),
+        (
+            V3AdminOperation::RevokeDeviceContractCancellation {
+                device_id: "y0".into(),
+                contract_id: "12345".into(),
+            },
+            "DELETE",
+            "/v3/devices/y0/contracts/12345/cancellation",
+        ),
+        (
+            V3AdminOperation::ReleaseMobileNumbers {
+                e164_numbers: vec!["+49211123456".into()],
+            },
+            "PUT",
+            "/v3/phone-numbers/mobile/opt-in",
+        ),
+        (
+            V3AdminOperation::CreateRouting {
+                e164_numbers: vec!["+49211123456".into()],
+                extension: "g3".into(),
+            },
+            "PUT",
+            "/v3/routings",
+        ),
+        (
+            V3AdminOperation::DeleteRouting {
+                e164_numbers: vec!["+49211123456".into()],
+            },
+            "DELETE",
+            "/v3/routings",
+        ),
+        (
+            V3AdminOperation::CreateChannelRouting {
+                e164_numbers: vec!["+49211123456".into()],
+                channel_id: "c0".into(),
+            },
+            "PUT",
+            "/v3/routings/channel",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_fax_voicemail_and_user_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::CreateFax {
+                alias: Some("Fax".into()),
+                owner_id: Some("w0".into()),
+            },
+            "POST",
+            "/v3/fax",
+        ),
+        (
+            V3AdminOperation::DeleteFax {
+                fax_id: "f0".into(),
+            },
+            "DELETE",
+            "/v3/fax/f0",
+        ),
+        (
+            V3AdminOperation::SetFaxAlias {
+                fax_id: "f0".into(),
+                alias: "Fax".into(),
+            },
+            "PUT",
+            "/v3/fax/f0/alias",
+        ),
+        (
+            V3AdminOperation::SetFaxCallerId {
+                fax_id: "f0".into(),
+                anonymous: None,
+                caller_id: Some("+49211123456".into()),
+            },
+            "PUT",
+            "/v3/fax/f0/callerId",
+        ),
+        (
+            V3AdminOperation::SetFaxTagline {
+                fax_id: "f0".into(),
+                tagline: "Thanks".into(),
+            },
+            "PUT",
+            "/v3/fax/f0/tagline",
+        ),
+        (
+            V3AdminOperation::CreateFaxline(
+                V3CreateFaxlineRequest::new("Support fax").expect("valid"),
+            ),
+            "POST",
+            "/v3/faxlines",
+        ),
+        (
+            V3AdminOperation::AddFaxlineMembers {
+                fax_id: "f0".into(),
+                member_ids: vec!["w0".into()],
+            },
+            "PUT",
+            "/v3/faxlines/f0/members",
+        ),
+        (
+            V3AdminOperation::RemoveFaxlineMembers {
+                fax_id: "f0".into(),
+                member_ids: vec!["w0".into()],
+            },
+            "DELETE",
+            "/v3/faxlines/f0/members",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_voicemail_and_user_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::SetVoicemailActiveGreeting {
+                voicemail_id: "v0".into(),
+                greeting_id: "r0".into(),
+            },
+            "PUT",
+            "/v3/voicemails/v0/activeGreeting",
+        ),
+        (
+            V3AdminOperation::RenameVoicemail {
+                voicemail_id: "v0".into(),
+                alias: "Box".into(),
+            },
+            "PUT",
+            "/v3/voicemails/v0/alias",
+        ),
+        (
+            V3AdminOperation::SetVoicemailAuthorizedNumbers {
+                voicemail_id: "v0".into(),
+                user_id: Some("w0".into()),
+                authorized_numbers: vec!["4915112345678".into()],
+            },
+            "PUT",
+            "/v3/voicemails/v0/authorizedNumbers",
+        ),
+        (
+            V3AdminOperation::DeleteVoicemailPin {
+                voicemail_id: "v0".into(),
+                user_id: Some("w0".into()),
+            },
+            "DELETE",
+            "/v3/voicemails/v0/pin",
+        ),
+        (
+            V3AdminOperation::SetVoicemailPin {
+                voicemail_id: "v0".into(),
+                pin: "1234".into(),
+                user_id: Some("w0".into()),
+            },
+            "PUT",
+            "/v3/voicemails/v0/pin",
+        ),
+        (
+            V3AdminOperation::SetVoicemailTranscription {
+                voicemail_id: "v0".into(),
+                enabled: true,
+            },
+            "PUT",
+            "/v3/voicemails/v0/transcription",
+        ),
+        (
+            V3AdminOperation::SetUserName {
+                user_id: "w0".into(),
+                first_name: "Grace".into(),
+                last_name: "Hopper".into(),
+            },
+            "PUT",
+            "/v3/users/w0/name",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_group_contract_trunk_and_label_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::CreateGroup {
+                alias: "Support".into(),
+            },
+            "POST",
+            "/v3/groups",
+        ),
+        (
+            V3AdminOperation::DeleteGroup {
+                group_id: "g0".into(),
+            },
+            "DELETE",
+            "/v3/groups/g0",
+        ),
+        (
+            V3AdminOperation::SetGroupAlias {
+                group_id: "g0".into(),
+                value: "Support".into(),
+            },
+            "PUT",
+            "/v3/groups/g0/alias",
+        ),
+        (
+            V3AdminOperation::CreateGroupCallQueue {
+                group_id: "g0".into(),
+            },
+            "POST",
+            "/v3/groups/g0/callqueue",
+        ),
+        (
+            V3AdminOperation::DeleteGroupCallQueue {
+                group_id: "g0".into(),
+            },
+            "DELETE",
+            "/v3/groups/g0/callqueue",
+        ),
+        (
+            V3AdminOperation::SetGroupCallQueueAudio {
+                group_id: "g0".into(),
+                audio_file_id: "a0".into(),
+            },
+            "PUT",
+            "/v3/groups/g0/callqueue/activeAudioFile",
+        ),
+        (
+            V3AdminOperation::CreateGroupStatisticsContract {
+                group_id: "g0".into(),
+                tac_accepted: Some(true),
+            },
+            "POST",
+            "/v3/groups/g0/contracts/statistics",
+        ),
+        (
+            V3AdminOperation::CreateGroupGreeting {
+                group_id: "g0".into(),
+            },
+            "POST",
+            "/v3/groups/g0/greeting",
+        ),
+        (
+            V3AdminOperation::DeleteGroupGreeting {
+                group_id: "g0".into(),
+            },
+            "DELETE",
+            "/v3/groups/g0/greeting",
+        ),
+        (
+            V3AdminOperation::SetGroupGreetingAudio {
+                group_id: "g0".into(),
+                audio_file_id: "a0".into(),
+            },
+            "PUT",
+            "/v3/groups/g0/greeting/activeAudioFile",
+        ),
+        (
+            V3AdminOperation::SetGroupMembers {
+                group_id: "g0".into(),
+                member_ids: vec!["w0".into()],
+            },
+            "PUT",
+            "/v3/groups/g0/members",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_contract_and_trunk_contract_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::BookContract {
+                product_id: 444,
+                tac_id: None,
+            },
+            "POST",
+            "/v3/contracts",
+        ),
+        (
+            V3AdminOperation::CancelContract {
+                contract_id: "12345".into(),
+                cancellation_date: None,
+            },
+            "POST",
+            "/v3/contracts/12345/cancellation",
+        ),
+        (
+            V3AdminOperation::RevokeContractCancellation {
+                contract_id: "12345".into(),
+            },
+            "DELETE",
+            "/v3/contracts/12345/cancellation",
+        ),
+        (
+            V3AdminOperation::BookTrunkMinutes {
+                product_id: "444".into(),
+                trunk_sip_id: "t0".into(),
+            },
+            "POST",
+            "/v3/trunks/bookMinutes",
+        ),
+        (
+            V3AdminOperation::BookTrunkContract {
+                product_id: Some(444),
+                alias: None,
+                address_id: None,
+            },
+            "POST",
+            "/v3/trunks/contracts",
+        ),
+        (
+            V3AdminOperation::ChangeTrunkContract {
+                product_id: Some(444),
+                replaces_customer_product_id: Some(1),
+            },
+            "PUT",
+            "/v3/trunks/contracts",
+        ),
+        (
+            V3AdminOperation::CancelTrunkContract {
+                customer_product_id: 12_345_678,
+            },
+            "POST",
+            "/v3/trunks/contracts/cancellation",
+        ),
+        (
+            V3AdminOperation::RevokeTrunkContractCancellation {
+                customer_product_id: 12_345_678,
+            },
+            "DELETE",
+            "/v3/trunks/contracts/cancellation",
+        ),
+        (
+            V3AdminOperation::CreateTrunkExtension {
+                customer_product_id: Some(1),
+                alias: None,
+                emergency_address_id: None,
+            },
+            "POST",
+            "/v3/trunks/contracts/extension",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_trunk_and_label_methods_and_paths_are_documented() {
+    assert_v3_admin_cases(vec![
+        (
+            V3AdminOperation::DeleteTrunk {
+                trunk_id: "t0".into(),
+            },
+            "DELETE",
+            "/v3/trunks/t0",
+        ),
+        (
+            V3AdminOperation::SetTrunkAlias {
+                trunk_id: "t0".into(),
+                value: "HQ".into(),
+            },
+            "PUT",
+            "/v3/trunks/t0/alias",
+        ),
+        (
+            V3AdminOperation::GenerateSipPassword {
+                trunk_id: "t0".into(),
+            },
+            "POST",
+            "/v3/trunks/t0/credentialsPassword",
+        ),
+        (
+            V3AdminOperation::SetTrunkEmergencyAddress {
+                trunk_id: "t0".into(),
+                address_id: 7,
+            },
+            "PUT",
+            "/v3/trunks/t0/emergencyAddressId",
+        ),
+        (
+            V3AdminOperation::SetTrunkFallbackCallerId {
+                trunk_id: "t0".into(),
+                caller: "+49211123456".into(),
+            },
+            "PUT",
+            "/v3/trunks/t0/fallbackCallerId",
+        ),
+        (
+            V3AdminOperation::CreateLabel { name: "VIP".into() },
+            "POST",
+            "/v3/labels",
+        ),
+        (
+            V3AdminOperation::RenameLabel {
+                label_id: 42,
+                name: "VIP".into(),
+            },
+            "PUT",
+            "/v3/labels/42",
+        ),
+        (
+            V3AdminOperation::DeleteLabel { label_id: 42 },
+            "DELETE",
+            "/v3/labels/42",
+        ),
+    ]);
+}
+
+#[test]
+fn v3_admin_bodies_use_the_documented_camel_case_shapes() {
+    let body =
+        |operation: V3AdminOperation| operation.request_parts().expect("valid").2.expect("body");
+    assert_eq!(
+        body(V3AdminOperation::CreateAccountCancellation {
+            holder: Some("Jane".into()),
+            iban: Some("DE1".into())
+        }),
+        serde_json::json!({"holder": "Jane", "iban": "DE1"})
+    );
+    assert_eq!(
+        body(V3AdminOperation::CreateRouting {
+            e164_numbers: vec!["+49211123456".into()],
+            extension: "g3".into()
+        }),
+        serde_json::json!({"e164Numbers": ["+49211123456"], "extension": "g3"})
+    );
+    assert_eq!(
+        body(V3AdminOperation::SetVoicemailAuthorizedNumbers {
+            voicemail_id: "v0".into(),
+            user_id: Some("w0".into()),
+            authorized_numbers: vec!["4915112345678".into()]
+        }),
+        serde_json::json!({"authorizedNumbers": ["4915112345678"], "userId": "w0"})
+    );
+    assert_eq!(
+        body(V3AdminOperation::CreateFaxline(
+            V3CreateFaxlineRequest::new("Fax")
+                .expect("valid")
+                .with_owner_ids(["w0"])
+                .expect("valid")
+        )),
+        serde_json::json!({"alias": "Fax", "ownerIds": ["w0"]})
+    );
+    assert_eq!(
+        body(V3AdminOperation::SetUserName {
+            user_id: "w0".into(),
+            first_name: "Grace".into(),
+            last_name: "Hopper".into()
+        }),
+        serde_json::json!({"firstName": "Grace", "lastName": "Hopper"})
+    );
+    assert_eq!(
+        body(V3AdminOperation::BookContract {
+            product_id: 444,
+            tac_id: Some(9)
+        }),
+        serde_json::json!({"productId": 444, "tacId": 9})
+    );
+}
+
+#[test]
+fn v3_admin_validation_is_before_the_wire_and_has_both_batch_boundaries() {
+    let too_many = vec!["+49211123456".to_string(); MAX_V3_ADMIN_BATCH_ITEMS + 1];
+    let at_limit = vec!["+49211123456".to_string(); MAX_V3_ADMIN_BATCH_ITEMS];
+    assert!(V3AdminOperation::CreateRouting {
+        e164_numbers: at_limit,
+        extension: "g3".into()
+    }
+    .request_parts()
+    .is_ok());
+    assert!(matches!(
+        V3AdminOperation::CreateRouting {
+            e164_numbers: too_many,
+            extension: "g3".into()
+        }
+        .request_parts(),
+        Err(Error::Validation { field: "items", .. })
+    ));
+    for number in ["49211123456", "+", "+49 211 123456", "+"] {
+        assert!(V3AdminOperation::DeleteRouting {
+            e164_numbers: vec![number.into()]
+        }
+        .request_parts()
+        .is_err());
+    }
+    assert!(V3AdminOperation::SetDeviceAlias {
+        device_id: "../y0".into(),
+        value: "x".into()
+    }
+    .request_parts()
+    .is_err());
+    assert!(V3AdminOperation::DeleteLabel { label_id: 0 }
+        .request_parts()
+        .is_err());
+    assert!(V3AdminOperation::SetVoicemailPin {
+        voicemail_id: "v0".into(),
+        pin: "12a4".into(),
+        user_id: None
+    }
+    .request_parts()
+    .is_err());
+    assert!(V3AdminOperation::SetFaxAlias {
+        fax_id: "f0".into(),
+        alias: String::new()
+    }
+    .request_parts()
+    .is_err());
+}
+
+#[test]
+fn v3_admin_text_limit_is_inclusive() {
+    let at_limit = "a".repeat(MAX_V3_ADMIN_TEXT_BYTES);
+    let over = "a".repeat(MAX_V3_ADMIN_TEXT_BYTES + 1);
+    assert!(V3AdminOperation::CreateGroup { alias: at_limit }
+        .request_parts()
+        .is_ok());
+    assert!(V3AdminOperation::CreateGroup { alias: over }
+        .request_parts()
+        .is_err());
+}
+
+#[tokio::test]
+async fn executing_v3_admin_uses_the_recording_transport_and_empty_bodies_are_null() {
+    let transport = MockTransport::new();
+    transport.push_response(response(200, &[], br#"{"canceled":false,"future":true}"#));
+    transport.push_response(no_content());
+    let client = client(transport.clone());
+    let read = client.v3_account_cancellation().await.expect("read");
+    assert_eq!(read.status(), 200);
+    assert_eq!(read.body()["future"], true);
+    let write = client
+        .set_v3_event_lifetime(V3EventLifetime::ThirtyDays)
+        .await
+        .expect("write");
+    assert_eq!(write.body(), &serde_json::Value::Null);
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].method.as_str(), "GET");
+    assert_eq!(
+        calls[0].url,
+        "https://api.sipgate.com/v3/account/cancellation"
+    );
+    assert_eq!(calls[1].method.as_str(), "PUT");
+    assert_eq!(
+        calls[1].url,
+        "https://api.sipgate.com/v3/account/event-lifetime"
+    );
+    assert_eq!(
+        calls[1].body,
+        Body::Json(serde_json::json!({"eventLifetime": "THIRTY_DAYS"}))
+    );
+}
+
+#[tokio::test]
+async fn v3_admin_post_failure_is_ambiguous_and_get_failure_is_retryable() {
+    let transport = MockTransport::new();
+    transport.push_response(response(500, &[], b"boom"));
+    let post = client(transport.clone())
+        .execute_v3_admin(&V3AdminOperation::CreateGroup { alias: "x".into() })
+        .await
+        .expect_err("post");
+    assert!(post.is_ambiguous());
+    let transport = MockTransport::new();
+    transport.push_response(response(500, &[], b"boom"));
+    let get = client(transport)
+        .execute_v3_admin(&V3AdminOperation::AccountCancellation)
+        .await
+        .expect_err("get");
+    assert!(get.is_retryable());
+}
+
+#[test]
+fn v3_admin_response_accepts_a_body_or_empty_success() {
+    let response = V3AdminResponse::from_parts(201, br#"{"contractId":"c1"}"#).expect("json");
+    assert_eq!(response.status(), 201);
+    assert_eq!(response.body()["contractId"], "c1");
+    assert_eq!(
+        V3AdminResponse::from_parts(204, b"").expect("empty").body(),
+        &serde_json::Value::Null
+    );
+    assert!(V3AdminResponse::from_parts(200, b"not json").is_err());
+}
+
+#[test]
+fn tts_type_is_typed_validated_and_forward_compatible() {
+    assert_eq!(
+        SynthesizeType::parse("announcement").expect("known"),
+        SynthesizeType::Announcement
+    );
+    assert_eq!(
+        SynthesizeType::parse("future_kind").expect("other"),
+        SynthesizeType::Other("future_kind".into())
+    );
+    assert!(SynthesizeType::parse("has space").is_err());
+    assert!(SynthesizeType::parse("a".repeat(65)).is_err());
+    let request = SynthesizeRequest::new("RACHEL", "hi")
+        .expect("valid")
+        .with_kind("FUTURE_KIND")
+        .expect("type");
+    assert_eq!(request.kind(), Some("FUTURE_KIND"));
+    assert_eq!(
+        request.synthesis_type(),
+        Some(&SynthesizeType::Other("FUTURE_KIND".into()))
+    );
+    assert_eq!(request.to_json()["type"], "FUTURE_KIND");
+}
+
+#[test]
+fn v3_activate_sim_request_and_faxline_request_validate_boundaries() {
+    assert!(V3ActivateSimRequest::new(V3SimIntendedUse::Voice, "i0").is_ok());
+    assert!(V3ActivateSimRequest::new(V3SimIntendedUse::Voice, "").is_err());
+    assert!(V3ActivateSimRequest::new(V3SimIntendedUse::Voice, "i/0").is_err());
+    assert!(V3ActivateSimRequest::new(V3SimIntendedUse::Voice, "i0")
+        .expect("valid")
+        .with_alias("")
+        .is_err());
+    assert!(V3CreateFaxlineRequest::new("").is_err());
+    assert!(V3CreateFaxlineRequest::new("Fax")
+        .expect("valid")
+        .with_owner_ids(["w/0"])
+        .is_err());
+    assert_eq!(
+        V3EventLifetime::parse("THIRTY_DAYS").expect("known"),
+        V3EventLifetime::ThirtyDays
+    );
+    assert_eq!(
+        V3SimIntendedUse::parse("voice").expect("known"),
+        V3SimIntendedUse::Voice
+    );
+}

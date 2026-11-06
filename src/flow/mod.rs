@@ -35,9 +35,12 @@ pub use action::{
 pub use client::{
     AccountRetentionSettings, AgentVoices, AiWebhookConfig, AiWebhookHeader, AiWebhookSettings,
     CurrentVoice, FlowClient, OutboundCall, OutboundCallReceipt, RecordingAnnouncementMode,
-    SetAccountRetentionSettings, SynthesizeRequest, SynthesizeStreamRequest, SynthesizedAudio,
-    TranscriptionAnnouncementMode, TransferCallerIdSource, TtsSetting, TtsVoice, DEFAULT_BASE_URL,
-    MAX_ACCOUNT_SETTING_TOKEN_BYTES, MAX_EVENT_RETENTION_DAYS, MIN_EVENT_RETENTION_DAYS,
+    SetAccountRetentionSettings, SynthesizeRequest, SynthesizeStreamRequest, SynthesizeType,
+    SynthesizedAudio, TranscriptionAnnouncementMode, TransferCallerIdSource, TtsSetting, TtsVoice,
+    V3ActivateSimRequest, V3AdminOperation, V3AdminResponse, V3CreateFaxlineRequest,
+    V3EventLifetime, V3SimIntendedUse, DEFAULT_BASE_URL, MAX_ACCOUNT_SETTING_TOKEN_BYTES,
+    MAX_EVENT_RETENTION_DAYS, MAX_V3_ADMIN_BATCH_ITEMS, MAX_V3_ADMIN_TEXT_BYTES,
+    MIN_EVENT_RETENTION_DAYS,
 };
 pub use event::{
     Direction, ErrorCode, Event, EventPayload, Session, Severity, SmsFailureReason,
