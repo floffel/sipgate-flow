@@ -10,6 +10,7 @@ use std::time::Duration;
 use common::{
     json_response, no_content, response, static_auth, Body, MockTransport, RecordingSleeper,
 };
+use serde_json::Value;
 use sipgate_flow::rest::{
     Announcement, BlockAnonymousTarget, Call, ChannelCall, DeleteHistoryEntriesRequest, DeviceKind,
     Dtmf, Fax, HistoryDirection, HistoryEntryKind, HistoryEntryUpdate, HistoryExportRequest,
@@ -22,6 +23,7 @@ use sipgate_flow::rest::{
     VoicemailSettingsUpdate, VoicemailTranscriptionUpdate, MAX_HISTORY_LIMIT, MAX_HISTORY_OFFSET,
     MAX_HISTORY_UPDATE_ENTRIES,
 };
+use sipgate_flow::transport::Method;
 use sipgate_flow::{
     ClientCredentials, Error, OAuth2Client, RestClient, Result, RetryPolicy, RetryPolicy as Policy,
     StaticToken, Token, TokenSource,
@@ -3240,5 +3242,1183 @@ mod contacts {
         assert!(query.clone().with_limit(MAX_CONTACT_PAGE_LIMIT).is_ok());
         assert!(query.clone().with_limit(0).is_err());
         assert!(query.with_limit(MAX_CONTACT_PAGE_LIMIT + 1).is_err());
+    }
+
+    // --- REST v2 account-administration surface (#181) ---
+
+    const API_V2: &str = "https://api.sipgate.com/v2";
+
+    fn assert_requests(transport: &MockTransport, expected: &[(Method, &str, Option<Value>)]) {
+        let calls = transport.calls();
+        assert_eq!(calls.len(), expected.len(), "unexpected call inventory");
+        for (index, (call, (method, url, body))) in calls.iter().zip(expected).enumerate() {
+            assert_eq!(call.method, *method, "method at call {index}");
+            let expected_url = if url.starts_with("https://") {
+                (*url).to_owned()
+            } else {
+                format!("{API_V2}{url}")
+            };
+            assert_eq!(call.url, expected_url, "URL at call {index}");
+            match body {
+                Some(body) => assert_eq!(json_body(&call.body), *body, "body at call {index}"),
+                None => assert_eq!(call.body, Body::Empty, "body at call {index}"),
+            }
+        }
+    }
+
+    fn empty_items() -> Value {
+        serde_json::json!({"items":[]})
+    }
+
+    fn notification_bodies() -> [sipgate_flow::rest::NotificationRequest; 8] {
+        use sipgate_flow::rest::NotificationRequest;
+
+        let call = |target: NotificationTarget| {
+            let request = target.request();
+            request
+                .with_cause("MISSED")
+                .with_direction("INCOMING")
+                .with_endpoint_id("e0")
+                .expect("endpoint")
+        };
+        let fax_direction = |request: NotificationRequest| {
+            request
+                .with_direction("INCOMING")
+                .with_faxline_id("f0")
+                .expect("faxline")
+        };
+        [
+            call(NotificationTarget::Email),
+            call(NotificationTarget::Sms),
+            fax_direction(NotificationRequest::email("a@b.c").expect("email")),
+            NotificationRequest::email("a@b.c")
+                .expect("email")
+                .with_faxline_id("f0")
+                .expect("faxline"),
+            fax_direction(
+                NotificationRequest::new()
+                    .with_number("+4915112345678")
+                    .expect("sms"),
+            ),
+            NotificationRequest::email("a@b.c")
+                .expect("email")
+                .with_endpoint_id("e0")
+                .expect("endpoint"),
+            NotificationRequest::email("a@b.c")
+                .expect("email")
+                .with_voicemail_id("v0")
+                .expect("voicemail"),
+            NotificationRequest::new()
+                .with_number("+4915112345678")
+                .expect("sms")
+                .with_voicemail_id("v0")
+                .expect("voicemail"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn notification_kinds_reject_missing_swagger_fields_before_the_wire() {
+        use sipgate_flow::rest::NotificationRequest;
+
+        let (transport, _, client) = harness();
+        let sms = NotificationRequest::new()
+            .with_number("+4915112345678")
+            .expect("sms");
+        for field in ["cause", "direction", "endpointId"] {
+            let request = match field {
+                "cause" => NotificationRequest::email("a@b.c")
+                    .expect("email")
+                    .with_direction("INCOMING")
+                    .with_endpoint_id("e0")
+                    .expect("endpoint"),
+                "direction" => NotificationRequest::email("a@b.c")
+                    .expect("email")
+                    .with_cause("MISSED")
+                    .with_endpoint_id("e0")
+                    .expect("endpoint"),
+                _ => NotificationRequest::email("a@b.c")
+                    .expect("email")
+                    .with_cause("MISSED")
+                    .with_direction("INCOMING"),
+            };
+            assert!(matches!(
+                client.add_call_email_notification("w0", &request).await,
+                Err(Error::Validation { field: got, .. }) if got == field
+            ));
+        }
+
+        let missing_faxline = NotificationRequest::email("a@b.c")
+            .expect("email")
+            .with_direction("INCOMING");
+        assert!(matches!(
+            client
+                .add_fax_email_notification("w0", &missing_faxline)
+                .await,
+            Err(Error::Validation {
+                field: "faxlineId",
+                ..
+            })
+        ));
+        let missing_voicemail = NotificationRequest::new()
+            .with_number("+4915112345678")
+            .expect("sms");
+        assert!(matches!(
+            client
+                .add_voicemail_sms_notification("w0", &missing_voicemail)
+                .await,
+            Err(Error::Validation {
+                field: "voicemailId",
+                ..
+            })
+        ));
+        assert!(matches!(
+            client.add_call_sms_notification("w0", &sms).await,
+            Err(Error::Validation { field: "cause", .. })
+        ));
+        assert_eq!(transport.call_count(), 0);
+    }
+
+    enum NotificationTarget {
+        Email,
+        Sms,
+    }
+
+    impl NotificationTarget {
+        fn request(self) -> sipgate_flow::rest::NotificationRequest {
+            use sipgate_flow::rest::NotificationRequest;
+
+            match self {
+                Self::Email => NotificationRequest::email("a@b.c").expect("email"),
+                Self::Sms => NotificationRequest::new()
+                    .with_number("+4915112345678")
+                    .expect("sms"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn account_addresses_and_app_endpoints_use_documented_paths() {
+        use sipgate_flow::rest::{AccountVerification, AddressUpdate};
+
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(
+            &serde_json::json!({"company":"Love sipgate","verified":true}),
+        ));
+        transport.push_response(no_content());
+        transport.push_response(json_response(
+            &serde_json::json!({"amount":35000,"currency":"EUR"}),
+        ));
+        transport.push_response(json_response(&empty_items()));
+        transport.push_response(json_response(&serde_json::json!({"itemCount":2})));
+        transport.push_response(json_response(
+            &serde_json::json!({"addressId":"1","city":"Berlin"}),
+        ));
+        transport.push_response(no_content());
+        transport.push_response(json_response(&empty_items()));
+        transport.push_response(json_response(&empty_items()));
+        transport.push_response(no_content());
+        for _ in 0..3 {
+            transport.push_response(json_response(&serde_json::json!({"response":true})));
+        }
+        transport.push_response(json_response(&empty_items()));
+        transport.push_response(json_response(&serde_json::json!({"hello":"world"})));
+
+        assert!(client.admin_account().await.expect("account").verified);
+        client
+            .verify_account(&AccountVerification::new("ABC123").expect("code"))
+            .await
+            .expect("verify");
+        assert_eq!(
+            client.admin_balance().await.expect("balance").currency,
+            "EUR"
+        );
+        assert_eq!(client.addresses().await.expect("addresses"), []);
+        assert_eq!(client.address_count().await.expect("count").item_count, 2);
+        assert_eq!(client.address(1).await.expect("address").city, "Berlin");
+        client
+            .update_address(
+                1,
+                &AddressUpdate::new("Berlin", "DE", "10115").expect("update"),
+            )
+            .await
+            .expect("update");
+        assert_eq!(client.address_numbers(1).await.expect("numbers"), []);
+        assert_eq!(client.app_events().await.expect("events"), []);
+        client.delete_app_event(1).await.expect("delete event");
+        client.app_links().await.expect("links");
+        client.app_properties().await.expect("properties");
+        client.app_tacs().await.expect("tacs");
+        assert_eq!(client.app_users().await.expect("users"), []);
+        client.translations("de_DE").await.expect("translations");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "https://api.sipgate.com/v2/account", None),
+                (
+                    Method::Put,
+                    "https://api.sipgate.com/v2/account/verified",
+                    Some(serde_json::json!({"verificationCode":"ABC123"})),
+                ),
+                (Method::Get, "https://api.sipgate.com/v2/balance", None),
+                (Method::Get, "https://api.sipgate.com/v2/addresses", None),
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/addresses/itemCount",
+                    None,
+                ),
+                (Method::Get, "https://api.sipgate.com/v2/addresses/1", None),
+                (
+                    Method::Put,
+                    "https://api.sipgate.com/v2/addresses/1",
+                    Some(
+                        serde_json::json!({"city":"Berlin","countrycode":"DE","postcode":"10115"}),
+                    ),
+                ),
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/addresses/1/numbers",
+                    None,
+                ),
+                (Method::Get, "https://api.sipgate.com/v2/app/events", None),
+                (
+                    Method::Delete,
+                    "https://api.sipgate.com/v2/app/events/1",
+                    None,
+                ),
+                (Method::Get, "https://api.sipgate.com/v2/app/links", None),
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/app/properties",
+                    None,
+                ),
+                (Method::Get, "https://api.sipgate.com/v2/app/tacs", None),
+                (Method::Get, "https://api.sipgate.com/v2/app/users", None),
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/translations/de_DE",
+                    None,
+                ),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn user_endpoints_use_documented_paths() {
+        use sipgate_flow::rest::{AdminToggle, DefaultDeviceUpdate, LocationUpdate};
+
+        let (transport, _, client) = harness();
+        for _ in 0..6 {
+            transport.push_response(json_response(&empty_items()));
+        }
+        let _ = client.users().await.expect("users");
+        let _ = client.user("w0").await.expect("user");
+        client.delete_user("w0").await.expect("delete user");
+        client
+            .set_user_busy_on_busy("w0", &AdminToggle::enabled(true))
+            .await
+            .expect("busy");
+        client
+            .set_user_default_device("w0", &DefaultDeviceUpdate::new("e0").expect("device"))
+            .await
+            .expect("default");
+        client
+            .set_user_location("w0", &LocationUpdate::new(13))
+            .await
+            .expect("location");
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/users", None),
+                (Method::Get, "/users/w0", None),
+                (Method::Delete, "/users/w0", None),
+                (
+                    Method::Put,
+                    "/users/w0/busyonbusy",
+                    Some(serde_json::json!({"enabled":true})),
+                ),
+                (
+                    Method::Put,
+                    "/users/w0/defaultdevice",
+                    Some(serde_json::json!({"deviceId":"e0"})),
+                ),
+                (
+                    Method::Put,
+                    "/users/w0/location",
+                    Some(serde_json::json!({"addressId":13})),
+                ),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn groups_and_metadata_endpoints_use_documented_paths() {
+        let (transport, _, client) = harness();
+        for _ in 0..11 {
+            transport.push_response(json_response(&empty_items()));
+        }
+        let _ = client.groups().await.expect("groups");
+        let _ = client.group("g0").await.expect("group");
+        client
+            .add_device_to_group("g0", &RouteDeviceRequest::new("e0").expect("route"))
+            .await
+            .expect("add");
+        client
+            .remove_device_from_group("g0", "e0")
+            .await
+            .expect("remove");
+        let _ = client.group_faxlines("g0").await.expect("faxlines");
+        let _ = client.group_numbers("g0").await.expect("numbers");
+        let _ = client.group_users("g0").await.expect("users");
+        let _ = client.group_voicemails("g0").await.expect("voicemail");
+        let _ = client.group_faxline_catalogue().await.expect("catalogue");
+        let _ = client.group_faxline_caller_id("f0").await.expect("caller");
+        let _ = client
+            .group_faxline_numbers("f0")
+            .await
+            .expect("fax numbers");
+        let _ = client.api_urls().await.expect("URLs");
+        let _ = client.webhook_log().await.expect("log");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/groups", None),
+                (Method::Get, "/groups/g0", None),
+                (
+                    Method::Post,
+                    "/groups/g0/devices",
+                    Some(serde_json::json!({"deviceId":"e0"})),
+                ),
+                (Method::Delete, "/groups/g0/devices/e0", None),
+                (Method::Get, "/groups/g0/faxlines", None),
+                (Method::Get, "/groups/g0/numbers", None),
+                (Method::Get, "/groups/g0/users", None),
+                (Method::Get, "/groups/g0/voicemail", None),
+                (Method::Get, "/groupfaxlines", None),
+                (Method::Get, "/groupfaxlines/f0/callerid", None),
+                (Method::Get, "/groupfaxlines/f0/numbers", None),
+                (Method::Get, "/", None),
+                (Method::Get, "/log/webhooks", None),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_endpoints_use_documented_paths() {
+        use sipgate_flow::rest::{
+            ChannelDevicesUpdate, ChannelEventQuery, ChannelNameUpdate, ChannelUsersUpdate,
+        };
+
+        let (transport, _, client) = harness();
+        for response in [
+            empty_items(),
+            empty_items(),
+            serde_json::json!({"events":[],"limit":50}),
+        ] {
+            transport.push_response(json_response(&response));
+        }
+        transport.push_response(no_content());
+        transport.push_response(json_response(&empty_items()));
+        transport.push_response(no_content());
+        let _ = client.channels().await.expect("channels");
+        client.delete_channel("c0").await.expect("delete channel");
+        let _ = client
+            .channel_events(
+                "c0",
+                &ChannelEventQuery::new().with_limit(50).expect("limit"),
+            )
+            .await
+            .expect("events");
+        client
+            .set_channel_name("c0", &ChannelNameUpdate::new("Support").expect("name"))
+            .await
+            .expect("name");
+        let _ = client
+            .set_channel_users("c0", &ChannelUsersUpdate::new(["w0"]).expect("users"))
+            .await
+            .expect("users");
+        client
+            .set_channel_user_devices(
+                "c0",
+                "w0",
+                &ChannelDevicesUpdate::new(["e0"]).expect("devices"),
+            )
+            .await
+            .expect("devices");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/channels", None),
+                (Method::Delete, "/channels/c0", None),
+                (Method::Get, "/channels/c0/events?limit=50", None),
+                (
+                    Method::Put,
+                    "/channels/c0/name",
+                    Some(serde_json::json!({"name":"Support"})),
+                ),
+                (
+                    Method::Put,
+                    "/channels/c0/users",
+                    Some(serde_json::json!({"userIds":["w0"]})),
+                ),
+                (
+                    Method::Put,
+                    "/channels/c0/users/w0/devices",
+                    Some(serde_json::json!({"deviceIds":["e0"]})),
+                ),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn faxline_endpoints_use_documented_paths() {
+        use sipgate_flow::rest::AdminValueRequest;
+
+        let (transport, _, client) = harness();
+        for _ in 0..8 {
+            transport.push_response(json_response(&empty_items()));
+        }
+        let _ = client.user_faxlines("w0").await.expect("faxlines");
+        let _ = client.create_faxline("w0").await.expect("create fax");
+        client.delete_faxline("w0", "f0").await.expect("delete fax");
+        client
+            .update_faxline_alias("w0", "f0", &AdminValueRequest::alias("Fax").expect("alias"))
+            .await
+            .expect("alias");
+        let _ = client.faxline_caller_id("w0", "f0").await.expect("caller");
+        client
+            .set_faxline_caller_id(
+                "w0",
+                "f0",
+                &AdminValueRequest::new("+49152").expect("caller"),
+            )
+            .await
+            .expect("caller");
+        let _ = client
+            .faxline_numbers("w0", "f0")
+            .await
+            .expect("fax numbers");
+        client
+            .set_faxline_tagline(
+                "w0",
+                "f0",
+                &AdminValueRequest::new("Example Ltd.").expect("tagline"),
+            )
+            .await
+            .expect("tagline");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/w0/faxlines", None),
+                (Method::Post, "/w0/faxlines", None),
+                (Method::Delete, "/w0/faxlines/f0", None),
+                (
+                    Method::Put,
+                    "/w0/faxlines/f0",
+                    Some(serde_json::json!({"alias":"Fax"})),
+                ),
+                (Method::Get, "/w0/faxlines/f0/callerid", None),
+                (
+                    Method::Put,
+                    "/w0/faxlines/f0/callerid",
+                    Some(serde_json::json!({"value":"+49152"})),
+                ),
+                (Method::Get, "/w0/faxlines/f0/numbers", None),
+                (
+                    Method::Put,
+                    "/w0/faxlines/f0/tagline",
+                    Some(serde_json::json!({"value":"Example Ltd."})),
+                ),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn number_endpoints_use_documented_paths() {
+        use sipgate_flow::rest::{AdminPagingQuery, NumberSettingsUpdate, QuickDialRequest};
+
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&empty_items()));
+        transport.push_response(no_content());
+        transport.push_response(json_response(
+            &serde_json::json!({"id":"n0","number":"+49151"}),
+        ));
+        transport.push_response(json_response(&serde_json::json!({"valid":true})));
+        transport.push_response(no_content());
+        transport.push_response(json_response(&serde_json::json!({"id":"abc123"})));
+        transport.push_response(json_response(&empty_items()));
+        let _ = client
+            .numbers(&AdminPagingQuery::new().with_limit(100).expect("page"))
+            .await
+            .expect("numbers");
+        client
+            .update_number("n0", &NumberSettingsUpdate::new().with_endpoint_id("p0"))
+            .await
+            .expect("number update");
+        let _ = client
+            .create_quick_dial(
+                &QuickDialRequest::new("w0")
+                    .expect("user")
+                    .with_number("42")
+                    .expect("number"),
+            )
+            .await
+            .expect("quick");
+        client.validate_quick_dial("42").await.expect("validate");
+        client
+            .delete_quick_dial("abc123")
+            .await
+            .expect("delete quick");
+        client
+            .update_quick_dial("abc123", &QuickDialRequest::new("w0").expect("user"))
+            .await
+            .expect("update quick");
+        let _ = client.user_numbers("w0").await.expect("user numbers");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/numbers?limit=100", None),
+                (
+                    Method::Put,
+                    "/numbers/n0",
+                    Some(serde_json::json!({"endpointId":"p0"})),
+                ),
+                (
+                    Method::Post,
+                    "/numbers/quickdial",
+                    Some(serde_json::json!({"userId":"w0","number":"42"})),
+                ),
+                (Method::Get, "/numbers/quickdial/validation/42", None),
+                (Method::Delete, "/numbers/quickdial/abc123", None),
+                (
+                    Method::Put,
+                    "/numbers/quickdial/abc123",
+                    Some(serde_json::json!({"userId":"w0"})),
+                ),
+                (Method::Get, "/w0/numbers", None),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn voicemails_blacklist_and_restrictions_use_documented_paths() {
+        use sipgate_flow::rest::{
+            AdminToggle, BlacklistEntryRequest, CallRestrictionsQuery, RestrictionsQuery,
+        };
+
+        let (transport, _, client) = harness();
+        for _ in 0..8 {
+            transport.push_response(json_response(&empty_items()));
+        }
+        let _ = client.voicemails().await.expect("voicemails");
+        let _ = client.voicemail("v0").await.expect("voicemail");
+        let _ = client.incoming_blacklist().await.expect("blacklist");
+        let _ = client
+            .add_incoming_blacklist(&BlacklistEntryRequest::new("4915112345678").expect("entry"))
+            .await
+            .expect("add blacklist");
+        client
+            .remove_incoming_blacklist("+4915112345678")
+            .await
+            .expect("remove blacklist");
+        let _ = client
+            .call_restrictions(&CallRestrictionsQuery::new())
+            .await
+            .expect("restrictions");
+        client
+            .set_call_restriction("w0", "roaming", &AdminToggle::enabled(true))
+            .await
+            .expect("set restriction");
+        let _ = client
+            .restrictions(&RestrictionsQuery::new("w0").expect("query"))
+            .await
+            .expect("restrictions");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/voicemails", None),
+                (Method::Get, "/voicemails/v0", None),
+                (Method::Get, "/blacklist/incoming", None),
+                (
+                    Method::Post,
+                    "/blacklist/incoming",
+                    Some(serde_json::json!({"phoneNumber":"+4915112345678","isBlock":false})),
+                ),
+                (Method::Delete, "/blacklist/incoming/+4915112345678", None),
+                (Method::Get, "/callrestrictions", None),
+                (
+                    Method::Post,
+                    "/w0/callrestrictions/roaming",
+                    Some(serde_json::json!({"enabled":true})),
+                ),
+                (Method::Get, "/restrictions?userId=w0", None),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn portings_and_auto_recordings_use_documented_paths() {
+        use sipgate_flow::rest::{AutoRecordingGreetingUpload, AutoRecordingSettingsUpdate};
+
+        let (transport, _, client) = harness();
+        for _ in 0..5 {
+            transport.push_response(json_response(&empty_items()));
+        }
+        let _ = client.portings().await.expect("portings");
+        let _ = client.porting(1).await.expect("porting");
+        client.revoke_porting(1).await.expect("revoke");
+        let _ = client.auto_recording_greeting().await.expect("greeting");
+        client
+            .add_auto_recording_greeting(
+                &AutoRecordingGreetingUpload::new("a.mp3", "RG8u").expect("upload"),
+            )
+            .await
+            .expect("add greeting");
+        client
+            .delete_auto_recording_greeting("42")
+            .await
+            .expect("delete greeting");
+        let _ = client
+            .auto_recording_settings("p0")
+            .await
+            .expect("settings");
+        client
+            .set_auto_recording_settings("p0", &AutoRecordingSettingsUpdate::new(true))
+            .await
+            .expect("set recording");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/portings", None),
+                (Method::Get, "/portings/1", None),
+                (Method::Delete, "/portings/1", None),
+                (Method::Get, "/autorecordings/greetings", None),
+                (
+                    Method::Post,
+                    "/autorecordings/greetings",
+                    Some(serde_json::json!({"filename":"a.mp3","base64Content":"RG8u"})),
+                ),
+                (Method::Delete, "/autorecordings/greetings/42", None),
+                (Method::Get, "/autorecordings/p0/settings", None),
+                (
+                    Method::Put,
+                    "/autorecordings/p0/settings",
+                    Some(serde_json::json!({"active":true})),
+                ),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn notification_endpoints_use_documented_paths() {
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(
+            &serde_json::json!({"call":[],"fax":[],"sms":[],"voicemail":[]}),
+        ));
+        let _ = client.notifications("w0").await.expect("notifications");
+        let [call_email, call_sms, fax_email, fax_report, fax_sms, sms_email, voicemail_email, voicemail_sms] =
+            notification_bodies();
+        client
+            .add_call_email_notification("w0", &call_email)
+            .await
+            .expect("call email");
+        client
+            .add_call_sms_notification("w0", &call_sms)
+            .await
+            .expect("call sms");
+        client
+            .add_fax_email_notification("w0", &fax_email)
+            .await
+            .expect("fax email");
+        client
+            .add_fax_report_email_notification("w0", &fax_report)
+            .await
+            .expect("fax report");
+        client
+            .add_fax_sms_notification("w0", &fax_sms)
+            .await
+            .expect("fax sms");
+        client
+            .add_sms_email_notification("w0", &sms_email)
+            .await
+            .expect("sms email");
+        client
+            .add_voicemail_email_notification("w0", &voicemail_email)
+            .await
+            .expect("voicemail email");
+        client
+            .add_voicemail_sms_notification("w0", &voicemail_sms)
+            .await
+            .expect("voicemail sms");
+        client
+            .delete_notification("w0", "abc123")
+            .await
+            .expect("delete notification");
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/w0/notifications", None),
+                (
+                    Method::Post,
+                    "/w0/notifications/call/email",
+                    Some(
+                        serde_json::json!({"cause":"MISSED","direction":"INCOMING","email":"a@b.c","endpointId":"e0"}),
+                    ),
+                ),
+                (
+                    Method::Post,
+                    "/w0/notifications/call/sms",
+                    Some(
+                        serde_json::json!({"cause":"MISSED","direction":"INCOMING","number":"+4915112345678","endpointId":"e0"}),
+                    ),
+                ),
+                (
+                    Method::Post,
+                    "/w0/notifications/fax/email",
+                    Some(
+                        serde_json::json!({"direction":"INCOMING","email":"a@b.c","faxlineId":"f0"}),
+                    ),
+                ),
+                (
+                    Method::Post,
+                    "/w0/notifications/fax/report",
+                    Some(serde_json::json!({"email":"a@b.c","faxlineId":"f0"})),
+                ),
+                (
+                    Method::Post,
+                    "/w0/notifications/fax/sms",
+                    Some(
+                        serde_json::json!({"direction":"INCOMING","number":"+4915112345678","faxlineId":"f0"}),
+                    ),
+                ),
+                (
+                    Method::Post,
+                    "/w0/notifications/sms/email",
+                    Some(serde_json::json!({"email":"a@b.c","endpointId":"e0"})),
+                ),
+                (
+                    Method::Post,
+                    "/w0/notifications/voicemail/email",
+                    Some(serde_json::json!({"email":"a@b.c","voicemailId":"v0"})),
+                ),
+                (
+                    Method::Post,
+                    "/w0/notifications/voicemail/sms",
+                    Some(serde_json::json!({"number":"+4915112345678","voicemailId":"v0"})),
+                ),
+                (Method::Delete, "/w0/notifications/abc123", None),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn account_sipgate_io_settings_use_documented_paths() {
+        use sipgate_flow::rest::AccountSipgateIoSettings;
+
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(
+            &serde_json::json!({"incomingUrl":"https://a/in"}),
+        ));
+        transport.push_response(no_content());
+        let _ = client.account_sipgate_io().await.expect("io");
+        client
+            .set_account_sipgate_io(
+                &AccountSipgateIoSettings::new("https://a/in", "https://a/out").expect("settings"),
+            )
+            .await
+            .expect("set io");
+
+        assert_requests(
+            &transport,
+            &[
+                (Method::Get, "/settings/sipgateio", None),
+                (
+                    Method::Put,
+                    "/settings/sipgateio",
+                    Some(
+                        serde_json::json!({"incomingUrl":"https://a/in","outgoingUrl":"https://a/out","log":false}),
+                    ),
+                ),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_endpoints_use_documented_paths() {
+        use sipgate_flow::rest::OAuthClientRequest;
+
+        let (transport, _, client) = harness();
+        transport.push_response(json_response(&serde_json::json!({"sub":"w0"})));
+        assert_eq!(client.userinfo().await.expect("userinfo").sub, "w0");
+        transport.push_response(json_response(&serde_json::json!({"data":[]})));
+        assert_eq!(client.oauth_clients().await.expect("clients"), []);
+        let oauth =
+            OAuthClientRequest::new("App", "Example", "https://x/p", "https://x/t").expect("oauth");
+        for response in [
+            serde_json::json!({"clientId":"c0"}),
+            serde_json::json!({"clientId":"c0"}),
+            serde_json::json!({"clientId":"c0"}),
+        ] {
+            transport.push_response(json_response(&response));
+        }
+        assert_eq!(
+            client
+                .create_oauth_client(&oauth)
+                .await
+                .expect("create")
+                .client_id,
+            "c0"
+        );
+        assert_eq!(
+            client.oauth_client("c0").await.expect("get").client_id,
+            "c0"
+        );
+        assert_eq!(
+            client
+                .update_oauth_client("c0", &oauth)
+                .await
+                .expect("update")
+                .client_id,
+            "c0"
+        );
+        transport.push_response(no_content());
+        client.delete_oauth_client("c0").await.expect("delete");
+        transport.push_response(json_response(
+            &serde_json::json!({"privacyUrl":"https://x/p"}),
+        ));
+        assert_eq!(
+            client
+                .oauth_client_gdpr("c0")
+                .await
+                .expect("gdpr")
+                .privacy_url,
+            "https://x/p"
+        );
+
+        let body = Some(
+            serde_json::json!({"name":"App","description":"Example","privacyUrl":"https://x/p","termsUrl":"https://x/t","redirectUris":[],"webOrigins":[]}),
+        );
+        assert_requests(
+            &transport,
+            &[
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/authorization/userinfo",
+                    None,
+                ),
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/authorization/oauth2/clients",
+                    None,
+                ),
+                (
+                    Method::Post,
+                    "https://api.sipgate.com/v2/authorization/oauth2/clients",
+                    body.clone(),
+                ),
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/authorization/oauth2/clients/c0",
+                    None,
+                ),
+                (
+                    Method::Put,
+                    "https://api.sipgate.com/v2/authorization/oauth2/clients/c0",
+                    body,
+                ),
+                (
+                    Method::Delete,
+                    "https://api.sipgate.com/v2/authorization/oauth2/clients/c0",
+                    None,
+                ),
+                (
+                    Method::Get,
+                    "https://api.sipgate.com/v2/authorization/oauth2/clients/c0/gdpr",
+                    None,
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn administration_limits_are_checked_just_inside_and_outside() {
+        use sipgate_flow::rest::{
+            AccountSipgateIoSettings, AccountVerification, AddressUpdate, AdminPagingQuery,
+            AdminValueRequest, AutoRecordingGreetingUpload, BlacklistEntryRequest,
+            ChannelDevicesUpdate, ChannelEventQuery, ChannelNameUpdate, ChannelUsersUpdate,
+            DefaultDeviceUpdate, LocationUpdate, NotificationRequest, OAuthClientRequest,
+            QuickDialRequest, RestrictionsQuery, MAX_ADMIN_PAGE_LIMIT,
+            MAX_AUTO_RECORDING_GREETING_BASE64_LEN, MAX_CHANNEL_EVENT_LIMIT,
+        };
+        let field_limit = 1024 * 1024;
+
+        assert!(AdminPagingQuery::new()
+            .with_limit(MAX_ADMIN_PAGE_LIMIT)
+            .is_ok());
+        assert!(AdminPagingQuery::new()
+            .with_limit(MAX_ADMIN_PAGE_LIMIT + 1)
+            .is_err());
+        assert!(AdminPagingQuery::new()
+            .with_offset(i64::from(i32::MAX))
+            .is_ok());
+        assert!(AdminPagingQuery::new()
+            .with_offset(i64::from(i32::MAX) + 1)
+            .is_err());
+        assert!(AdminPagingQuery::new().with_offset(-1).is_err());
+        assert!(ChannelEventQuery::new()
+            .with_limit(MAX_CHANNEL_EVENT_LIMIT)
+            .is_ok());
+        assert!(ChannelEventQuery::new()
+            .with_limit(MAX_CHANNEL_EVENT_LIMIT + 1)
+            .is_err());
+        assert!(ChannelEventQuery::new().with_limit(1).is_ok());
+        assert!(ChannelEventQuery::new().with_limit(0).is_err());
+        let max = "A".repeat(MAX_AUTO_RECORDING_GREETING_BASE64_LEN);
+        assert!(AutoRecordingGreetingUpload::new("a.mp3", &max).is_ok());
+        let over = "A".repeat(MAX_AUTO_RECORDING_GREETING_BASE64_LEN + 1);
+        assert!(AutoRecordingGreetingUpload::new("a.mp3", &over).is_err());
+
+        assert!(AccountVerification::new("a".repeat(field_limit)).is_ok());
+        assert!(AccountVerification::new("a".repeat(field_limit + 1)).is_err());
+        assert!(AddressUpdate::new("a".repeat(field_limit), "DE", "1").is_ok());
+        assert!(AddressUpdate::new("a".repeat(field_limit + 1), "DE", "1").is_err());
+        assert!(AdminValueRequest::alias("a".repeat(field_limit)).is_ok());
+        assert!(AdminValueRequest::alias("a".repeat(field_limit + 1)).is_err());
+        assert!(AdminValueRequest::new("a".repeat(field_limit)).is_ok());
+        assert!(AdminValueRequest::new("a".repeat(field_limit + 1)).is_err());
+        assert!(BlacklistEntryRequest::new("1234567").is_ok());
+        assert!(BlacklistEntryRequest::new("123456").is_err());
+        assert!(BlacklistEntryRequest::new("1234567890123456").is_err());
+        assert!(ChannelNameUpdate::new("a".repeat(field_limit)).is_ok());
+        assert!(ChannelNameUpdate::new("a".repeat(field_limit + 1)).is_err());
+        assert!(ChannelUsersUpdate::new(["a/b"]).is_err());
+        assert!(ChannelDevicesUpdate::new(["a/b"]).is_err());
+        assert!(DefaultDeviceUpdate::new("a".repeat(200)).is_ok());
+        assert!(DefaultDeviceUpdate::new("a".repeat(201)).is_err());
+        assert!(LocationUpdate::try_new(i64::from(i32::MAX)).is_ok());
+        assert!(LocationUpdate::try_new(i64::from(i32::MAX) + 1).is_err());
+        assert!(QuickDialRequest::new("w0").is_ok());
+        assert!(QuickDialRequest::new("w0")
+            .expect("user")
+            .with_number("a".repeat(field_limit))
+            .is_ok());
+        assert!(QuickDialRequest::new("w0")
+            .expect("user")
+            .with_number("a".repeat(field_limit + 1))
+            .is_err());
+        assert!(RestrictionsQuery::new("w0")
+            .expect("user")
+            .with_restrictions(["a".repeat(field_limit)])
+            .is_ok());
+        assert!(RestrictionsQuery::new("w0")
+            .expect("user")
+            .with_restrictions(["a".repeat(field_limit + 1)])
+            .is_err());
+
+        let email = NotificationRequest::email("a@b.c").expect("email");
+        assert!(email.clone().with_email("a".repeat(field_limit)).is_err());
+        assert!(email.with_cause("a".repeat(field_limit)).to_json()["cause"].is_string());
+        assert!(OAuthClientRequest::new("A", "B", "https://a/p", "https://a/t").is_ok());
+        assert!(OAuthClientRequest::new(
+            "a".repeat(field_limit + 1),
+            "B",
+            "https://a/p",
+            "https://a/t"
+        )
+        .is_err());
+        assert!(
+            AccountSipgateIoSettings::new("https://a/in", "https://a/out")
+                .expect("settings")
+                .with_whitelist(["w0"])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn administration_builder_branches_cover_the_documented_shapes() {
+        use sipgate_flow::rest::{
+            AddressUpdate, AdminFlag, AdminPagingQuery, AdminToggle, AdminValueRequest,
+            AutoRecordingGreetingUpload, AutoRecordingSettingsUpdate, BlacklistEntryRequest,
+            CallRestrictionsQuery, ChannelDevicesUpdate, ChannelEventQuery, ChannelNameUpdate,
+            ChannelUsersUpdate, LocationUpdate, NotificationRequest, NumberSettingsUpdate,
+            QuickDialRequest, RestrictionsQuery,
+        };
+
+        let address = AddressUpdate::new("Berlin", "DE", "10115")
+            .expect("address")
+            .with_address1("Street")
+            .with_address2("Flat")
+            .with_number("1")
+            .with_state("BE")
+            .with_street("Example");
+        assert_eq!(address.to_json()["street"], "Example");
+        assert!(AdminValueRequest::new("v").is_ok());
+        assert_eq!(
+            ChannelNameUpdate::new("name").expect("name").to_json()["name"],
+            "name"
+        );
+        assert_eq!(AdminToggle::enabled(false).to_json()["enabled"], false);
+        assert!(QuickDialRequest::new("w0").expect("quick").to_json()["number"].is_null());
+        assert_eq!(
+            QuickDialRequest::new("w0")
+                .expect("quick")
+                .with_number("42")
+                .expect("number")
+                .to_json()["number"],
+            "42"
+        );
+        assert!(ChannelUsersUpdate::new(["w0"]).is_ok());
+        assert!(ChannelDevicesUpdate::new(["e0"]).is_ok());
+        let update = NumberSettingsUpdate::new()
+            .with_quick_dial(true)
+            .with_release_for_mnp(true);
+        assert_eq!(update.to_json()["quickDial"], true);
+        assert_eq!(update.to_json()["releaseForMnp"], true);
+        assert_eq!(
+            CallRestrictionsQuery::new()
+                .with_user_ids(["w0"])
+                .expect("ids")
+                .path(),
+            "/v2/callrestrictions?userIds=w0"
+        );
+        assert_eq!(
+            RestrictionsQuery::new("w0")
+                .expect("user")
+                .with_restrictions(["R"])
+                .expect("restrictions")
+                .path(),
+            "/v2/restrictions?userId=w0&restriction=R"
+        );
+        assert_eq!(
+            AdminPagingQuery::new()
+                .with_offset(2)
+                .expect("offset")
+                .with_limit(3)
+                .expect("limit")
+                .path(),
+            "/v2/numbers?offset=2&limit=3"
+        );
+        assert_eq!(
+            ChannelEventQuery::new()
+                .with_position("next")
+                .expect("position")
+                .with_include_all_users(true)
+                .path(),
+            "position=next&includeAllUsers=true"
+        );
+        assert!(!AdminFlag::default().enabled());
+        assert_eq!(
+            LocationUpdate::try_new(0).expect("location").to_json()["addressId"],
+            0
+        );
+        assert_eq!(
+            AutoRecordingSettingsUpdate::new(false).to_json()["active"],
+            false
+        );
+        assert_eq!(
+            BlacklistEntryRequest::new("492117654321")
+                .expect("blacklist")
+                .with_block(true)
+                .to_json()["isBlock"],
+            true
+        );
+        assert!(AutoRecordingGreetingUpload::new("a.mp3", "RG8u").is_ok());
+
+        let notification = NotificationRequest::new()
+            .with_email("a@b.c")
+            .expect("email")
+            .with_number("+4915112345678")
+            .expect("sms")
+            .with_endpoint_id("e0")
+            .expect("endpoint")
+            .with_faxline_id("f0")
+            .expect("faxline")
+            .with_voicemail_id("v0")
+            .expect("voicemail")
+            .with_cause("MISSED")
+            .with_direction("INCOMING");
+        assert_eq!(notification.to_json()["cause"], "MISSED");
+    }
+
+    #[test]
+    fn account_and_oauth_builder_branches_cover_the_documented_shapes() {
+        use sipgate_flow::rest::{AccountSipgateIoSettings, OAuthClientRequest};
+
+        let oauth = OAuthClientRequest::new("A", "B", "https://a/p", "https://a/t")
+            .expect("oauth")
+            .with_redirect_uris(["https://a/cb"])
+            .expect("redirect")
+            .with_web_origins(["https://a"])
+            .expect("origin");
+        assert_eq!(oauth.to_json()["redirectUris"][0], "https://a/cb");
+        let io = AccountSipgateIoSettings::new("https://a/in", "https://a/out")
+            .expect("settings")
+            .with_log(true)
+            .with_push_api_version(1)
+            .with_whitelist(["w0"])
+            .expect("whitelist");
+        assert_eq!(io.to_json()["pushApiVersion"], 1);
+        assert_eq!(io.to_json()["whitelist"][0], "w0");
+    }
+
+    #[test]
+    fn administration_decoder_branches_cover_the_documented_shapes() {
+        use sipgate_flow::rest::{
+            AdminAddress, AdminBalance, AdminChannelEvent, AdminChannelInbox, AdminChannelUser,
+            AdminFaxline, AdminFlag, AdminGroup, AdminGroupUser, AdminItems,
+            AdminNotificationTarget, AdminObject, AdminSimpleGroup, AdminUser, AdminVoicemail,
+            AutoRecordingGreeting, AutoRecordingSettings, BlacklistEntry, CallRestriction,
+            GdprUrls, Porting, PortingNumber, Restriction, UserInfo, VoicemailSettings,
+        };
+
+        let object: AdminObject = serde_json::from_str(r#"{"future":true}"#).expect("object");
+        assert_eq!(object.raw()["future"], true);
+        let _: AdminBalance =
+            serde_json::from_str(r#"{"amount":1,"currency":"EUR"}"#).expect("balance");
+        let _: AdminAddress = serde_json::from_str(
+            r#"{"addressId":"1","type":"VERIFIED","emergencyState":"ACTIVATED","future":1}"#,
+        )
+        .expect("address");
+        let _: AdminUser = serde_json::from_str(r#"{"id":"w0","future":1}"#).expect("user");
+        let _: AdminSimpleGroup = serde_json::from_str(r#"{"id":"g0"}"#).expect("group");
+        let _: AdminGroup = serde_json::from_str(r#"{"id":"g0","voicemails":[]}"#).expect("group");
+        let _: AdminGroupUser = serde_json::from_str(r#"{"id":"w0"}"#).expect("group user");
+        let _: AdminChannelUser =
+            serde_json::from_str(r#"{"id":"w0","deviceIds":["e0"]}"#).expect("channel user");
+        let _: AdminChannelEvent =
+            serde_json::from_str(r#"{"eventId":"e0","type":"CALL"}"#).expect("event");
+        let inbox: AdminChannelInbox =
+            serde_json::from_str(r#"{"events":[],"limit":1,"position":"p"}"#).expect("inbox");
+        assert_eq!(inbox.position, "p");
+        let _: AdminFaxline = serde_json::from_str(r#"{"id":"f0","canSend":true}"#).expect("fax");
+        assert!(!AdminFlag::default().enabled());
+        let restriction: CallRestriction =
+            serde_json::from_str(r#"{"userId":"w0","roaming":true}"#).expect("restriction");
+        assert!(restriction.roaming.enabled());
+        let _: Restriction =
+            serde_json::from_str(r#"{"restriction":"R","value":{}}"#).expect("evaluated");
+        let _: Porting =
+            serde_json::from_str(r#"{"id":"1","numbers":[{"id":"n0"}]}"#).expect("porting");
+        let _: PortingNumber = serde_json::from_str(r#"{"id":"n0"}"#).expect("porting number");
+        let _: AutoRecordingGreeting = serde_json::from_str(r#"{"id":"g0"}"#).expect("greeting");
+        let _: AutoRecordingSettings =
+            serde_json::from_str(r#"{"active":true}"#).expect("settings");
+        let _: AdminNotificationTarget =
+            serde_json::from_str(r#"{"email":"a@b.c"}"#).expect("target");
+        let _: AdminVoicemail = serde_json::from_str(r#"{"id":"v0"}"#).expect("voicemail");
+        let _: VoicemailSettings = serde_json::from_str(r#"{"active":true}"#).expect("settings");
+        let _: UserInfo = serde_json::from_str(r#"{"sub":"w0"}"#).expect("userinfo");
+        let _: GdprUrls = serde_json::from_str(r#"{"privacyUrl":"https://a/p"}"#).expect("gdpr");
+        let _: BlacklistEntry =
+            serde_json::from_str(r#"{"phoneNumber":"+4921","isBlock":true}"#).expect("blacklist");
+        let items: AdminItems<AdminUser> =
+            serde_json::from_str(r#"{"items":[{"id":"w0"}]}"#).expect("items");
+        assert_eq!(items.into_entries()[0].id, "w0");
     }
 }

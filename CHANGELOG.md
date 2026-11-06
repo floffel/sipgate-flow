@@ -27,6 +27,17 @@ with the pre-1.0 reading described in the README section *Versioning*.
   `POST` uncertainty in `Error::Ambiguous`. The TTS request `type` field is now
   `SynthesizeType`, validated and carried by `Other(String)` for values this
   crate does not model; sipgate assigns it no documented semantics.
+* The **remaining REST v2 account-administration tags** (#181): typed
+  `RestClient` operations for `account`, `addresses`, `app`, `authorization`,
+  `users`, `groups`, `channels`, `faxlines`, `numbers`, `voicemails`,
+  `blacklist`, `callrestrictions`, `restrictions`, `portings`,
+  `autorecordings`, `notifications`, `settings`, `urls` and `log`. Path ids,
+  query bounds and request bodies are validated before the wire; list envelopes
+  decode permissively; closed enums carry unknown provider values; and every
+  endpoint has a mock-transport method/path/body test. `Closes #178`, whose
+  surface was a strict subset of #181. The existing phoneline methods already
+  covered the `forwardings` tag. The legacy `sms` caller-id and `rtcm` tags stay
+  tracked in #12.
 * The **current v3 AI webhook configuration surface** (#168): `FlowClient` now
   models `GET`/`POST /v3/webhooks`, `PUT`/`DELETE /v3/webhooks/{configId}` and
   the header sub-resource `POST /v3/webhooks/{configId}/headers` and

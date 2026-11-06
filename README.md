@@ -10,7 +10,7 @@ mixed two of them up. This crate keeps them apart:
 | --- | --- | --- |
 | `flow` | Your webhook **receives** events (`session_start`, `user_speak`, `dtmf_received`, …) and **returns** actions (`speak`, `audio`, `transfer`, …) in the response. There is no separate endpoint to post an action to. Flow can also open a **WebSocket** to you and exchange the same events and actions as JSON messages. | [flow.sipgate.io/api](https://flow.sipgate.io/api/) |
 | `push` | The classic Push API: sipgate POSTs a form-encoded event (`newCall`, `answer`, `hangup`, `dtmf`) and your handler answers with an XML `<Response>` (`Dial`, `Play`, `Gather`, `Reject`, `Hangup`). | [en.sipgate.io/push-api](https://en.sipgate.io/push-api/api-references) |
-| `rest` | The imperative API at `api.sipgate.com/v2`: SMS, fax, outbound calls, and live call control (hangup, DTMF, announcement, recording, hold, mute, transfer). | [api.sipgate.com/v2/doc](https://api.sipgate.com/v2/doc) |
+| `rest` | The imperative API at `api.sipgate.com/v2`: SMS, fax, outbound calls, live call control, and account administration (devices, users, groups, numbers, notifications, OAuth clients, and the nested settings). | [api.sipgate.com/v2/doc](https://api.sipgate.com/v2/doc) |
 
 Every shape was checked against public documentation and is cited in
 **[`docs/contracts.md`](docs/contracts.md)** — including the ones that could not
@@ -251,10 +251,14 @@ in any `Debug` output.
   `type` token is carried by `SynthesizeType` with an `Other(String)` escape
   hatch instead of inventing semantics for it.
 * **Twenty-one REST v2 operations** covering SMS, fax (send + resend), outbound
+* **The REST v2 session and live-call operations** covering SMS, fax (send + resend), outbound
   calls (classic and Neo PBX), voicemail playback, IVR/voicemail recording,
   call listing, hangup, DTMF, announcements, recording, hold, mute, transfer,
-  and the core account-administration reads for devices, contacts, history and
-  phone lines.
+  plus the complete account-administration tags: devices, contacts, history,
+  phonelines, numbers, addresses, users, groups, channels, faxlines, account,
+  notifications, voicemails, portings, blacklist, call restrictions,
+  auto-recordings, sipgate.io settings, webhook logs, app metadata and OAuth
+  authorization clients.
 * **OAuth2 client credentials** with an expiry-aware token cache behind a
   `Mutex` (no `static mut`, no globals), a 60 s refresh margin, and one forced
   refresh on `401`.
@@ -326,10 +330,11 @@ issue, so a caller can see whether their case is covered instead of reading a li
 of decisions — and `tests/docs.rs` fails the build if a gap is written down without
 an issue behind it:
 
-* **REST v2 account administration** (devices, contacts, history, phonelines,
-  numbers, …) — [#12](https://github.com/floffel/sipgate-flow/issues/12).
-  Core read paths are modelled; the remaining account-administration endpoints
-  are still documented but not modelled yet.
+* **REST v2 SMS and live-call compatibility administration** (the older `sms`
+  caller-id surface and `rtcm` call-control tags) —
+  [#12](https://github.com/floffel/sipgate-flow/issues/12). The session wrapper
+  operations are modelled; these separate legacy tags are documented but not
+  modelled yet.
 * **v3 account inventory** (accounts; ai-agents and the playground are other
   products) — [#15](https://github.com/floffel/sipgate-flow/issues/15).
   Documented paths, not modelled yet.

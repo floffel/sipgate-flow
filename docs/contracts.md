@@ -422,6 +422,66 @@ Bodies (all from the Swagger `definitions`, rendered as fixtures under
   `AccountPhonelinesResponse`; unknown fields are ignored and unknown enum
   values are carried verbatim.
 
+### 5.1 REST v2 account administration — verified
+
+Issue #181 completes the account-administration tags in the same Swagger
+document. Issue #178 was a strict subset of this surface and is collapsed into
+#181. The following paths are typed and covered by the mock transport matrix in
+`tests/rest.rs`; path ids, query values and bodies are validated before the
+wire, list envelopes decode permissively, and unknown response fields remain
+available through the typed raw carriers where the schema is open-ended.
+
+* **account** — `GET /account`, `GET /balance`, `PUT /account/verified`.
+* **addresses** — `GET /addresses`, `GET /addresses/itemCount`,
+  `GET /addresses/{addressId}`, `PUT /addresses/{addressId}`,
+  `GET /addresses/{addressId}/numbers`.
+* **users** — `GET /users`, `GET /users/{userId}`, `DELETE /users/{userId}`,
+  `PUT /users/{userId}/busyonbusy`, `PUT /users/{userId}/defaultdevice`,
+  `PUT /users/{userId}/location`.
+* **groups** — `GET /groups`, `GET /groups/{groupId}`,
+  `POST`/`DELETE /groups/{groupId}/devices[/{deviceId}]`,
+  `GET /groups/{groupId}/{faxlines,numbers,users,voicemail}`,
+  `GET /groupfaxlines`, `GET /groupfaxlines/{faxlineId}/callerid`, and
+  `GET /groupfaxlines/{faxlineId}/numbers`.
+* **channels** — `GET /channels`, `DELETE /channels/{channelId}`,
+  `GET /channels/{channelId}/events`, `PUT /channels/{channelId}/name`,
+  `PUT /channels/{channelId}/users`, and
+  `PUT /channels/{channelId}/users/{userId}/devices`.
+* **faxlines** — `GET`/`POST /{userId}/faxlines`,
+  `DELETE`/`PUT /{userId}/faxlines/{faxlineId}`,
+  `GET`/`PUT /{userId}/faxlines/{faxlineId}/callerid`,
+  `GET /{userId}/faxlines/{faxlineId}/numbers`, and
+  `PUT /{userId}/faxlines/{faxlineId}/tagline`.
+* **numbers** — `GET /numbers`, `PUT /numbers/{numberId}`,
+  `POST /numbers/quickdial`, `GET /numbers/quickdial/validation/{quickDialNumber}`,
+  `DELETE`/`PUT /numbers/quickdial/{numberId}`, and `GET /{userId}/numbers`.
+* **voicemails** — `GET /voicemails`, `GET /voicemails/{voicemailId}`.
+* **blacklist** — `GET`/`POST /blacklist/incoming`,
+  `DELETE /blacklist/incoming/{phoneNumber}`.
+* **callrestrictions / restrictions** — `GET /callrestrictions`,
+  `POST /{userId}/callrestrictions/{restriction}`, `GET /restrictions`.
+* **portings** — `GET /portings`, `GET`/`DELETE /portings/{portingId}`.
+* **autorecordings** — `GET`/`POST /autorecordings/greetings`,
+  `DELETE /autorecordings/greetings/{greetingId}`,
+  `GET`/`PUT /autorecordings/{extension}/settings`.
+* **notifications** — `GET`/`DELETE /{userId}/notifications[/{notificationId}]`
+  and the eight documented `POST /{userId}/notifications/{call,fax,sms,voicemail}/{email,sms,report}`
+  combinations. Each kind validates the fields the Swagger definitions mark
+  required before serializing the body.
+* **settings** — `GET`/`PUT /settings/sipgateio`.
+* **urls / log / app** — `GET /`, `GET /log/webhooks`, `GET /app/events`,
+  `DELETE /app/events/{id}`, `GET /app/{links,properties,tacs,users}`, and
+  `GET /translations/{language}`.
+* **authorization** — `GET /authorization/userinfo`, and
+  `GET`/`POST /authorization/oauth2/clients`,
+  `GET`/`PUT`/`DELETE /authorization/oauth2/clients/{clientId}`,
+  `GET /authorization/oauth2/clients/{clientId}/gdpr`.
+
+The `forwardings` tag is already represented by the typed phoneline forwarding
+operations from #167. The separate legacy `sms` caller-id tag and `rtcm` call
+control tag remain in §8; the session wrappers for sending SMS and controlling
+live calls are already implemented.
+
 Documented error statuses: 400 (invalid request), 402 (insufficient funds), 403
 (not allowed), 404 (unknown call), 409 (call not yet established for hold and
 transfer), 500.
@@ -660,11 +720,12 @@ Every surface sipgate documents and this crate does not model is an **open issue
 not a decision record. A bullet in this section that carries no issue link is a bug
 in this document — `tests/docs.rs` fails on it. Order of work is the order below:
 
-* **REST v2 account administration** (devices, contacts, history, phonelines,
-  numbers, …) — <https://api.sipgate.com/v2/swagger.json>. Tracked in
-  [#12](https://github.com/floffel/sipgate-flow/issues/12). Core read paths are
-  modelled; the remaining account-administration endpoints are still documented
-  but not modelled yet.
+* **REST v2 SMS and live-call compatibility administration** — the older
+  `/v2/{userId}/sms/...` caller-id tag and `/v2/calls/...` `rtcm` tag in
+  <https://api.sipgate.com/v2/swagger.json>. Tracked in
+  [#12](https://github.com/floffel/sipgate-flow/issues/12). The session wrapper
+  operations are modelled; these separate legacy tags are documented but not
+  modelled yet.
 * **v3 account inventory** — the same 402-path document; accounts
   (ai-agents and the playground are other products). Tracked in
   [#15](https://github.com/floffel/sipgate-flow/issues/15).

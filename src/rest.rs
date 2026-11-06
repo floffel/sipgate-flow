@@ -3089,6 +3089,12 @@ struct CallList {
 }
 
 #[derive(Deserialize)]
+struct OAuthClients {
+    #[serde(default)]
+    data: Option<Vec<OAuthClientInfo>>,
+}
+
+#[derive(Deserialize)]
 struct Items<T> {
     // `null` and an absent key both mean "no items"; only a wrong *type* is an
     // error, matching the REST v2 list envelope's permissive direction.
@@ -10016,3 +10022,4682 @@ fn device_type_query(filter: &[DeviceFilter]) -> Result<Option<String>> {
 // ===================================================================
 // End issue #164 block (client methods). Types follow at the end.
 // ===================================================================
+
+// ===================================================================
+// BEGIN REST v2 account-administration surface (#181)
+// ===================================================================
+
+/// Largest page size accepted by the v2 administration list endpoints.
+///
+/// `GET /v2/numbers` documents an `int32` pagination limit without an upper
+/// bound. The crate uses the same 5000 ceiling as the contacts resource so a
+/// caller cannot request an unbounded page.
+///
+/// ```
+/// assert_eq!(sipgate_flow::rest::MAX_ADMIN_PAGE_LIMIT, 5000);
+/// ```
+pub const MAX_ADMIN_PAGE_LIMIT: i64 = 5000;
+
+/// Largest number of channel events accepted in one request.
+///
+/// The swagger documents a default of 50 for
+/// `GET /v2/channels/{channelId}/events`; this conservative ceiling keeps an
+/// int32 request bounded before it reaches the wire.
+///
+/// ```
+/// assert_eq!(sipgate_flow::rest::MAX_CHANNEL_EVENT_LIMIT, 1000);
+/// ```
+pub const MAX_CHANNEL_EVENT_LIMIT: i64 = 1000;
+
+/// Largest base64 auto-recording greeting accepted by the service.
+///
+/// ```
+/// assert_eq!(sipgate_flow::rest::MAX_AUTO_RECORDING_GREETING_BASE64_LEN, 15_000_000);
+/// ```
+pub const MAX_AUTO_RECORDING_GREETING_BASE64_LEN: usize = 15_000_000;
+
+/// A permissive object returned by an administration endpoint whose swagger
+/// response has no stable schema.
+///
+/// ```
+/// use sipgate_flow::rest::AdminObject;
+///
+/// let object: AdminObject = serde_json::from_value(serde_json::json!({
+///     "futureField": true,
+///     "count": 2
+/// }))
+/// .unwrap();
+/// assert_eq!(object.raw()["count"], 2);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(transparent)]
+#[non_exhaustive]
+pub struct AdminObject {
+    value: Value,
+}
+
+impl AdminObject {
+    /// The decoded JSON value, including fields this crate does not model.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminObject;
+    /// let object: AdminObject = serde_json::from_str(r#"{"x":1}"#).unwrap();
+    /// assert_eq!(object.raw()["x"], 1);
+    /// ```
+    #[must_use]
+    pub fn raw(&self) -> &Value {
+        &self.value
+    }
+}
+
+/// The account read from `GET /v2/account`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminAccount;
+///
+/// let account: AdminAccount = serde_json::from_value(serde_json::json!({
+///     "company": "Love sipgate",
+///     "email": "test@sipgate.de",
+///     "verified": true,
+///     "futureField": 1
+/// }))
+/// .unwrap();
+/// assert!(account.verified);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminAccount {
+    /// Company name.
+    #[serde(default)]
+    pub company: String,
+    /// Account email address.
+    #[serde(default)]
+    pub email: String,
+    /// Account owner's first name.
+    #[serde(default, alias = "first_name")]
+    pub first_name: String,
+    /// Account owner's last name.
+    #[serde(default, alias = "last_name")]
+    pub last_name: String,
+    /// Documented history retention setting.
+    #[serde(default, alias = "history_life_time")]
+    pub history_life_time: String,
+    /// Logo URL.
+    #[serde(default, alias = "logo_url")]
+    pub logo_url: String,
+    /// Documented main product type.
+    #[serde(default, alias = "main_product_type")]
+    pub main_product_type: String,
+    /// Whether the account is verified.
+    #[serde(default)]
+    pub verified: bool,
+}
+
+/// Account balance from `GET /v2/balance`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminBalance;
+/// let balance: AdminBalance = serde_json::from_value(serde_json::json!({
+///     "amount": 35000,
+///     "currency": "EUR"
+/// })).unwrap();
+/// assert_eq!(balance.amount, 35000);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminBalance {
+    /// Amount in ten-thousandths of the currency unit.
+    #[serde(default)]
+    pub amount: i64,
+    /// ISO currency code.
+    #[serde(default)]
+    pub currency: String,
+}
+
+/// The account verification body for `PUT /v2/account/verified`.
+///
+/// ```
+/// use sipgate_flow::rest::AccountVerification;
+/// let body = AccountVerification::new("ABC123")?;
+/// assert_eq!(body.to_json()["verificationCode"], "ABC123");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AccountVerification {
+    verification_code: String,
+}
+
+impl AccountVerification {
+    /// Builds the verification body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AccountVerification;
+    /// assert!(AccountVerification::new("ABC123").is_ok());
+    /// assert!(AccountVerification::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the code is empty or above the generic field
+    /// ceiling.
+    pub fn new(verification_code: impl Into<String>) -> Result<Self> {
+        let verification_code = verification_code.into();
+        validate::non_empty(
+            "verificationCode",
+            &verification_code,
+            validate::MAX_REST_FIELD_BYTES,
+        )?;
+        Ok(Self { verification_code })
+    }
+
+    /// Renders the `AccountVerificationRequest` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AccountVerification;
+    /// assert_eq!(AccountVerification::new("ABC123")?.to_json()["verificationCode"], "ABC123");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ "verificationCode": self.verification_code })
+    }
+}
+
+/// One postal address from the administration API.
+///
+/// ```
+/// use sipgate_flow::rest::{AddressEmergencyState, AddressKind, AdminAddress};
+/// let address: AdminAddress = serde_json::from_value(serde_json::json!({
+///     "addressId": "123456",
+///     "city": "Düsseldorf",
+///     "countrycode": "DE",
+///     "postcode": "40219",
+///     "type": "VERIFIED",
+///     "emergencyState": "ACTIVATED"
+/// })).unwrap();
+/// assert_eq!(address.kind, Some(AddressKind::Verified));
+/// assert_eq!(address.emergency_state, Some(AddressEmergencyState::Activated));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminAddress {
+    /// Address identifier.
+    #[serde(default)]
+    pub address_id: String,
+    /// First address line.
+    #[serde(default)]
+    pub address1: String,
+    /// Second address line.
+    #[serde(default)]
+    pub address2: String,
+    /// City.
+    #[serde(default)]
+    pub city: String,
+    /// ISO country code.
+    #[serde(default)]
+    pub countrycode: String,
+    /// House number.
+    #[serde(default)]
+    pub number: String,
+    /// Postal code.
+    #[serde(default)]
+    pub postcode: String,
+    /// State or region.
+    #[serde(default)]
+    pub state: String,
+    /// Street.
+    #[serde(default)]
+    pub street: String,
+    /// URL for the address' numbers.
+    #[serde(default)]
+    pub numbers_url: String,
+    /// Address kind.
+    #[serde(default, rename = "type")]
+    pub kind: Option<AddressKind>,
+    /// Emergency-address state.
+    #[serde(default)]
+    pub emergency_state: Option<AddressEmergencyState>,
+}
+
+/// Number of addresses on the account.
+///
+/// ```
+/// use sipgate_flow::rest::AdminItemCount;
+/// let count: AdminItemCount = serde_json::from_str(r#"{"itemCount":123}"#).unwrap();
+/// assert_eq!(count.item_count, 123);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminItemCount {
+    /// Documented item count.
+    #[serde(default)]
+    pub item_count: i64,
+}
+
+/// Address update body for `PUT /v2/addresses/{addressId}`.
+///
+/// ```
+/// use sipgate_flow::rest::AddressUpdate;
+/// let body = AddressUpdate::new("Düsseldorf", "DE", "40219")?;
+/// assert_eq!(body.to_json()["city"], "Düsseldorf");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AddressUpdate {
+    city: String,
+    countrycode: String,
+    postcode: String,
+    address1: Option<String>,
+    address2: Option<String>,
+    number: Option<String>,
+    state: Option<String>,
+    street: Option<String>,
+}
+
+impl AddressUpdate {
+    /// Builds the update with the three required address fields.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// assert!(AddressUpdate::new("Düsseldorf", "DE", "40219").is_ok());
+    /// assert!(AddressUpdate::new("", "DE", "40219").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when a required field is empty or oversized.
+    pub fn new(
+        city: impl Into<String>,
+        countrycode: impl Into<String>,
+        postcode: impl Into<String>,
+    ) -> Result<Self> {
+        let city = field_value("city", city.into())?;
+        let countrycode = field_value("countrycode", countrycode.into())?;
+        let postcode = field_value("postcode", postcode.into())?;
+        Ok(Self {
+            city,
+            countrycode,
+            postcode,
+            address1: None,
+            address2: None,
+            number: None,
+            state: None,
+            street: None,
+        })
+    }
+
+    /// Sets the first address line.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// assert_eq!(AddressUpdate::new("A", "DE", "1")?.with_address1("Street 1").to_json()["address1"], "Street 1");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_address1(mut self, value: impl Into<String>) -> Self {
+        self.address1 = Some(value.into());
+        self
+    }
+    /// Sets the second address line.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// assert_eq!(AddressUpdate::new("A", "DE", "1")?.with_address2("Flat A").to_json()["address2"], "Flat A");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_address2(mut self, value: impl Into<String>) -> Self {
+        self.address2 = Some(value.into());
+        self
+    }
+    /// Sets the house number.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// assert_eq!(AddressUpdate::new("A", "DE", "1")?.with_number("74").to_json()["number"], "74");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_number(mut self, value: impl Into<String>) -> Self {
+        self.number = Some(value.into());
+        self
+    }
+    /// Sets the state or region.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// assert_eq!(AddressUpdate::new("A", "DE", "1")?.with_state("NRW").to_json()["state"], "NRW");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_state(mut self, value: impl Into<String>) -> Self {
+        self.state = Some(value.into());
+        self
+    }
+    /// Sets the street.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// assert_eq!(AddressUpdate::new("A", "DE", "1")?.with_street("Gladbacher Str.").to_json()["street"], "Gladbacher Str.");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_street(mut self, value: impl Into<String>) -> Self {
+        self.street = Some(value.into());
+        self
+    }
+
+    /// Renders the documented update body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// let body = AddressUpdate::new("Düsseldorf", "DE", "40219")?.to_json();
+    /// assert_eq!(body["countrycode"], "DE");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body =
+            json!({"city": self.city, "countrycode": self.countrycode, "postcode": self.postcode});
+        if let Some(object) = body.as_object_mut() {
+            for (key, value) in [
+                ("address1", &self.address1),
+                ("address2", &self.address2),
+                ("number", &self.number),
+                ("state", &self.state),
+                ("street", &self.street),
+            ] {
+                if let Some(value) = value {
+                    object.insert(key.into(), json!(value));
+                }
+            }
+        }
+        body
+    }
+}
+
+/// One administration phone number.
+///
+/// ```
+/// use sipgate_flow::rest::AdminNumber;
+/// let number: AdminNumber = serde_json::from_value(serde_json::json!({
+///     "id": "n0", "number": "+4915112345678", "type": "MOBILE", "endpointId": "p0"
+/// })).unwrap();
+/// assert_eq!(number.endpoint_id.as_deref(), Some("p0"));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminNumber {
+    /// Number identifier.
+    #[serde(default)]
+    pub id: String,
+    /// E.164 number.
+    #[serde(default)]
+    pub number: String,
+    /// Locally formatted number.
+    #[serde(default)]
+    pub localized: String,
+    /// Documented number kind.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    /// Endpoint routed to this number.
+    #[serde(default)]
+    pub endpoint_id: Option<String>,
+    /// Endpoint alias.
+    #[serde(default)]
+    pub endpoint_alias: Option<String>,
+    /// Endpoint URL.
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+    /// Address identifier.
+    #[serde(default)]
+    pub address_id: Option<i64>,
+    /// Block identifier.
+    #[serde(default)]
+    pub block_id: Option<i64>,
+    /// Prolongation identifier.
+    #[serde(default)]
+    pub prolongation_id: Option<i64>,
+}
+
+/// Query parameters for `GET /v2/numbers`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminPagingQuery;
+/// let query = AdminPagingQuery::new().with_limit(100)?.with_offset(0)?;
+/// assert_eq!(query.path(), "/v2/numbers?offset=0&limit=100");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdminPagingQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+/// One user in the account-administration surface.
+///
+/// ```
+/// use sipgate_flow::rest::AdminUser;
+/// let user: AdminUser = serde_json::from_value(serde_json::json!({
+///     "id": "w0", "firstname": "Ada", "lastname": "Lovelace", "busyOnBusy": true
+/// })).unwrap();
+/// assert_eq!(user.id, "w0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminUser {
+    /// User identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Address identifier.
+    #[serde(default)]
+    pub address_id: String,
+    /// Whether the user is an administrator.
+    #[serde(default)]
+    pub admin: bool,
+    /// Whether the user is an affiliate login.
+    #[serde(default)]
+    pub affiliate_login: bool,
+    /// Whether busy-on-busy is enabled.
+    #[serde(default)]
+    pub busy_on_busy: bool,
+    /// Default device identifier.
+    #[serde(default)]
+    pub default_device: String,
+    /// Direct-dial number ids.
+    #[serde(default)]
+    pub direct_dial_ids: Vec<String>,
+    /// Email address.
+    #[serde(default)]
+    pub email: String,
+    /// First name.
+    #[serde(default)]
+    pub firstname: String,
+    /// Last name.
+    #[serde(default)]
+    pub lastname: String,
+    /// IANA timezone.
+    #[serde(default)]
+    pub timezone: String,
+}
+
+/// A simple group returned by `GET /v2/groups`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminSimpleGroup;
+/// let group: AdminSimpleGroup = serde_json::from_str(r#"{"id":"g0","alias":"Support"}"#).unwrap();
+/// assert_eq!(group.alias, "Support");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminSimpleGroup {
+    /// Group identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Group name.
+    #[serde(default)]
+    pub alias: String,
+    /// Department identifier.
+    #[serde(default)]
+    pub department_id: Option<i64>,
+    /// URL for the group's numbers.
+    #[serde(default)]
+    pub group_numbers_url: String,
+    /// URL for the group's users.
+    #[serde(default)]
+    pub group_users_url: String,
+}
+
+/// One detailed group returned by `GET /v2/groups/{groupId}`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminGroup;
+/// let group: AdminGroup = serde_json::from_value(serde_json::json!({
+///     "id": "g0", "alias": "Support", "voicemails": [{"id": "v0"}]
+/// })).unwrap();
+/// assert_eq!(group.voicemails.len(), 1);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminGroup {
+    /// Group identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Group name.
+    #[serde(default)]
+    pub alias: String,
+    /// Department identifier.
+    #[serde(default)]
+    pub department_id: Option<i64>,
+    /// Voicemail settings.
+    #[serde(default)]
+    pub voicemails: Vec<VoicemailSettings>,
+}
+
+/// One user in a group.
+///
+/// ```
+/// use sipgate_flow::rest::AdminGroupUser;
+/// let user: AdminGroupUser = serde_json::from_str(r#"{"id":"w0","firstname":"Ada"}"#).unwrap();
+/// assert_eq!(user.firstname, "Ada");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminGroupUser {
+    /// User identifier.
+    #[serde(default)]
+    pub id: String,
+    /// First name.
+    #[serde(default)]
+    pub firstname: String,
+    /// Last name.
+    #[serde(default)]
+    pub lastname: String,
+    /// User URL.
+    #[serde(default)]
+    pub user_url: String,
+}
+
+/// One channel from the v2 account administration surface.
+///
+/// ```
+/// use sipgate_flow::rest::AdminChannel;
+/// let channel: AdminChannel = serde_json::from_value(serde_json::json!({
+///     "id": "c0", "name": "Sales", "users": [{"id": "w0", "deviceIds": ["e0"]}]
+/// })).unwrap();
+/// assert_eq!(channel.users[0].device_ids[0], "e0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminChannel {
+    /// Channel identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Channel name.
+    #[serde(default)]
+    pub name: String,
+    /// Owner identifier.
+    #[serde(default)]
+    pub owner: String,
+    /// Locale.
+    #[serde(default)]
+    pub locale: String,
+    /// Creation timestamp.
+    #[serde(default)]
+    pub created_at: String,
+    /// Channel settings, kept as a permissive object.
+    #[serde(default)]
+    pub settings: Option<AdminObject>,
+    /// Channel members.
+    #[serde(default)]
+    pub users: Vec<AdminChannelUser>,
+}
+
+/// One channel member.
+///
+/// ```
+/// use sipgate_flow::rest::AdminChannelUser;
+/// let user: AdminChannelUser = serde_json::from_str(r#"{"id":"w0","deviceIds":["e0"]}"#).unwrap();
+/// assert_eq!(user.device_ids[0], "e0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminChannelUser {
+    /// User identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Devices assigned to the user.
+    #[serde(default)]
+    pub device_ids: Vec<String>,
+}
+
+/// One event from `GET /v2/channels/{channelId}/events`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminChannelEvent;
+/// let event: AdminChannelEvent = serde_json::from_str(r#"{"eventId":"e1","type":"CALL"}"#).unwrap();
+/// assert_eq!(event.kind.as_deref(), Some("CALL"));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminChannelEvent {
+    /// Event identifier.
+    #[serde(default)]
+    pub event_id: String,
+    /// Event kind.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// Creation timestamp.
+    #[serde(default)]
+    pub created_at: String,
+    /// Raw event payload, including fields this crate does not model.
+    #[serde(default)]
+    pub raw: Value,
+}
+
+/// The channel event inbox from `GET /v2/channels/{channelId}/events`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminChannelInbox;
+/// let inbox: AdminChannelInbox = serde_json::from_str(r#"{"events":[],"limit":50,"position":"next"}"#).unwrap();
+/// assert_eq!(inbox.limit, 50);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminChannelInbox {
+    /// Events in this page.
+    #[serde(default)]
+    pub events: Vec<AdminChannelEvent>,
+    /// Requested page size.
+    #[serde(default)]
+    pub limit: i64,
+    /// Opaque paging position.
+    #[serde(default)]
+    pub position: String,
+}
+
+/// Query for `GET /v2/channels/{channelId}/events`.
+///
+/// ```
+/// use sipgate_flow::rest::ChannelEventQuery;
+/// let query = ChannelEventQuery::new().with_position("next")?.with_limit(100)?;
+/// assert!(query.path().contains("limit=100"));
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChannelEventQuery {
+    position: Option<String>,
+    limit: Option<i64>,
+    include_all_users: bool,
+}
+
+impl ChannelEventQuery {
+    /// An empty query.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelEventQuery;
+    /// assert!(ChannelEventQuery::new().path().is_empty());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Sets the opaque paging position.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelEventQuery;
+    /// assert!(ChannelEventQuery::new().with_position("next").is_ok());
+    /// assert!(ChannelEventQuery::new().with_position("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty or oversized position.
+    pub fn with_position(mut self, position: impl Into<String>) -> Result<Self> {
+        let position = position.into();
+        validate::non_empty("position", &position, validate::MAX_REST_FIELD_BYTES)?;
+        self.position = Some(position);
+        Ok(self)
+    }
+    /// Sets the page size.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelEventQuery;
+    /// assert!(ChannelEventQuery::new().with_limit(1000).is_ok());
+    /// assert!(ChannelEventQuery::new().with_limit(0).is_err());
+    /// assert!(ChannelEventQuery::new().with_limit(1001).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] when the page size is outside `1..=MAX_CHANNEL_EVENT_LIMIT`.
+    pub fn with_limit(mut self, limit: i64) -> Result<Self> {
+        if !(1..=MAX_CHANNEL_EVENT_LIMIT).contains(&limit) {
+            return Err(Error::validation(
+                "limit",
+                format!("must be between 1 and {MAX_CHANNEL_EVENT_LIMIT}"),
+            ));
+        }
+        self.limit = Some(limit);
+        Ok(self)
+    }
+    /// Includes events from all account users.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelEventQuery;
+    /// assert!(ChannelEventQuery::new().with_include_all_users(true).path().contains("includeAllUsers=true"));
+    /// ```
+    #[must_use]
+    pub fn with_include_all_users(mut self, include: bool) -> Self {
+        self.include_all_users = include;
+        self
+    }
+    /// Renders the query string without a leading `?`.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelEventQuery;
+    /// assert_eq!(ChannelEventQuery::new().path(), "");
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(position) = &self.position {
+            serializer.append_pair("position", position);
+        }
+        if let Some(limit) = self.limit {
+            serializer.append_pair("limit", &limit.to_string());
+        }
+        if self.include_all_users {
+            serializer.append_pair("includeAllUsers", "true");
+        }
+        serializer.finish()
+    }
+}
+
+/// One faxline.
+///
+/// ```
+/// use sipgate_flow::rest::AdminFaxline;
+/// let fax: AdminFaxline = serde_json::from_str(r#"{"id":"f0","alias":"Fax","canSend":true}"#).unwrap();
+/// assert!(fax.can_send);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminFaxline {
+    /// Faxline identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Faxline alias.
+    #[serde(default)]
+    pub alias: String,
+    /// Whether receiving is enabled.
+    #[serde(default)]
+    pub can_receive: bool,
+    /// Whether sending is enabled.
+    #[serde(default)]
+    pub can_send: bool,
+    /// Fax tagline.
+    #[serde(default)]
+    pub tagline: String,
+    /// Group identifier on group faxlines.
+    #[serde(default)]
+    pub group_id: String,
+}
+
+/// A caller id setting.
+///
+/// ```
+/// use sipgate_flow::rest::AdminCallerId;
+/// let caller: AdminCallerId = serde_json::from_str(r#"{"value":"+4915112345678"}"#).unwrap();
+/// assert_eq!(caller.value, "+4915112345678");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminCallerId {
+    /// Caller id.
+    #[serde(default)]
+    pub value: String,
+}
+
+/// A single-string request body used by alias, tagline and caller-id updates.
+///
+/// ```
+/// use sipgate_flow::rest::AdminValueRequest;
+/// let request = AdminValueRequest::new("Support")?;
+/// assert_eq!(request.to_json()["value"], "Support");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdminValueRequest {
+    key: &'static str,
+    value: String,
+}
+
+impl AdminValueRequest {
+    /// Builds a `value` body (caller id and tagline).
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminValueRequest;
+    /// assert!(AdminValueRequest::new("x").is_ok());
+    /// assert!(AdminValueRequest::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty or oversized value.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate::non_empty("value", &value, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self {
+            key: "value",
+            value,
+        })
+    }
+    /// Builds an `alias` body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminValueRequest;
+    /// assert_eq!(AdminValueRequest::alias("Desk")?.to_json()["alias"], "Desk");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty or oversized alias.
+    pub fn alias(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate::non_empty("alias", &value, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self {
+            key: "alias",
+            value,
+        })
+    }
+    /// Renders the single-field body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminValueRequest;
+    /// assert_eq!(AdminValueRequest::alias("Desk")?.to_json(), serde_json::json!({"alias":"Desk"}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({ self.key: self.value })
+    }
+}
+
+/// Booleans used by the small documented toggle bodies.
+///
+/// ```
+/// use sipgate_flow::rest::AdminToggle;
+/// assert_eq!(AdminToggle::enabled(true).to_json()["enabled"], true);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdminToggle {
+    enabled: bool,
+}
+
+impl AdminToggle {
+    /// Builds an `enabled` toggle body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminToggle;
+    /// assert_eq!(AdminToggle::enabled(false).to_json(), serde_json::json!({"enabled":false}));
+    /// ```
+    #[must_use]
+    pub fn enabled(enabled: bool) -> Self {
+        Self { enabled }
+    }
+    /// Renders the body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminToggle;
+    /// assert_eq!(AdminToggle::enabled(true).to_json()["enabled"], true);
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"enabled": self.enabled})
+    }
+}
+
+/// Body for the default-device update.
+///
+/// ```
+/// use sipgate_flow::rest::DefaultDeviceUpdate;
+/// let body = DefaultDeviceUpdate::new("e0")?;
+/// assert_eq!(body.to_json()["deviceId"], "e0");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DefaultDeviceUpdate {
+    device_id: String,
+}
+
+impl DefaultDeviceUpdate {
+    /// Builds the body after validating the device id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DefaultDeviceUpdate;
+    /// assert!(DefaultDeviceUpdate::new("e0").is_ok());
+    /// assert!(DefaultDeviceUpdate::new("a/b").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable device id.
+    pub fn new(device_id: impl Into<String>) -> Result<Self> {
+        let device_id = device_id.into();
+        validate::path_segment("deviceId", &device_id)?;
+        Ok(Self { device_id })
+    }
+    /// Renders the body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::DefaultDeviceUpdate;
+    /// assert_eq!(DefaultDeviceUpdate::new("e0")?.to_json(), serde_json::json!({"deviceId":"e0"}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"deviceId": self.device_id})
+    }
+}
+
+/// Body for the user-location update.
+///
+/// ```
+/// use sipgate_flow::rest::LocationUpdate;
+/// let body = LocationUpdate::new(13);
+/// assert_eq!(body.to_json()["addressId"], 13);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LocationUpdate {
+    address_id: i64,
+}
+
+impl LocationUpdate {
+    /// Builds the body from a non-negative address id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::LocationUpdate;
+    /// assert!(LocationUpdate::try_new(0).is_ok());
+    /// assert!(LocationUpdate::try_new(-1).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for a negative or out-of-int32-range address id.
+    pub fn try_new(address_id: i64) -> Result<Self> {
+        if !(0..=i64::from(i32::MAX)).contains(&address_id) {
+            return Err(Error::validation(
+                "addressId",
+                "must be a non-negative int32",
+            ));
+        }
+        Ok(Self { address_id })
+    }
+    /// Builds a body whose id is already known to fit the documented int32.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::LocationUpdate;
+    /// assert_eq!(LocationUpdate::new(13).to_json()["addressId"], 13);
+    /// ```
+    #[must_use]
+    pub fn new(address_id: i32) -> Self {
+        Self {
+            address_id: i64::from(address_id),
+        }
+    }
+    /// Renders the body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::LocationUpdate;
+    /// assert_eq!(LocationUpdate::new(13).to_json(), serde_json::json!({"addressId":13}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"addressId": self.address_id})
+    }
+}
+
+/// Query for `GET /v2/callrestrictions`.
+///
+/// ```
+/// use sipgate_flow::rest::CallRestrictionsQuery;
+/// assert_eq!(CallRestrictionsQuery::new().path(), "/v2/callrestrictions");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CallRestrictionsQuery {
+    user_ids: Vec<String>,
+}
+
+impl CallRestrictionsQuery {
+    /// An empty query for the authenticated account.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CallRestrictionsQuery;
+    /// assert!(CallRestrictionsQuery::new().path().ends_with("callrestrictions"));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Filters by user ids.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CallRestrictionsQuery;
+    /// assert!(CallRestrictionsQuery::new().with_user_ids(["w0"]).is_ok());
+    /// assert!(CallRestrictionsQuery::new().with_user_ids(["a/b"]).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id.
+    pub fn with_user_ids<I, S>(mut self, ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for id in ids {
+            let id = id.into();
+            validate::path_segment("userIds", &id)?;
+            collected.push(id);
+        }
+        self.user_ids = collected;
+        Ok(self)
+    }
+    /// Renders the path plus query string.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::CallRestrictionsQuery;
+    /// assert!(CallRestrictionsQuery::new().with_user_ids(["w0"])?.path().contains("userIds=w0"));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for id in &self.user_ids {
+            serializer.append_pair("userIds", id);
+        }
+        query_path("/v2/callrestrictions", &serializer.finish())
+    }
+}
+
+/// One documented call-restriction flag.
+///
+/// ```
+/// use sipgate_flow::rest::AdminFlag;
+/// let flag: AdminFlag = serde_json::from_str("true").unwrap();
+/// assert!(flag.enabled());
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+#[non_exhaustive]
+pub struct AdminFlag {
+    enabled: bool,
+}
+
+impl AdminFlag {
+    /// Whether the documented flag is enabled.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminFlag;
+    /// let flag: AdminFlag = serde_json::from_str("false").unwrap();
+    /// assert!(!flag.enabled());
+    /// ```
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// A call-restriction setting.
+///
+/// ```
+/// use sipgate_flow::rest::CallRestriction;
+/// let setting: CallRestriction = serde_json::from_str(r#"{"userId":"w0","roaming":true}"#).unwrap();
+/// assert!(setting.roaming.enabled());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CallRestriction {
+    /// User identifier.
+    #[serde(default)]
+    pub user_id: String,
+    /// Whether charged calls are restricted.
+    #[serde(default)]
+    pub charged: AdminFlag,
+    /// Whether foreign special numbers are restricted.
+    #[serde(default)]
+    pub foreign_special: AdminFlag,
+    /// Whether high-cost foreign numbers are restricted.
+    #[serde(default)]
+    pub high_cost_foreign_numbers: AdminFlag,
+    /// Whether roaming is restricted.
+    #[serde(default)]
+    pub roaming: AdminFlag,
+}
+
+/// Query for `GET /v2/restrictions`.
+///
+/// ```
+/// use sipgate_flow::rest::RestrictionsQuery;
+/// let query = RestrictionsQuery::new("w0")?;
+/// assert_eq!(query.path(), "/v2/restrictions?userId=w0");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RestrictionsQuery {
+    user_id: String,
+    restrictions: Vec<String>,
+}
+
+impl RestrictionsQuery {
+    /// Builds the required-user query.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::RestrictionsQuery;
+    /// assert!(RestrictionsQuery::new("w0").is_ok());
+    /// assert!(RestrictionsQuery::new("a/b").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id.
+    pub fn new(user_id: impl Into<String>) -> Result<Self> {
+        let user_id = user_id.into();
+        validate::path_segment("userId", &user_id)?;
+        Ok(Self {
+            user_id,
+            restrictions: Vec::new(),
+        })
+    }
+    /// Filters by documented restriction names.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::RestrictionsQuery;
+    /// assert!(RestrictionsQuery::new("w0")?.with_restrictions(["CAN_USE_PBX_FEATURES"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty restriction name.
+    pub fn with_restrictions<I, S>(mut self, restrictions: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for restriction in restrictions {
+            let restriction = restriction.into();
+            validate::non_empty("restriction", &restriction, validate::MAX_REST_FIELD_BYTES)?;
+            collected.push(restriction);
+        }
+        self.restrictions = collected;
+        Ok(self)
+    }
+    /// Renders the path plus query string.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::RestrictionsQuery;
+    /// assert!(RestrictionsQuery::new("w0")?.path().contains("userId=w0"));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.append_pair("userId", &self.user_id);
+        for restriction in &self.restrictions {
+            serializer.append_pair("restriction", restriction);
+        }
+        query_path("/v2/restrictions", &serializer.finish())
+    }
+}
+
+/// One restriction result.
+///
+/// ```
+/// use sipgate_flow::rest::Restriction;
+/// let restriction: Restriction = serde_json::from_str(r#"{"restriction":"CAN_USE_PBX_FEATURES","reason":"IS_NOT_ADMIN"}"#).unwrap();
+/// assert_eq!(restriction.restriction, "CAN_USE_PBX_FEATURES");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Restriction {
+    /// Restriction name.
+    #[serde(default)]
+    pub restriction: String,
+    /// Restriction reason.
+    #[serde(default)]
+    pub reason: String,
+    /// Restriction target.
+    #[serde(default)]
+    pub target: String,
+    /// Whether the restriction is allowed.
+    #[serde(default)]
+    pub value: Value,
+}
+
+/// A porting order.
+///
+/// ```
+/// use sipgate_flow::rest::Porting;
+/// let porting: Porting = serde_json::from_str(r#"{"id":"1","pending":true,"numbers":[{"number":"+4915112345678"}]}"#).unwrap();
+/// assert!(porting.pending);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Porting {
+    /// Porting identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Whether the port is still pending.
+    #[serde(default)]
+    pub pending: bool,
+    /// Whether the port can be revoked.
+    #[serde(default)]
+    pub revocable: bool,
+    /// Port date.
+    #[serde(default)]
+    pub port_date: String,
+    /// Status code.
+    #[serde(default)]
+    pub status: i64,
+    /// Ported numbers.
+    #[serde(default)]
+    pub numbers: Vec<PortingNumber>,
+}
+
+/// One number in a porting order.
+///
+/// ```
+/// use sipgate_flow::rest::PortingNumber;
+/// let number: PortingNumber = serde_json::from_str(r#"{"id":"n0","number":"+4915112345678"}"#).unwrap();
+/// assert_eq!(number.id, "n0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PortingNumber {
+    /// Number identifier.
+    #[serde(default)]
+    pub id: String,
+    /// E.164 number.
+    #[serde(default)]
+    pub number: String,
+}
+
+/// An auto-recording greeting.
+///
+/// ```
+/// use sipgate_flow::rest::AutoRecordingGreeting;
+/// let greeting: AutoRecordingGreeting = serde_json::from_str(r#"{"id":"42","alias":"Default","active":true}"#).unwrap();
+/// assert!(greeting.active);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AutoRecordingGreeting {
+    /// Greeting identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Greeting alias.
+    #[serde(default)]
+    pub alias: String,
+    /// Greeting URL.
+    #[serde(default)]
+    pub greeting_url: String,
+    /// Whether this greeting is active.
+    #[serde(default)]
+    pub active: bool,
+    /// Whether recording is enabled.
+    #[serde(default)]
+    pub recording_enabled: bool,
+}
+
+/// Body for `PUT /v2/autorecordings/{extension}/settings`.
+///
+/// ```
+/// use sipgate_flow::rest::AutoRecordingSettingsUpdate;
+/// assert_eq!(AutoRecordingSettingsUpdate::new(true).to_json()["active"], true);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AutoRecordingSettingsUpdate {
+    active: bool,
+}
+
+impl AutoRecordingSettingsUpdate {
+    /// Builds the toggle body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AutoRecordingSettingsUpdate;
+    /// assert!(AutoRecordingSettingsUpdate::new(false).to_json()["active"] == false);
+    /// ```
+    #[must_use]
+    pub fn new(active: bool) -> Self {
+        Self { active }
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AutoRecordingSettingsUpdate;
+    /// assert_eq!(AutoRecordingSettingsUpdate::new(true).to_json(), serde_json::json!({"active":true}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"active": self.active})
+    }
+}
+
+/// Body for `POST /v2/autorecordings/greetings`.
+///
+/// ```
+/// use sipgate_flow::rest::AutoRecordingGreetingUpload;
+/// let upload = AutoRecordingGreetingUpload::new("greeting.mp3", "RG8u")?;
+/// assert_eq!(upload.to_json()["filename"], "greeting.mp3");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AutoRecordingGreetingUpload {
+    filename: String,
+    base64_content: String,
+}
+
+impl AutoRecordingGreetingUpload {
+    /// Builds the upload after validating the filename and base64 payload.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AutoRecordingGreetingUpload;
+    /// assert!(AutoRecordingGreetingUpload::new("a.mp3", "RG8u").is_ok());
+    /// assert!(AutoRecordingGreetingUpload::new("a/b.mp3", "RG8u").is_err());
+    /// assert!(AutoRecordingGreetingUpload::new("a.mp3", "not base64!").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unsafe filename, invalid base64, or a
+    /// payload above [`MAX_AUTO_RECORDING_GREETING_BASE64_LEN`].
+    pub fn new(filename: impl Into<String>, base64_content: impl Into<String>) -> Result<Self> {
+        let filename = filename.into();
+        validate::non_empty("filename", &filename, validate::MAX_REST_FIELD_BYTES)?;
+        if filename
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control())
+        {
+            return Err(Error::validation(
+                "filename",
+                "must be a bare file name without path separators",
+            ));
+        }
+        let base64_content = base64_content.into();
+        validate::non_empty(
+            "base64Content",
+            &base64_content,
+            MAX_AUTO_RECORDING_GREETING_BASE64_LEN,
+        )?;
+        if !crate::base64::is_valid(&base64_content) {
+            return Err(Error::validation(
+                "base64Content",
+                "must be standard base64 (RFC 4648)",
+            ));
+        }
+        Ok(Self {
+            filename,
+            base64_content,
+        })
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AutoRecordingGreetingUpload;
+    /// assert_eq!(AutoRecordingGreetingUpload::new("a.mp3", "RG8u")?.to_json()["base64Content"], "RG8u");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"filename": self.filename, "base64Content": self.base64_content})
+    }
+}
+
+/// A notification target, grouped by medium.
+///
+/// ```
+/// use sipgate_flow::rest::AdminNotificationTarget;
+/// let target: AdminNotificationTarget = serde_json::from_str(r#"{"email":"a@b.c","active":true}"#).unwrap();
+/// assert!(target.active);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminNotificationTarget {
+    /// Email address, when this is an email target.
+    #[serde(default)]
+    pub email: String,
+    /// Phone number, when this is an SMS target.
+    #[serde(default)]
+    pub number: String,
+    /// Notification cause.
+    #[serde(default)]
+    pub cause: String,
+    /// Notification direction.
+    #[serde(default)]
+    pub direction: String,
+    /// Whether the target is active.
+    #[serde(default)]
+    pub active: bool,
+    /// Raw target shape for fields not listed here.
+    #[serde(default)]
+    pub raw: Value,
+}
+
+/// Notifications grouped by resource.
+///
+/// ```
+/// use sipgate_flow::rest::AdminNotifications;
+/// let notifications: AdminNotifications = serde_json::from_str(r#"{"call":[],"fax":[],"sms":[],"voicemail":[]}"#).unwrap();
+/// assert!(notifications.call.is_empty());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminNotifications {
+    /// Call notifications.
+    #[serde(default)]
+    pub call: Vec<AdminNotificationTarget>,
+    /// Fax notifications.
+    #[serde(default)]
+    pub fax: Vec<AdminNotificationTarget>,
+    /// SMS notifications.
+    #[serde(default)]
+    pub sms: Vec<AdminNotificationTarget>,
+    /// Voicemail notifications.
+    #[serde(default)]
+    pub voicemail: Vec<AdminNotificationTarget>,
+}
+
+/// Typed notification creation body.
+///
+/// ```
+/// use sipgate_flow::rest::NotificationRequest;
+/// let body = NotificationRequest::email("a@b.c")?;
+/// assert_eq!(body.to_json()["email"], "a@b.c");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NotificationRequest {
+    values: std::collections::BTreeMap<String, Value>,
+}
+
+impl NotificationRequest {
+    /// An empty body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert_eq!(NotificationRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Adds a validated email target.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert!(NotificationRequest::new().with_email("a@b.c").is_ok());
+    /// assert!(NotificationRequest::new().with_email("not-an-email").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] when the email is empty, too long, or lacks `@`.
+    pub fn with_email(mut self, email: impl Into<String>) -> Result<Self> {
+        let email = email.into();
+        validate::non_empty("email", &email, validate::MAX_REST_FIELD_BYTES)?;
+        if !email.contains('@') || email.starts_with('@') || email.ends_with('@') {
+            return Err(Error::validation(
+                "email",
+                "must contain a local part and a domain",
+            ));
+        }
+        self.values.insert("email".into(), json!(email));
+        Ok(self)
+    }
+    /// Builds a body with an email target.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert_eq!(NotificationRequest::email("a@b.c")?.to_json()["email"], "a@b.c");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an invalid email.
+    pub fn email(email: impl Into<String>) -> Result<Self> {
+        Self::new().with_email(email)
+    }
+    /// Adds a phone number target in E.164 form.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert!(NotificationRequest::new().with_number("+4915112345678").is_ok());
+    /// assert!(NotificationRequest::new().with_number("123").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for a number that is not E.164.
+    pub fn with_number(mut self, number: impl Into<String>) -> Result<Self> {
+        let number = format!("+{}", validate::phone("number", &number.into())?);
+        self.values.insert("number".into(), json!(number));
+        Ok(self)
+    }
+    /// Adds an endpoint id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert!(NotificationRequest::new().with_endpoint_id("e0").is_ok());
+    /// assert!(NotificationRequest::new().with_endpoint_id("a/b").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable endpoint id.
+    pub fn with_endpoint_id(mut self, endpoint_id: impl Into<String>) -> Result<Self> {
+        let endpoint_id = endpoint_id.into();
+        validate::path_segment("endpointId", &endpoint_id)?;
+        self.values.insert("endpointId".into(), json!(endpoint_id));
+        Ok(self)
+    }
+    /// Adds a faxline id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert!(NotificationRequest::new().with_faxline_id("f0").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable faxline id.
+    pub fn with_faxline_id(mut self, faxline_id: impl Into<String>) -> Result<Self> {
+        let faxline_id = faxline_id.into();
+        validate::path_segment("faxlineId", &faxline_id)?;
+        self.values.insert("faxlineId".into(), json!(faxline_id));
+        Ok(self)
+    }
+    /// Adds a voicemail id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert!(NotificationRequest::new().with_voicemail_id("v0").is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable voicemail id.
+    pub fn with_voicemail_id(mut self, voicemail_id: impl Into<String>) -> Result<Self> {
+        let voicemail_id = voicemail_id.into();
+        validate::path_segment("voicemailId", &voicemail_id)?;
+        self.values
+            .insert("voicemailId".into(), json!(voicemail_id));
+        Ok(self)
+    }
+    /// Adds a cause.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert_eq!(NotificationRequest::new().with_cause("MISSED").to_json()["cause"], "MISSED");
+    /// ```
+    #[must_use]
+    pub fn with_cause(mut self, cause: impl Into<String>) -> Self {
+        self.values.insert("cause".into(), json!(cause.into()));
+        self
+    }
+    /// Adds a direction.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert_eq!(NotificationRequest::new().with_direction("INCOMING").to_json()["direction"], "INCOMING");
+    /// ```
+    #[must_use]
+    pub fn with_direction(mut self, direction: impl Into<String>) -> Self {
+        self.values
+            .insert("direction".into(), json!(direction.into()));
+        self
+    }
+    /// Renders the request body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// assert_eq!(NotificationRequest::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Object(
+            self.values
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn validate_for(&self, kind: NotificationKind) -> Result<()> {
+        for field in kind.required_fields() {
+            let present = self
+                .values
+                .get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+            if !present {
+                return Err(Error::validation(
+                    field,
+                    "is required for this notification",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NotificationKind {
+    CallEmail,
+    CallSms,
+    FaxEmail,
+    FaxReport,
+    FaxSms,
+    SmsEmail,
+    VoicemailEmail,
+    VoicemailSms,
+}
+
+impl NotificationKind {
+    fn required_fields(self) -> &'static [&'static str] {
+        match self {
+            Self::CallEmail => &["cause", "direction", "email", "endpointId"],
+            Self::CallSms => &["cause", "direction", "number", "endpointId"],
+            Self::FaxEmail => &["direction", "email", "faxlineId"],
+            Self::FaxReport => &["email", "faxlineId"],
+            Self::FaxSms => &["direction", "number", "faxlineId"],
+            Self::SmsEmail => &["email", "endpointId"],
+            Self::VoicemailEmail => &["email", "voicemailId"],
+            Self::VoicemailSms => &["number", "voicemailId"],
+        }
+    }
+}
+
+/// One voicemail from `GET /v2/voicemails`.
+///
+/// ```
+/// use sipgate_flow::rest::AdminVoicemail;
+/// let voicemail: AdminVoicemail = serde_json::from_str(r#"{"id":"v0","alias":"Mailbox","canTranscribe":true}"#).unwrap();
+/// assert!(voicemail.can_transcribe);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminVoicemail {
+    /// Voicemail identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Voicemail alias.
+    #[serde(default)]
+    pub alias: String,
+    /// Access number.
+    #[serde(default)]
+    pub access_number: String,
+    /// Active greeting alias.
+    #[serde(default)]
+    pub active_greeting_alias: String,
+    /// Active greeting id.
+    #[serde(default)]
+    pub active_greeting_id: String,
+    /// Whether transcription is possible.
+    #[serde(default)]
+    pub can_transcribe: bool,
+    /// Whether transcription is enabled.
+    #[serde(default)]
+    pub transcription: bool,
+    /// Owning endpoint, when returned.
+    #[serde(default)]
+    pub belongs_to_endpoint: Option<AdminObject>,
+}
+
+/// An app event.
+///
+/// ```
+/// use sipgate_flow::rest::AdminAppEvent;
+/// let event: AdminAppEvent = serde_json::from_str(r#"{"eventId":"1","eventName":"newCall","eventType":"call"}"#).unwrap();
+/// assert_eq!(event.event_name, "newCall");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AdminAppEvent {
+    /// Event id.
+    #[serde(default)]
+    pub event_id: String,
+    /// Event name.
+    #[serde(default)]
+    pub event_name: String,
+    /// Event type.
+    #[serde(default)]
+    pub event_type: String,
+    /// Event payload.
+    #[serde(default)]
+    pub payload: std::collections::BTreeMap<String, String>,
+}
+
+/// The authenticated user from `GET /v2/authorization/userinfo`.
+///
+/// ```
+/// use sipgate_flow::rest::UserInfo;
+/// let user: UserInfo = serde_json::from_str(r#"{"sub":"w0","locale":"de_DE","domain":"sipgate.de"}"#).unwrap();
+/// assert_eq!(user.sub, "w0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct UserInfo {
+    /// Subject/user id.
+    #[serde(default)]
+    pub sub: String,
+    /// Locale.
+    #[serde(default)]
+    pub locale: String,
+    /// Domain.
+    #[serde(default)]
+    pub domain: String,
+    /// Master sipgate id.
+    #[serde(default)]
+    pub master_sip_id: String,
+}
+
+/// An OAuth 2.0 client.
+///
+/// ```
+/// use sipgate_flow::rest::OAuthClientInfo;
+/// let client: OAuthClientInfo = serde_json::from_str(r#"{"clientId":"c0","name":"App","redirectUris":["https://x/cb"]}"#).unwrap();
+/// assert_eq!(client.client_id, "c0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct OAuthClientInfo {
+    /// Client id.
+    #[serde(default)]
+    pub client_id: String,
+    /// Client secret.
+    #[serde(default)]
+    pub client_secret: String,
+    /// Description.
+    #[serde(default)]
+    pub description: String,
+    /// Name.
+    #[serde(default)]
+    pub name: String,
+    /// Privacy-policy URL.
+    #[serde(default)]
+    pub privacy_url: String,
+    /// Terms URL.
+    #[serde(default)]
+    pub terms_url: String,
+    /// Redirect URI patterns.
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
+    /// CORS origins.
+    #[serde(default)]
+    pub web_origins: Vec<String>,
+}
+
+/// OAuth client creation/update body.
+///
+/// ```
+/// use sipgate_flow::rest::OAuthClientRequest;
+/// let body = OAuthClientRequest::new("App", "Example app", "https://x/privacy", "https://x/terms")?;
+/// assert_eq!(body.to_json()["name"], "App");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OAuthClientRequest {
+    name: String,
+    description: String,
+    privacy_url: String,
+    terms_url: String,
+    redirect_uris: Vec<String>,
+    web_origins: Vec<String>,
+}
+
+impl OAuthClientRequest {
+    /// Builds a client request with the required scalar fields.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::OAuthClientRequest;
+    /// assert!(OAuthClientRequest::new("App", "Example", "https://x/p", "https://x/t").is_ok());
+    /// assert!(OAuthClientRequest::new("", "Example", "https://x/p", "https://x/t").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty name/description or a non-http URL.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        privacy_url: impl Into<String>,
+        terms_url: impl Into<String>,
+    ) -> Result<Self> {
+        let name = field_value("name", name.into())?;
+        let description = field_value("description", description.into())?;
+        let privacy_url = privacy_url.into();
+        validate::http_url("privacyUrl", &privacy_url)?;
+        let terms_url = terms_url.into();
+        validate::http_url("termsUrl", &terms_url)?;
+        Ok(Self {
+            name,
+            description,
+            privacy_url,
+            terms_url,
+            redirect_uris: Vec::new(),
+            web_origins: Vec::new(),
+        })
+    }
+    /// Sets redirect URI patterns.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::OAuthClientRequest;
+    /// assert!(OAuthClientRequest::new("A", "B", "https://a/p", "https://a/t")?.with_redirect_uris(["https://a/cb"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty or oversized URI.
+    pub fn with_redirect_uris<I, S>(mut self, uris: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for value in uris {
+            let value = value.into();
+            validate::non_empty("redirectUris", &value, validate::MAX_REST_FIELD_BYTES)?;
+            collected.push(value);
+        }
+        self.redirect_uris = collected;
+        Ok(self)
+    }
+    /// Sets allowed web origins.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::OAuthClientRequest;
+    /// assert!(OAuthClientRequest::new("A", "B", "https://a/p", "https://a/t")?.with_web_origins(["https://a"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty or oversized origin.
+    pub fn with_web_origins<I, S>(mut self, origins: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for value in origins {
+            let value = value.into();
+            validate::non_empty("webOrigins", &value, validate::MAX_REST_FIELD_BYTES)?;
+            collected.push(value);
+        }
+        self.web_origins = collected;
+        Ok(self)
+    }
+    /// Renders the documented client body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::OAuthClientRequest;
+    /// assert_eq!(OAuthClientRequest::new("A", "B", "https://a/p", "https://a/t")?.to_json()["name"], "A");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "name": self.name, "description": self.description,
+            "privacyUrl": self.privacy_url, "termsUrl": self.terms_url,
+            "redirectUris": self.redirect_uris, "webOrigins": self.web_origins,
+        })
+    }
+}
+
+/// GDPR URLs for an OAuth client.
+///
+/// ```
+/// use sipgate_flow::rest::GdprUrls;
+/// let urls: GdprUrls = serde_json::from_str(r#"{"privacyUrl":"https://x/p","termsUrl":"https://x/t"}"#).unwrap();
+/// assert_eq!(urls.privacy_url, "https://x/p");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct GdprUrls {
+    /// Privacy-policy URL.
+    #[serde(default)]
+    pub privacy_url: String,
+    /// Terms URL.
+    #[serde(default)]
+    pub terms_url: String,
+}
+
+impl AdminPagingQuery {
+    /// An empty query.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminPagingQuery;
+    /// assert_eq!(AdminPagingQuery::new().path(), "/v2/numbers");
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Sets the page size.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminPagingQuery;
+    /// assert!(AdminPagingQuery::new().with_limit(5000).is_ok());
+    /// assert!(AdminPagingQuery::new().with_limit(0).is_err());
+    /// assert!(AdminPagingQuery::new().with_limit(5001).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] when the page size is outside `1..=MAX_ADMIN_PAGE_LIMIT`.
+    pub fn with_limit(mut self, limit: i64) -> Result<Self> {
+        if !(1..=MAX_ADMIN_PAGE_LIMIT).contains(&limit) {
+            return Err(Error::validation(
+                "limit",
+                format!("must be between 1 and {MAX_ADMIN_PAGE_LIMIT}"),
+            ));
+        }
+        self.limit = Some(limit);
+        Ok(self)
+    }
+    /// Sets the zero-based offset.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminPagingQuery;
+    /// assert!(AdminPagingQuery::new().with_offset(2_147_483_647).is_ok());
+    /// assert!(AdminPagingQuery::new().with_offset(2_147_483_648).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] when the offset is negative or above `int32::MAX`.
+    pub fn with_offset(mut self, offset: i64) -> Result<Self> {
+        if !(0..=i64::from(i32::MAX)).contains(&offset) {
+            return Err(Error::validation(
+                "offset",
+                "must be between 0 and 2147483647",
+            ));
+        }
+        self.offset = Some(offset);
+        Ok(self)
+    }
+    /// Renders the path plus query string.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminPagingQuery;
+    /// assert_eq!(AdminPagingQuery::new().with_limit(1)?.path(), "/v2/numbers?limit=1");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(offset) = self.offset {
+            serializer.append_pair("offset", &offset.to_string());
+        }
+        if let Some(limit) = self.limit {
+            serializer.append_pair("limit", &limit.to_string());
+        }
+        query_path("/v2/numbers", &serializer.finish())
+    }
+}
+
+/// A permissive list response for administration endpoints whose swagger
+/// defines only an `items` array.
+///
+/// ```
+/// use sipgate_flow::rest::{AdminItems, AdminUser};
+/// let items: AdminItems<AdminUser> = serde_json::from_str(r#"{"items":[{"id":"w0"}],"future":1}"#).unwrap();
+/// assert_eq!(items.items[0].id, "w0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[non_exhaustive]
+pub struct AdminItems<T> {
+    /// Decoded items, empty when the service returns `null` or omits the key.
+    #[serde(default)]
+    pub items: Vec<T>,
+}
+
+impl<T> AdminItems<T> {
+    /// Converts the envelope into its item list.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AdminItems;
+    /// let items: AdminItems<String> = serde_json::from_str(r#"{"items":["a"]}"#).unwrap();
+    /// assert_eq!(items.into_entries(), ["a"]);
+    /// ```
+    #[must_use]
+    pub fn into_entries(self) -> Vec<T> {
+        self.items
+    }
+}
+
+/// Body for adding an incoming blacklist entry.
+///
+/// ```
+/// use sipgate_flow::rest::BlacklistEntryRequest;
+/// let entry = BlacklistEntryRequest::new("492117654321")?;
+/// assert_eq!(entry.to_json()["phoneNumber"], "+492117654321");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BlacklistEntryRequest {
+    phone_number: String,
+    is_block: bool,
+}
+
+impl BlacklistEntryRequest {
+    /// Builds the entry, accepting E.164 with or without `+`.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::BlacklistEntryRequest;
+    /// assert!(BlacklistEntryRequest::new("492117654321").is_ok());
+    /// assert!(BlacklistEntryRequest::new("123").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for a number that is not E.164.
+    pub fn new(phone_number: impl Into<String>) -> Result<Self> {
+        let phone_number = format!("+{}", validate::phone("phoneNumber", &phone_number.into())?);
+        Ok(Self {
+            phone_number,
+            is_block: false,
+        })
+    }
+    /// Enables prefix blocking.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::BlacklistEntryRequest;
+    /// assert!(BlacklistEntryRequest::new("492117654321")?.with_block(true).to_json()["isBlock"] == true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_block(mut self, is_block: bool) -> Self {
+        self.is_block = is_block;
+        self
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::BlacklistEntryRequest;
+    /// assert_eq!(BlacklistEntryRequest::new("492117654321")?.to_json()["phoneNumber"], "+492117654321");
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"phoneNumber": self.phone_number, "isBlock": self.is_block})
+    }
+}
+
+/// One incoming blacklist entry.
+///
+/// ```
+/// use sipgate_flow::rest::BlacklistEntry;
+/// let entry: BlacklistEntry = serde_json::from_str(r#"{"phoneNumber":"+4921","isBlock":true}"#).unwrap();
+/// assert!(entry.is_block);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct BlacklistEntry {
+    /// Stored phone number.
+    #[serde(default)]
+    pub phone_number: String,
+    /// Whether prefix blocking is enabled.
+    #[serde(default)]
+    pub is_block: bool,
+}
+
+/// Body for the quick-dial create and update endpoints.
+///
+/// ```
+/// use sipgate_flow::rest::QuickDialRequest;
+/// let body = QuickDialRequest::new("w0")?.with_number("42")?;
+/// assert_eq!(body.to_json()["userId"], "w0");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuickDialRequest {
+    user_id: String,
+    number: Option<String>,
+}
+
+impl QuickDialRequest {
+    /// Builds the body with the documented required user id.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::QuickDialRequest;
+    /// assert!(QuickDialRequest::new("w0").is_ok());
+    /// assert!(QuickDialRequest::new("a/b").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id.
+    pub fn new(user_id: impl Into<String>) -> Result<Self> {
+        let user_id = user_id.into();
+        validate::path_segment("userId", &user_id)?;
+        Ok(Self {
+            user_id,
+            number: None,
+        })
+    }
+    /// Sets the quick-dial number.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::QuickDialRequest;
+    /// assert_eq!(QuickDialRequest::new("w0")?.with_number("42")?.to_json()["number"], "42");
+    /// assert!(QuickDialRequest::new("w0")?.with_number("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty or oversized quick-dial number.
+    pub fn with_number(mut self, number: impl Into<String>) -> Result<Self> {
+        let number = number.into();
+        validate::non_empty("number", &number, validate::MAX_REST_FIELD_BYTES)?;
+        self.number = Some(number);
+        Ok(self)
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::QuickDialRequest;
+    /// assert_eq!(QuickDialRequest::new("w0")?.to_json(), serde_json::json!({"userId":"w0"}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = json!({"userId": self.user_id});
+        if let (Some(number), Some(object)) = (&self.number, body.as_object_mut()) {
+            object.insert("number".into(), json!(number));
+        }
+        body
+    }
+}
+
+/// Request body for `PUT /v2/channels/{channelId}/name`.
+///
+/// ```
+/// use sipgate_flow::rest::ChannelNameUpdate;
+/// let body = ChannelNameUpdate::new("Support")?;
+/// assert_eq!(body.to_json()["name"], "Support");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChannelNameUpdate {
+    name: String,
+}
+
+impl ChannelNameUpdate {
+    /// Builds a rename body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelNameUpdate;
+    /// assert!(ChannelNameUpdate::new("Support").is_ok());
+    /// assert!(ChannelNameUpdate::new("").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an empty or oversized name.
+    pub fn new(name: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        validate::non_empty("name", &name, validate::MAX_REST_FIELD_BYTES)?;
+        Ok(Self { name })
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelNameUpdate;
+    /// assert_eq!(ChannelNameUpdate::new("Support")?.to_json(), serde_json::json!({"name":"Support"}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"name": self.name})
+    }
+}
+
+/// Body for `PUT /v2/numbers/{numberId}`.
+///
+/// ```
+/// use sipgate_flow::rest::NumberSettingsUpdate;
+/// let body = NumberSettingsUpdate::new().with_endpoint_id("p0").with_quick_dial(true);
+/// assert_eq!(body.to_json()["endpointId"], "p0");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NumberSettingsUpdate {
+    endpoint_id: Option<String>,
+    quick_dial: Option<bool>,
+    release_for_mnp: Option<bool>,
+}
+
+impl NumberSettingsUpdate {
+    /// An empty update.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NumberSettingsUpdate;
+    /// assert_eq!(NumberSettingsUpdate::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Routes the number to this endpoint.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NumberSettingsUpdate;
+    /// assert_eq!(NumberSettingsUpdate::new().with_endpoint_id("p0").to_json()["endpointId"], "p0");
+    /// ```
+    #[must_use]
+    pub fn with_endpoint_id(mut self, endpoint_id: impl Into<String>) -> Self {
+        self.endpoint_id = Some(endpoint_id.into());
+        self
+    }
+    /// Enables or disables quick dial.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NumberSettingsUpdate;
+    /// assert!(NumberSettingsUpdate::new().with_quick_dial(true).to_json()["quickDial"] == true);
+    /// ```
+    #[must_use]
+    pub fn with_quick_dial(mut self, quick_dial: bool) -> Self {
+        self.quick_dial = Some(quick_dial);
+        self
+    }
+    /// Releases the number for mobile-number porting.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NumberSettingsUpdate;
+    /// assert!(NumberSettingsUpdate::new().with_release_for_mnp(true).to_json()["releaseForMnp"] == true);
+    /// ```
+    #[must_use]
+    pub fn with_release_for_mnp(mut self, release_for_mnp: bool) -> Self {
+        self.release_for_mnp = Some(release_for_mnp);
+        self
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::NumberSettingsUpdate;
+    /// assert_eq!(NumberSettingsUpdate::new().to_json(), serde_json::json!({}));
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = Map::new();
+        if let Some(endpoint_id) = &self.endpoint_id {
+            body.insert("endpointId".into(), json!(endpoint_id));
+        }
+        if let Some(quick_dial) = self.quick_dial {
+            body.insert("quickDial".into(), json!(quick_dial));
+        }
+        if let Some(release_for_mnp) = self.release_for_mnp {
+            body.insert("releaseForMnp".into(), json!(release_for_mnp));
+        }
+        Value::Object(body)
+    }
+}
+
+/// Request body for channel user membership.
+///
+/// ```
+/// use sipgate_flow::rest::ChannelUsersUpdate;
+/// let body = ChannelUsersUpdate::new(["w0"])?;
+/// assert_eq!(body.to_json()["userIds"][0], "w0");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChannelUsersUpdate {
+    user_ids: Vec<String>,
+}
+
+impl ChannelUsersUpdate {
+    /// Builds the request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelUsersUpdate;
+    /// assert!(ChannelUsersUpdate::new(["w0"]).is_ok());
+    /// assert!(ChannelUsersUpdate::new(["a/b"]).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id.
+    pub fn new<I, S>(user_ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for id in user_ids {
+            let id = id.into();
+            validate::path_segment("userIds", &id)?;
+            collected.push(id);
+        }
+        Ok(Self {
+            user_ids: collected,
+        })
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelUsersUpdate;
+    /// assert_eq!(ChannelUsersUpdate::new(["w0"])?.to_json(), serde_json::json!({"userIds":["w0"]}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"userIds": self.user_ids})
+    }
+}
+
+/// Request body for channel device membership.
+///
+/// ```
+/// use sipgate_flow::rest::ChannelDevicesUpdate;
+/// let body = ChannelDevicesUpdate::new(["e0"])?;
+/// assert_eq!(body.to_json()["deviceIds"][0], "e0");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChannelDevicesUpdate {
+    device_ids: Vec<String>,
+}
+
+impl ChannelDevicesUpdate {
+    /// Builds the request.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelDevicesUpdate;
+    /// assert!(ChannelDevicesUpdate::new(["e0"]).is_ok());
+    /// assert!(ChannelDevicesUpdate::new(["a/b"]).is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable device id.
+    pub fn new<I, S>(device_ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for id in device_ids {
+            let id = id.into();
+            validate::path_segment("deviceIds", &id)?;
+            collected.push(id);
+        }
+        Ok(Self {
+            device_ids: collected,
+        })
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::ChannelDevicesUpdate;
+    /// assert_eq!(ChannelDevicesUpdate::new(["e0"])?.to_json(), serde_json::json!({"deviceIds":["e0"]}));
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({"deviceIds": self.device_ids})
+    }
+}
+
+/// Request body for `PUT /v2/settings/sipgateio`.
+///
+/// ```
+/// use sipgate_flow::rest::AccountSipgateIoSettings;
+/// let settings = AccountSipgateIoSettings::new("https://example.com/in", "https://example.com/out")?;
+/// assert_eq!(settings.to_json()["incomingUrl"], "https://example.com/in");
+/// # Ok::<(), sipgate_flow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AccountSipgateIoSettings {
+    incoming_url: String,
+    outgoing_url: String,
+    log: bool,
+    push_api_version: Option<i64>,
+    whitelist: Vec<String>,
+}
+
+impl AccountSipgateIoSettings {
+    /// Builds the required incoming and outgoing URLs.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AccountSipgateIoSettings;
+    /// assert!(AccountSipgateIoSettings::new("https://a/in", "https://a/out").is_ok());
+    /// assert!(AccountSipgateIoSettings::new("a", "https://a/out").is_err());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for a non-absolute URL.
+    pub fn new(incoming_url: impl Into<String>, outgoing_url: impl Into<String>) -> Result<Self> {
+        let incoming_url = incoming_url.into();
+        let outgoing_url = outgoing_url.into();
+        validate::http_url("incomingUrl", &incoming_url)?;
+        validate::http_url("outgoingUrl", &outgoing_url)?;
+        Ok(Self {
+            incoming_url,
+            outgoing_url,
+            log: false,
+            push_api_version: None,
+            whitelist: Vec::new(),
+        })
+    }
+    /// Sets request logging.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AccountSipgateIoSettings;
+    /// assert!(AccountSipgateIoSettings::new("https://a/in", "https://a/out")?.with_log(true).to_json()["log"] == true);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_log(mut self, log: bool) -> Self {
+        self.log = log;
+        self
+    }
+    /// Sets the push API version.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AccountSipgateIoSettings;
+    /// assert_eq!(AccountSipgateIoSettings::new("https://a/in", "https://a/out")?.with_push_api_version(2).to_json()["pushApiVersion"], 2);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_push_api_version(mut self, version: i64) -> Self {
+        self.push_api_version = Some(version);
+        self
+    }
+    /// Sets account connection ids allowed to use the Push API.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AccountSipgateIoSettings;
+    /// assert!(AccountSipgateIoSettings::new("https://a/in", "https://a/out")?.with_whitelist(["w0"]).is_ok());
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable connection id.
+    pub fn with_whitelist<I, S>(mut self, ids: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut collected = Vec::new();
+        for id in ids {
+            let id = id.into();
+            validate::path_segment("whitelist", &id)?;
+            collected.push(id);
+        }
+        self.whitelist = collected;
+        Ok(self)
+    }
+    /// Renders the documented body.
+    ///
+    /// ```
+    /// use sipgate_flow::rest::AccountSipgateIoSettings;
+    /// assert!(AccountSipgateIoSettings::new("https://a/in", "https://a/out")?.to_json()["log"] == false);
+    /// # Ok::<(), sipgate_flow::Error>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut body = json!({"incomingUrl": self.incoming_url, "outgoingUrl": self.outgoing_url, "log": self.log});
+        if let Some(object) = body.as_object_mut() {
+            if let Some(version) = self.push_api_version {
+                object.insert("pushApiVersion".into(), json!(version));
+            }
+            if !self.whitelist.is_empty() {
+                object.insert("whitelist".into(), json!(self.whitelist));
+            }
+        }
+        body
+    }
+}
+
+/// The account sipgate.io settings response.
+///
+/// ```
+/// use sipgate_flow::rest::AccountSipgateIo;
+/// let settings: AccountSipgateIo = serde_json::from_str(r#"{"incomingUrl":"https://a/in","outgoingUrl":"https://a/out","log":true}"#).unwrap();
+/// assert!(settings.log);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AccountSipgateIo {
+    /// Incoming URL.
+    #[serde(default)]
+    pub incoming_url: String,
+    /// Outgoing URL.
+    #[serde(default)]
+    pub outgoing_url: String,
+    /// Whether logging is enabled.
+    #[serde(default)]
+    pub log: bool,
+    /// Push API version.
+    #[serde(default)]
+    pub push_api_version: i64,
+    /// Push API lifecycle.
+    #[serde(default)]
+    pub push_api_version_lifecycle: String,
+    /// Whitelisted connection ids.
+    #[serde(default)]
+    pub whitelist: Vec<String>,
+}
+
+/// The extension recording state returned by the auto-recording settings read.
+///
+/// ```
+/// use sipgate_flow::rest::AutoRecordingSettings;
+/// let settings: AutoRecordingSettings = serde_json::from_str(r#"{"active":true}"#).unwrap();
+/// assert!(settings.active);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AutoRecordingSettings {
+    /// Whether recording is active.
+    #[serde(default)]
+    pub active: bool,
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/account` — the authenticated account, typed.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let account = client.admin_account().await?;
+    /// println!("{}", account.company);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Json`] when the body is not the documented account object, plus transport and auth errors.
+    pub async fn admin_account(&self) -> Result<AdminAccount> {
+        let value = self.send(Method::Get, "/v2/account", None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/account/verified` — submit the account verification code.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AccountVerification;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.verify_account(&AccountVerification::new("ABC123")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Validation`] for an unusable code, plus transport and auth errors.
+    pub async fn verify_account(&self, request: &AccountVerification) -> Result<()> {
+        self.send_unit(
+            Method::Put,
+            "/v2/account/verified",
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/balance` — the account balance.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{} {}", client.admin_balance().await?.amount, client.admin_balance().await?.currency);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn admin_balance(&self) -> Result<AdminBalance> {
+        let value = self.send(Method::Get, "/v2/balance", None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/addresses` — every address on the account.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for address in client.addresses().await? { println!("{}", address.city); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn addresses(&self) -> Result<Vec<AdminAddress>> {
+        self.get_items("/v2/addresses").await
+    }
+
+    /// `GET /v2/addresses/itemCount` — the number of addresses.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.address_count().await?.item_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn address_count(&self) -> Result<AdminItemCount> {
+        let value = self
+            .send(Method::Get, "/v2/addresses/itemCount", None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/addresses/{addressId}` — one address.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.address(123).await?.city);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Validation`] for a negative id, plus transport and auth errors.
+    pub async fn address(&self, address_id: i32) -> Result<AdminAddress> {
+        if address_id < 0 {
+            return Err(Error::validation("address_id", "must be non-negative"));
+        }
+        let value = self
+            .send(Method::Get, &format!("/v2/addresses/{address_id}"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/addresses/{addressId}` — replace the address fields.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AddressUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_address(123, &AddressUpdate::new("Düsseldorf", "DE", "40219")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Validation`] for an invalid id or body, plus transport and auth errors.
+    pub async fn update_address(&self, address_id: i32, request: &AddressUpdate) -> Result<()> {
+        if address_id < 0 {
+            return Err(Error::validation("address_id", "must be non-negative"));
+        }
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/addresses/{address_id}"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/addresses/{addressId}/numbers` — numbers routed to an address.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for number in client.address_numbers(123).await? { println!("{}", number.number); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Validation`] for a negative id, plus transport and auth errors.
+    pub async fn address_numbers(&self, address_id: i32) -> Result<Vec<AdminNumber>> {
+        if address_id < 0 {
+            return Err(Error::validation("address_id", "must be non-negative"));
+        }
+        self.get_items(&format!("/v2/addresses/{address_id}/numbers"))
+            .await
+    }
+
+    /// `GET /v2/authorization/userinfo` — the authenticated user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.userinfo().await?.sub);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn userinfo(&self) -> Result<UserInfo> {
+        let value = self
+            .send(Method::Get, "/v2/authorization/userinfo", None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /` — the documented API URL catalogue.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{:?}", client.api_urls().await?.raw()["numbersUrl"]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn api_urls(&self) -> Result<AdminObject> {
+        let value = self.send(Method::Get, "/v2/", None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/log/webhooks` — webhook delivery log entries.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for entry in client.webhook_log().await? { println!("{}", entry.status); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn webhook_log(&self) -> Result<Vec<PhonelineSipgateIoLog>> {
+        self.get_items("/v2/log/webhooks").await
+    }
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/app/events` — app events for the authenticated account.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for event in client.app_events().await? { println!("{}", event.event_name); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn app_events(&self) -> Result<Vec<AdminAppEvent>> {
+        self.get_items("/v2/app/events").await
+    }
+
+    /// `DELETE /v2/app/events/{id}` — delete a non-sticky event.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_app_event(42).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for a non-positive id, [`Error::Api`] for 403 or 404, plus transport and auth errors.
+    pub async fn delete_app_event(&self, id: i32) -> Result<()> {
+        if id <= 0 {
+            return Err(Error::validation("id", "must be a positive int32"));
+        }
+        self.send_unit(Method::Delete, &format!("/v2/app/events/{id}"), None)
+            .await
+    }
+
+    /// `GET /v2/app/links` — the account's application link catalogue.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{:?}", client.app_links().await?.raw()["helpdeskUrl"]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn app_links(&self) -> Result<AdminObject> {
+        let value = self.send(Method::Get, "/v2/app/links", None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/app/properties` — account feature properties.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{:?}", client.app_properties().await?.raw()["showNettoPrices"]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn app_properties(&self) -> Result<AdminObject> {
+        let value = self.send(Method::Get, "/v2/app/properties", None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/app/tacs` — the account's TAC acceptance state.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{:?}", client.app_tacs().await?.raw()["accepted"]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn app_tacs(&self) -> Result<AdminObject> {
+        let value = self.send(Method::Get, "/v2/app/tacs", None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/app/users` — users as exposed to the app surface.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for user in client.app_users().await? { println!("{}", user.id); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn app_users(&self) -> Result<Vec<AdminUser>> {
+        self.get_items("/v2/app/users").await
+    }
+
+    /// `GET /v2/translations/{language}` — translation catalogue for a locale.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let translations = client.translations("de_DE").await?;
+    /// println!("{:?}", translations.raw());
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable locale or [`Error::Json`] for a non-object body, plus transport and auth errors.
+    pub async fn translations(&self, language: &str) -> Result<AdminObject> {
+        validate::path_segment("language", language)?;
+        let value = self
+            .send(Method::Get, &format!("/v2/translations/{language}"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/users` — every account user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for user in client.users().await? { println!("{}", user.email); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn users(&self) -> Result<Vec<AdminUser>> {
+        self.get_items("/v2/users").await
+    }
+
+    /// `GET /v2/users/{userId}` — one user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.user("w0").await?.firstname);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn user(&self, user_id: &str) -> Result<AdminUser> {
+        validate::path_segment("user_id", user_id)?;
+        let value = self
+            .send(Method::Get, &format!("/v2/users/{user_id}"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/users/{userId}` — delete a user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_user("w0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn delete_user(&self, user_id: &str) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        self.send_unit(Method::Delete, &format!("/v2/users/{user_id}"), None)
+            .await
+    }
+
+    /// `PUT /v2/users/{userId}/busyonbusy` — enable or disable busy-on-busy.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AdminToggle;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_user_busy_on_busy("w0", &AdminToggle::enabled(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn set_user_busy_on_busy(&self, user_id: &str, request: &AdminToggle) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/users/{user_id}/busyonbusy"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `PUT /v2/users/{userId}/defaultdevice` — set the user's default device.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::DefaultDeviceUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_user_default_device("w0", &DefaultDeviceUpdate::new("e0")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user or device id, plus transport and auth errors.
+    pub async fn set_user_default_device(
+        &self,
+        user_id: &str,
+        request: &DefaultDeviceUpdate,
+    ) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/users/{user_id}/defaultdevice"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `PUT /v2/users/{userId}/location` — set the user's emergency address.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::LocationUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_user_location("w0", &LocationUpdate::new(13)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn set_user_location(&self, user_id: &str, request: &LocationUpdate) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/users/{user_id}/location"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/groups` — groups visible to the credential.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for group in client.groups().await? { println!("{}", group.alias); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn groups(&self) -> Result<Vec<AdminSimpleGroup>> {
+        self.get_items("/v2/groups").await
+    }
+
+    /// `GET /v2/groups/{groupId}` — one group.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.group("g0").await?.alias);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable group id, plus transport and auth errors.
+    pub async fn group(&self, group_id: &str) -> Result<AdminGroup> {
+        validate::path_segment("group_id", group_id)?;
+        let value = self
+            .send(Method::Get, &format!("/v2/groups/{group_id}"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `POST /v2/groups/{groupId}/devices` — add a device to a group.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::RouteDeviceRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.add_device_to_group("g0", &RouteDeviceRequest::new("e0")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable group or device id, plus transport and auth errors.
+    pub async fn add_device_to_group(
+        &self,
+        group_id: &str,
+        request: &RouteDeviceRequest,
+    ) -> Result<()> {
+        validate::path_segment("group_id", group_id)?;
+        self.send_unit(
+            Method::Post,
+            &format!("/v2/groups/{group_id}/devices"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `DELETE /v2/groups/{groupId}/devices/{deviceId}` — remove a device from a group.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.remove_device_from_group("g0", "e0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable group or device id, plus transport and auth errors.
+    pub async fn remove_device_from_group(&self, group_id: &str, device_id: &str) -> Result<()> {
+        validate::path_segment("group_id", group_id)?;
+        validate::path_segment("device_id", device_id)?;
+        self.send_unit(
+            Method::Delete,
+            &format!("/v2/groups/{group_id}/devices/{device_id}"),
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v2/groups/{groupId}/faxlines` — faxlines owned by a group.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for faxline in client.group_faxlines("g0").await? { println!("{}", faxline.alias); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable group id, plus transport and auth errors.
+    pub async fn group_faxlines(&self, group_id: &str) -> Result<Vec<AdminFaxline>> {
+        validate::path_segment("group_id", group_id)?;
+        self.get_items(&format!("/v2/groups/{group_id}/faxlines"))
+            .await
+    }
+
+    /// `GET /v2/groups/{groupId}/numbers` — numbers routed to a group.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for number in client.group_numbers("g0").await? { println!("{}", number.number); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable group id, plus transport and auth errors.
+    pub async fn group_numbers(&self, group_id: &str) -> Result<Vec<AdminNumber>> {
+        validate::path_segment("group_id", group_id)?;
+        self.get_items(&format!("/v2/groups/{group_id}/numbers"))
+            .await
+    }
+
+    /// `GET /v2/groups/{groupId}/users` — users in a group.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for user in client.group_users("g0").await? { println!("{}", user.firstname); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable group id, plus transport and auth errors.
+    pub async fn group_users(&self, group_id: &str) -> Result<Vec<AdminGroupUser>> {
+        validate::path_segment("group_id", group_id)?;
+        self.get_items(&format!("/v2/groups/{group_id}/users"))
+            .await
+    }
+
+    /// `GET /v2/groups/{groupId}/voicemail` — voicemail settings for a group.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for voicemail in client.group_voicemails("g0").await? { println!("{}", voicemail.alias); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable group id, plus transport and auth errors.
+    pub async fn group_voicemails(&self, group_id: &str) -> Result<Vec<PhonelineVoicemail>> {
+        validate::path_segment("group_id", group_id)?;
+        self.get_items(&format!("/v2/groups/{group_id}/voicemail"))
+            .await
+    }
+
+    /// `GET /v2/groupfaxlines` — group faxlines visible to the account.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for faxline in client.group_faxline_catalogue().await? { println!("{}", faxline.id); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn group_faxline_catalogue(&self) -> Result<Vec<AdminFaxline>> {
+        self.get_items("/v2/groupfaxlines").await
+    }
+
+    /// `GET /v2/groupfaxlines/{faxlineId}/callerid` — caller id of a group faxline.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.group_faxline_caller_id("f0").await?.value);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable faxline id, plus transport and auth errors.
+    pub async fn group_faxline_caller_id(&self, faxline_id: &str) -> Result<AdminCallerId> {
+        validate::path_segment("faxline_id", faxline_id)?;
+        let value = self
+            .send(
+                Method::Get,
+                &format!("/v2/groupfaxlines/{faxline_id}/callerid"),
+                None,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/groupfaxlines/{faxlineId}/numbers` — numbers on a group faxline.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for number in client.group_faxline_numbers("f0").await? { println!("{}", number.number); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable faxline id, plus transport and auth errors.
+    pub async fn group_faxline_numbers(&self, faxline_id: &str) -> Result<Vec<AdminNumber>> {
+        validate::path_segment("faxline_id", faxline_id)?;
+        self.get_items(&format!("/v2/groupfaxlines/{faxline_id}/numbers"))
+            .await
+    }
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/channels` — every channel.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for channel in client.channels().await? { println!("{}", channel.name); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn channels(&self) -> Result<Vec<AdminChannel>> {
+        self.get_items("/v2/channels").await
+    }
+
+    /// `DELETE /v2/channels/{channelId}` — delete a channel.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_channel("c0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable channel id, plus transport and auth errors.
+    pub async fn delete_channel(&self, channel_id: &str) -> Result<()> {
+        validate::path_segment("channel_id", channel_id)?;
+        self.send_unit(Method::Delete, &format!("/v2/channels/{channel_id}"), None)
+            .await
+    }
+
+    /// `GET /v2/channels/{channelId}/events` — the channel event inbox.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ChannelEventQuery;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let inbox = client.channel_events("c0", &ChannelEventQuery::new().with_limit(50)?).await?;
+    /// println!("{}", inbox.events.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable channel id or query, plus transport and auth errors.
+    pub async fn channel_events(
+        &self,
+        channel_id: &str,
+        query: &ChannelEventQuery,
+    ) -> Result<AdminChannelInbox> {
+        validate::path_segment("channel_id", channel_id)?;
+        let path = query_path(&format!("/v2/channels/{channel_id}/events"), &query.path());
+        let value = self.send(Method::Get, &path, None).await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/channels/{channelId}/name` — rename a channel.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ChannelNameUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = ChannelNameUpdate::new("Support")?;
+    /// client.set_channel_name("c0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable channel id or empty name, plus transport and auth errors.
+    pub async fn set_channel_name(
+        &self,
+        channel_id: &str,
+        request: &ChannelNameUpdate,
+    ) -> Result<()> {
+        validate::path_segment("channel_id", channel_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/channels/{channel_id}/name"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `PUT /v2/channels/{channelId}/users` — replace channel membership.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ChannelUsersUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let users = client.set_channel_users("c0", &ChannelUsersUpdate::new(["w0"])?).await?;
+    /// println!("{}", users.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn set_channel_users(
+        &self,
+        channel_id: &str,
+        request: &ChannelUsersUpdate,
+    ) -> Result<Vec<AdminChannelUser>> {
+        validate::path_segment("channel_id", channel_id)?;
+        let value = self
+            .send(
+                Method::Put,
+                &format!("/v2/channels/{channel_id}/users"),
+                Some(&request.to_json()),
+            )
+            .await?;
+        Ok(
+            serde_json::from_value::<AdminItems<AdminChannelUser>>(value)
+                .map_err(Error::json_parse)?
+                .into_entries(),
+        )
+    }
+
+    /// `PUT /v2/channels/{channelId}/users/{userId}/devices` — replace the user's channel devices.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::ChannelDevicesUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_channel_user_devices("c0", "w0", &ChannelDevicesUpdate::new(["e0"])?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn set_channel_user_devices(
+        &self,
+        channel_id: &str,
+        user_id: &str,
+        request: &ChannelDevicesUpdate,
+    ) -> Result<()> {
+        validate::path_segment("channel_id", channel_id)?;
+        validate::path_segment("user_id", user_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/channels/{channel_id}/users/{user_id}/devices"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/faxlines` — faxlines owned by a user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for faxline in client.user_faxlines("w0").await? { println!("{}", faxline.alias); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id, plus transport and auth errors.
+    pub async fn user_faxlines(&self, user_id: &str) -> Result<Vec<AdminFaxline>> {
+        validate::path_segment("user_id", user_id)?;
+        self.get_items(&format!("/v2/{user_id}/faxlines")).await
+    }
+
+    /// `POST /v2/{userId}/faxlines` — create a faxline.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.create_faxline("w0").await?.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id, plus transport and auth errors.
+    pub async fn create_faxline(&self, user_id: &str) -> Result<AdminFaxline> {
+        validate::path_segment("user_id", user_id)?;
+        let value = self
+            .send(Method::Post, &format!("/v2/{user_id}/faxlines"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/{userId}/faxlines/{faxlineId}` — delete a faxline.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_faxline("w0", "f0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn delete_faxline(&self, user_id: &str, faxline_id: &str) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("faxline_id", faxline_id)?;
+        self.send_unit(
+            Method::Delete,
+            &format!("/v2/{user_id}/faxlines/{faxline_id}"),
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /v2/{userId}/faxlines/{faxlineId}` — update the faxline alias.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AdminValueRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_faxline_alias("w0", "f0", &AdminValueRequest::alias("Fax")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id or alias, plus transport and auth errors.
+    pub async fn update_faxline_alias(
+        &self,
+        user_id: &str,
+        faxline_id: &str,
+        request: &AdminValueRequest,
+    ) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("faxline_id", faxline_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/{user_id}/faxlines/{faxline_id}"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/faxlines/{faxlineId}/callerid` — faxline caller id.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.faxline_caller_id("w0", "f0").await?.value);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn faxline_caller_id(
+        &self,
+        user_id: &str,
+        faxline_id: &str,
+    ) -> Result<AdminCallerId> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("faxline_id", faxline_id)?;
+        let value = self
+            .send(
+                Method::Get,
+                &format!("/v2/{user_id}/faxlines/{faxline_id}/callerid"),
+                None,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/{userId}/faxlines/{faxlineId}/callerid` — set the faxline caller id.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AdminValueRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_faxline_caller_id("w0", "f0", &AdminValueRequest::new("+4915112345678")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id or value, plus transport and auth errors.
+    pub async fn set_faxline_caller_id(
+        &self,
+        user_id: &str,
+        faxline_id: &str,
+        request: &AdminValueRequest,
+    ) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("faxline_id", faxline_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/{user_id}/faxlines/{faxline_id}/callerid"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/faxlines/{faxlineId}/numbers` — faxline numbers.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for number in client.faxline_numbers("w0", "f0").await? { println!("{}", number.number); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn faxline_numbers(
+        &self,
+        user_id: &str,
+        faxline_id: &str,
+    ) -> Result<Vec<AdminNumber>> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("faxline_id", faxline_id)?;
+        self.get_items(&format!("/v2/{user_id}/faxlines/{faxline_id}/numbers"))
+            .await
+    }
+
+    /// `PUT /v2/{userId}/faxlines/{faxlineId}/tagline` — set the fax tagline.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AdminValueRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_faxline_tagline("w0", "f0", &AdminValueRequest::new("Example Ltd.")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id or value, plus transport and auth errors.
+    pub async fn set_faxline_tagline(
+        &self,
+        user_id: &str,
+        faxline_id: &str,
+        request: &AdminValueRequest,
+    ) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("faxline_id", faxline_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/{user_id}/faxlines/{faxline_id}/tagline"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/numbers` — numbers on the account, with documented paging.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AdminPagingQuery;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for number in client.numbers(&AdminPagingQuery::new().with_limit(100)?).await? { println!("{}", number.number); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an invalid page, plus transport and auth errors.
+    pub async fn numbers(&self, query: &AdminPagingQuery) -> Result<Vec<AdminNumber>> {
+        self.get_items(&query.path()).await
+    }
+
+    /// `PUT /v2/numbers/{numberId}` — update number routing or settings.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NumberSettingsUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_number("123", &NumberSettingsUpdate::new().with_endpoint_id("p0")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable number id, plus transport and auth errors.
+    pub async fn update_number(
+        &self,
+        number_id: &str,
+        request: &NumberSettingsUpdate,
+    ) -> Result<()> {
+        validate::path_segment("number_id", number_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/numbers/{number_id}"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `POST /v2/numbers/quickdial` — create a quick-dial number.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::QuickDialRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.create_quick_dial(&QuickDialRequest::new("w0")?.with_number("42")?).await?.number);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn create_quick_dial(&self, request: &QuickDialRequest) -> Result<AdminNumber> {
+        let value = self
+            .send(
+                Method::Post,
+                "/v2/numbers/quickdial",
+                Some(&request.to_json()),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/numbers/quickdial/validation/{quickDialNumber}` — validate a quick-dial number.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{:?}", client.validate_quick_dial("42").await?.raw());
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable quick-dial value, plus transport and auth errors.
+    pub async fn validate_quick_dial(&self, quick_dial_number: &str) -> Result<AdminObject> {
+        validate::path_segment("quick_dial_number", quick_dial_number)?;
+        let value = self
+            .send(
+                Method::Get,
+                &format!("/v2/numbers/quickdial/validation/{quick_dial_number}"),
+                None,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/numbers/quickdial/{numberId}` — delete a quick-dial number.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_quick_dial("abc123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn delete_quick_dial(&self, number_id: &str) -> Result<()> {
+        validate::path_segment("number_id", number_id)?;
+        self.send_unit(
+            Method::Delete,
+            &format!("/v2/numbers/quickdial/{number_id}"),
+            None,
+        )
+        .await
+    }
+
+    /// `PUT /v2/numbers/quickdial/{quickdialId}` — update a quick-dial number.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::QuickDialRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.update_quick_dial("abc123", &QuickDialRequest::new("w0")?.with_number("43")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn update_quick_dial(
+        &self,
+        quickdial_id: &str,
+        request: &QuickDialRequest,
+    ) -> Result<()> {
+        validate::path_segment("quickdial_id", quickdial_id)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/numbers/quickdial/{quickdial_id}"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/{userId}/numbers` — numbers routed to one user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for number in client.user_numbers("w0").await? { println!("{}", number.localized); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id, plus transport and auth errors.
+    pub async fn user_numbers(&self, user_id: &str) -> Result<Vec<AdminNumber>> {
+        validate::path_segment("user_id", user_id)?;
+        self.get_items(&format!("/v2/{user_id}/numbers")).await
+    }
+
+    /// `GET /v2/voicemails` — every voicemail.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for voicemail in client.voicemails().await? { println!("{}", voicemail.alias); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn voicemails(&self) -> Result<Vec<AdminVoicemail>> {
+        self.get_items("/v2/voicemails").await
+    }
+
+    /// `GET /v2/voicemails/{voicemailId}` — one voicemail.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.voicemail("v0").await?.alias);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn voicemail(&self, voicemail_id: &str) -> Result<AdminVoicemail> {
+        validate::path_segment("voicemail_id", voicemail_id)?;
+        let value = self
+            .send(Method::Get, &format!("/v2/voicemails/{voicemail_id}"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/blacklist/incoming` — incoming blacklist entries.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for entry in client.incoming_blacklist().await? { println!("{}", entry.phone_number); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn incoming_blacklist(&self) -> Result<Vec<BlacklistEntry>> {
+        self.get_items("/v2/blacklist/incoming").await
+    }
+
+    /// `POST /v2/blacklist/incoming` — add an incoming blacklist entry.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::BlacklistEntryRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let entry = client.add_incoming_blacklist(&BlacklistEntryRequest::new("492117654321")?).await?;
+    /// println!("{}", entry.phone_number);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an invalid number, plus transport and auth errors.
+    pub async fn add_incoming_blacklist(
+        &self,
+        request: &BlacklistEntryRequest,
+    ) -> Result<BlacklistEntry> {
+        let value = self
+            .send(
+                Method::Post,
+                "/v2/blacklist/incoming",
+                Some(&request.to_json()),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/blacklist/incoming/{phoneNumber}` — remove an incoming blacklist entry.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.remove_incoming_blacklist("+492117654321").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an invalid number, plus transport and auth errors.
+    pub async fn remove_incoming_blacklist(&self, phone_number: &str) -> Result<()> {
+        let digits = validate::phone("phone_number", phone_number)?;
+        self.send_unit(
+            Method::Delete,
+            &format!("/v2/blacklist/incoming/+{digits}"),
+            None,
+        )
+        .await
+    }
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/callrestrictions` — call restrictions by user.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::CallRestrictionsQuery;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for restriction in client.call_restrictions(&CallRestrictionsQuery::new()).await? { println!("{}", restriction.user_id); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn call_restrictions(
+        &self,
+        query: &CallRestrictionsQuery,
+    ) -> Result<Vec<CallRestriction>> {
+        self.get_items(&query.path()).await
+    }
+
+    /// `POST /v2/{userId}/callrestrictions/{restriction}` — toggle a call restriction.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AdminToggle;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_call_restriction("w0", "roaming", &AdminToggle::enabled(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn set_call_restriction(
+        &self,
+        user_id: &str,
+        restriction: &str,
+        request: &AdminToggle,
+    ) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("restriction", restriction)?;
+        self.send_unit(
+            Method::Post,
+            &format!("/v2/{user_id}/callrestrictions/{restriction}"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `GET /v2/restrictions` — evaluated account restrictions.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::RestrictionsQuery;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for restriction in client.restrictions(&RestrictionsQuery::new("w0")?).await? { println!("{}", restriction.restriction); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an invalid query, plus transport and auth errors.
+    pub async fn restrictions(&self, query: &RestrictionsQuery) -> Result<Vec<Restriction>> {
+        self.get_items(&query.path()).await
+    }
+
+    /// `GET /v2/portings` — every porting order.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for porting in client.portings().await? { println!("{}", porting.id); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn portings(&self) -> Result<Vec<Porting>> {
+        self.get_items("/v2/portings").await
+    }
+
+    /// `GET /v2/portings/{portingId}` — one porting order.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.porting(1).await?.status);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for a non-positive id, plus transport and auth errors.
+    pub async fn porting(&self, porting_id: i32) -> Result<Porting> {
+        if porting_id <= 0 {
+            return Err(Error::validation("porting_id", "must be a positive int32"));
+        }
+        let value = self
+            .send(Method::Get, &format!("/v2/portings/{porting_id}"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/portings/{portingId}` — revoke a porting order.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.revoke_porting(1).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for a non-positive id, plus transport and auth errors.
+    pub async fn revoke_porting(&self, porting_id: i32) -> Result<()> {
+        if porting_id <= 0 {
+            return Err(Error::validation("porting_id", "must be a positive int32"));
+        }
+        self.send_unit(Method::Delete, &format!("/v2/portings/{porting_id}"), None)
+            .await
+    }
+
+    /// `GET /v2/autorecordings/greetings` — the account auto-recording greeting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.auto_recording_greeting().await?.alias);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn auto_recording_greeting(&self) -> Result<AutoRecordingGreeting> {
+        let value = self
+            .send(Method::Get, "/v2/autorecordings/greetings", None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `POST /v2/autorecordings/greetings` — upload an auto-recording greeting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AutoRecordingGreetingUpload;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.add_auto_recording_greeting(&AutoRecordingGreetingUpload::new("g.mp3", "RG8u")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid content, plus transport and auth errors.
+    pub async fn add_auto_recording_greeting(
+        &self,
+        request: &AutoRecordingGreetingUpload,
+    ) -> Result<()> {
+        self.send_unit(
+            Method::Post,
+            "/v2/autorecordings/greetings",
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `DELETE /v2/autorecordings/greetings/{greetingId}` — delete a greeting.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_auto_recording_greeting("42").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn delete_auto_recording_greeting(&self, greeting_id: &str) -> Result<()> {
+        validate::path_segment("greeting_id", greeting_id)?;
+        self.send_unit(
+            Method::Delete,
+            &format!("/v2/autorecordings/greetings/{greeting_id}"),
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v2/autorecordings/{extension}/settings` — recording state for an extension.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.auto_recording_settings("p0").await?.active);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable extension, plus transport and auth errors.
+    pub async fn auto_recording_settings(&self, extension: &str) -> Result<AutoRecordingSettings> {
+        validate::path_segment("extension", extension)?;
+        let value = self
+            .send(
+                Method::Get,
+                &format!("/v2/autorecordings/{extension}/settings"),
+                None,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/autorecordings/{extension}/settings` — toggle recording for an extension.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AutoRecordingSettingsUpdate;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_auto_recording_settings("p0", &AutoRecordingSettingsUpdate::new(true)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable extension, plus transport and auth errors.
+    pub async fn set_auto_recording_settings(
+        &self,
+        extension: &str,
+        request: &AutoRecordingSettingsUpdate,
+    ) -> Result<()> {
+        validate::path_segment("extension", extension)?;
+        self.send_unit(
+            Method::Put,
+            &format!("/v2/autorecordings/{extension}/settings"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/{userId}/notifications` — notifications grouped by resource.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.notifications("w0").await?.call.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable user id, plus transport and auth errors.
+    pub async fn notifications(&self, user_id: &str) -> Result<AdminNotifications> {
+        validate::path_segment("user_id", user_id)?;
+        let value = self
+            .send(Method::Get, &format!("/v2/{user_id}/notifications"), None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    async fn post_notification(
+        &self,
+        user_id: &str,
+        suffix: &str,
+        request: &NotificationRequest,
+        kind: NotificationKind,
+    ) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        request.validate_for(kind)?;
+        self.send_unit(
+            Method::Post,
+            &format!("/v2/{user_id}/notifications/{suffix}"),
+            Some(&request.to_json()),
+        )
+        .await
+    }
+
+    /// `POST /v2/{userId}/notifications/call/email` — call notification by email.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::email("a@b.c")?.with_cause("MISSED").with_direction("INCOMING").with_endpoint_id("e0")?;
+    /// client.add_call_email_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_call_email_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(user_id, "call/email", request, NotificationKind::CallEmail)
+            .await
+    }
+
+    /// `POST /v2/{userId}/notifications/call/sms` — call notification by SMS.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::new().with_number("+4915112345678")?.with_cause("MISSED").with_direction("INCOMING").with_endpoint_id("e0")?;
+    /// client.add_call_sms_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_call_sms_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(user_id, "call/sms", request, NotificationKind::CallSms)
+            .await
+    }
+
+    /// `POST /v2/{userId}/notifications/fax/email` — fax notification by email.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::email("a@b.c")?.with_direction("INCOMING").with_faxline_id("f0")?;
+    /// client.add_fax_email_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_fax_email_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(user_id, "fax/email", request, NotificationKind::FaxEmail)
+            .await
+    }
+
+    /// `POST /v2/{userId}/notifications/fax/report` — fax report by email.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::email("a@b.c")?.with_faxline_id("f0")?;
+    /// client.add_fax_report_email_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_fax_report_email_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(user_id, "fax/report", request, NotificationKind::FaxReport)
+            .await
+    }
+
+    /// `POST /v2/{userId}/notifications/fax/sms` — fax notification by SMS.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::new().with_number("+4915112345678")?.with_direction("INCOMING").with_faxline_id("f0")?;
+    /// client.add_fax_sms_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_fax_sms_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(user_id, "fax/sms", request, NotificationKind::FaxSms)
+            .await
+    }
+
+    /// `POST /v2/{userId}/notifications/sms/email` — SMS notification by email.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::email("a@b.c")?.with_endpoint_id("y0")?;
+    /// client.add_sms_email_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_sms_email_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(user_id, "sms/email", request, NotificationKind::SmsEmail)
+            .await
+    }
+
+    /// `POST /v2/{userId}/notifications/voicemail/email` — voicemail notification by email.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::email("a@b.c")?.with_voicemail_id("v0")?;
+    /// client.add_voicemail_email_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_voicemail_email_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(
+            user_id,
+            "voicemail/email",
+            request,
+            NotificationKind::VoicemailEmail,
+        )
+        .await
+    }
+
+    /// `POST /v2/{userId}/notifications/voicemail/sms` — voicemail notification by SMS.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::NotificationRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = NotificationRequest::new().with_number("+4915112345678")?.with_voicemail_id("v0")?;
+    /// client.add_voicemail_sms_notification("w0", &body).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn add_voicemail_sms_notification(
+        &self,
+        user_id: &str,
+        request: &NotificationRequest,
+    ) -> Result<()> {
+        self.post_notification(
+            user_id,
+            "voicemail/sms",
+            request,
+            NotificationKind::VoicemailSms,
+        )
+        .await
+    }
+
+    /// `DELETE /v2/{userId}/notifications/{notificationId}` — delete a notification.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_notification("w0", "abc123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for unusable ids, plus transport and auth errors.
+    pub async fn delete_notification(&self, user_id: &str, notification_id: &str) -> Result<()> {
+        validate::path_segment("user_id", user_id)?;
+        validate::path_segment("notification_id", notification_id)?;
+        self.send_unit(
+            Method::Delete,
+            &format!("/v2/{user_id}/notifications/{notification_id}"),
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v2/settings/sipgateio` — account-level sipgate.io settings.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.account_sipgate_io().await?.incoming_url);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn account_sipgate_io(&self) -> Result<AccountSipgateIo> {
+        let value = self
+            .send(Method::Get, "/v2/settings/sipgateio", None)
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/settings/sipgateio` — update account-level sipgate.io settings.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::AccountSipgateIoSettings;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.set_account_sipgate_io(&AccountSipgateIoSettings::new("https://a/in", "https://a/out")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid settings, plus transport and auth errors.
+    pub async fn set_account_sipgate_io(&self, request: &AccountSipgateIoSettings) -> Result<()> {
+        self.send_unit(
+            Method::Put,
+            "/v2/settings/sipgateio",
+            Some(&request.to_json()),
+        )
+        .await
+    }
+}
+
+impl<T: Transport, A: TokenSource, S: Sleeper> RestClient<T, A, S> {
+    /// `GET /v2/authorization/oauth2/clients` — every OAuth client.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// for oauth in client.oauth_clients().await? { println!("{}", oauth.name); }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Json`] for an unexpected body, plus transport and auth errors.
+    pub async fn oauth_clients(&self) -> Result<Vec<OAuthClientInfo>> {
+        let value = self
+            .send(Method::Get, "/v2/authorization/oauth2/clients", None)
+            .await?;
+        Ok(serde_json::from_value::<OAuthClients>(value)
+            .map_err(Error::json_parse)?
+            .data
+            .unwrap_or_default())
+    }
+
+    /// `POST /v2/authorization/oauth2/clients` — create an OAuth client.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::OAuthClientRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = OAuthClientRequest::new("App", "Example", "https://x/p", "https://x/t")?;
+    /// println!("{}", client.create_oauth_client(&body).await?.client_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for invalid fields, plus transport and auth errors.
+    pub async fn create_oauth_client(
+        &self,
+        request: &OAuthClientRequest,
+    ) -> Result<OAuthClientInfo> {
+        let value = self
+            .send(
+                Method::Post,
+                "/v2/authorization/oauth2/clients",
+                Some(&request.to_json()),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `GET /v2/authorization/oauth2/clients/{clientId}` — one OAuth client.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.oauth_client("c0").await?.name);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn oauth_client(&self, client_id: &str) -> Result<OAuthClientInfo> {
+        validate::path_segment("client_id", client_id)?;
+        let value = self
+            .send(
+                Method::Get,
+                &format!("/v2/authorization/oauth2/clients/{client_id}"),
+                None,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `PUT /v2/authorization/oauth2/clients/{clientId}` — update an OAuth client.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::rest::OAuthClientRequest;
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// let body = OAuthClientRequest::new("App", "Example", "https://x/p", "https://x/t")?;
+    /// println!("{}", client.update_oauth_client("c0", &body).await?.client_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id or body, plus transport and auth errors.
+    pub async fn update_oauth_client(
+        &self,
+        client_id: &str,
+        request: &OAuthClientRequest,
+    ) -> Result<OAuthClientInfo> {
+        validate::path_segment("client_id", client_id)?;
+        let value = self
+            .send(
+                Method::Put,
+                &format!("/v2/authorization/oauth2/clients/{client_id}"),
+                Some(&request.to_json()),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+
+    /// `DELETE /v2/authorization/oauth2/clients/{clientId}` — delete an OAuth client.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// client.delete_oauth_client("c0").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn delete_oauth_client(&self, client_id: &str) -> Result<()> {
+        validate::path_segment("client_id", client_id)?;
+        self.send_unit(
+            Method::Delete,
+            &format!("/v2/authorization/oauth2/clients/{client_id}"),
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v2/authorization/oauth2/clients/{clientId}/gdpr` — client GDPR URLs.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sipgate_flow::{ReqwestTransport, RestClient, StaticToken};
+    /// let client = RestClient::new(ReqwestTransport::new(), StaticToken::new(std::env::var("SIPGATE_TOKEN")?)?);
+    /// println!("{}", client.oauth_client_gdpr("c0").await?.privacy_url);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Errors
+    /// [`Error::Validation`] for an unusable id, plus transport and auth errors.
+    pub async fn oauth_client_gdpr(&self, client_id: &str) -> Result<GdprUrls> {
+        validate::path_segment("client_id", client_id)?;
+        let value = self
+            .send(
+                Method::Get,
+                &format!("/v2/authorization/oauth2/clients/{client_id}/gdpr"),
+                None,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(Error::json_parse)
+    }
+}
