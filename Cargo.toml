@@ -16,7 +16,7 @@ exclude = [".github/**", "deny.toml"]
 all-features = true
 
 [features]
-default = ["http"]
+default = []
 http = ["dep:reqwest", "dep:serde_urlencoded"]
 websocket = []
 

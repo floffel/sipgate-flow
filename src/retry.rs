@@ -31,7 +31,7 @@
 //! decision function (`Send + Sync`, no clock, no `&mut self`, no wall-clock
 //! state), while `backoff::ExponentialBackoff` is stateful and advances through
 //! `&mut self`. Keeping the decision pure is what lets the REST loop and
-//! [`crate::flow::socket::AcceptBackoff`] share one policy while preserving the
+//! `crate::flow::socket::AcceptBackoff` share one policy while preserving the
 //! `max_attempts`, `MIN_RETRY_DELAY`, `max_delay`, and fail-closed `Retry-After`
 //! contract. The local jitter uses the standard library's cheap randomized
 //! hasher seed to produce the documented equal-jitter window `[d/2, d]`; no

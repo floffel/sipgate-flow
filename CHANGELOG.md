@@ -10,6 +10,14 @@ with the pre-1.0 reading described in the README section *Versioning*.
 
 ### Added
 
+* Release-gate completion for 0.1.0: `http` is now opt-in (`default = []`), so
+  webhook-only consumers do not compile `reqwest`, `hyper`, `rustls`, `ring`
+  or a runtime unless they enable the feature. The README documents the
+  feature boundary, the documentation-level contract verification and the
+  caller-owned handling of duplicate Flow deliveries; no delivery-id or
+  fingerprint API is guessed. The two minimal-configuration CI steps remain
+  the maintainer's follow-up because workflows are outside this change.
+
 * The **current v3 AI webhook configuration surface** (#168): `FlowClient` now
   models `GET`/`POST /v3/webhooks`, `PUT`/`DELETE /v3/webhooks/{configId}` and
   the header sub-resource `POST /v3/webhooks/{configId}/headers` and

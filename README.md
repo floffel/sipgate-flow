@@ -16,6 +16,27 @@ Every shape was checked against public documentation and is cited in
 **[`docs/contracts.md`](docs/contracts.md)** — including the ones that could not
 be verified, which are listed there and are never assumed correct in code.
 
+## Feature flags
+
+Nothing is enabled by default. Parsing webhooks, building actions and the
+classic Push API are available in the minimal `default = []` configuration;
+`http` opt-in adds `ReqwestTransport` for the REST and v3 clients, and
+`websocket` adds `FlowSocket`. A webhook-only deployment therefore pulls in no
+`reqwest`, `hyper`, `rustls`, `ring` or runtime stack:
+
+```toml
+sipgate-flow = { version = "0.1", features = ["http"] }
+```
+
+Run `cargo tree --no-default-features` to verify the dependency boundary. The
+two minimal-configuration CI steps are the maintainer's follow-up because this
+change does not edit `.github/workflows/`:
+
+```text
+cargo clippy --all-targets --no-default-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features
+```
+
 ## Answering a webhook
 
 ```rust
@@ -135,6 +156,16 @@ The reference documents **no credential** for this API, so `PushVerifier` does
 not pretend to authenticate a caller — protect the endpoint at the edge (an
 unguessable path, a reverse proxy, an allow-list) and treat every event as
 untrusted input. `docs/contracts.md` §11 records that gap.
+
+### Duplicate deliveries
+
+Flow does not attach a delivery id to an event, does not send an
+`X-Request-ID`, documents no retry policy and signs no request body or HMAC.
+The only inbound credential is the shared `X-API-TOKEN`, which
+`WebhookVerifier` compares in constant time. A duplicate is therefore
+indistinguishable from a legitimate repeated event (for example a caller
+saying "ja" twice), so identity and deduplication belong to the caller. The
+crate does not silently drop repeats or add a fingerprint API for 0.1.0.
 
 ## Calling the REST API
 
@@ -318,9 +349,9 @@ default features, so the quickstarts cannot drift away from the API.
 ## Tests
 
 ```bash
-cargo test                        # 495 tests + 492 doctests (default features)
-cargo test --all-features         # 526 tests + 515 doctests (adds the websocket feature)
-cargo test --no-default-features  # 472 tests + 489 doctests (no reqwest, no websocket)
+cargo test                        # default = []: no HTTP or WebSocket
+cargo test --all-features         # adds HTTP and WebSocket
+cargo test --no-default-features  # no reqwest, no websocket
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo +nightly fuzz run parse_event   # fuzz/ — six named targets

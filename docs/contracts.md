@@ -13,6 +13,13 @@ document**, the realm's discovery document, or sipgate's own published code
 node). Anything I could not confirm is listed under [Unverified](#7-unverified),
 and the code treats it accordingly — never as if it were a fact.
 
+For the 0.1.0 release gate, verification is **documentation-level only**. No
+live sipgate sandbox or account-backed contract pass was performed; every
+positive claim below rests on the cited public source. The only gaps that truly
+need account access are tracked in §7.4 (`datadId` on
+`POST /sessions/voicemail/play`) and §7.5 (client-credentials tokens against
+user-scoped endpoints). No additional live-only gaps are invented here.
+
 ---
 
 ## 0. Three products, all three of which this crate speaks
@@ -548,6 +555,18 @@ invents none: it checks the content type and a bounded body, and the deployment
 owns authentication (an unguessable path, a reverse proxy, a network
 allow-list). A caller who finds a published mechanism should put it in front of
 the handler, not inside this module.
+
+### 7.11 Duplicate Flow webhook deliveries — caller-owned
+
+The Flow webhook documentation asks receivers to handle duplicate events, but
+an event carries no delivery id, there is no `X-Request-ID` or retry-policy
+header, and no signature or HMAC protects the body; the documented inbound
+credential is the shared `X-API-TOKEN` already checked in constant time by
+`WebhookVerifier`. Identical bytes can also be a legitimate repeated input,
+such as a caller saying the same word twice. The crate therefore does not
+guess identity, deduplicate silently or add a fingerprint/window API for
+0.1.0: durable deduplication belongs to the caller and the surrounding
+application.
 
 ## 8. Surfaces not covered yet
 
